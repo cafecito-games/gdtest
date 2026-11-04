@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+unformatted="$(gofmt -l .)"
+if [ -n "$unformatted" ]; then
+	printf '%s\n' "gofmt found unformatted Go files:" "$unformatted" >&2
+	exit 1
+fi
+
+before_tidy="$(git diff -- go.mod go.sum)"
+go mod tidy
+after_tidy="$(git diff -- go.mod go.sum)"
+if [ "$before_tidy" != "$after_tidy" ]; then
+	printf '%s\n' "go mod tidy changed go.mod or go.sum" >&2
+	exit 1
+fi
+
+golangci-lint run ./...
+go test -race ./...
+go vet ./...
+go build ./...
+gdkit lint check --minimum-version 0.10.0 .
+gdkit format check --minimum-version 0.10.0 --diff .
+gdkit arch check --minimum-version 0.10.0 .
+gdkit uid check --minimum-version 0.10.0 .

@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11.4
+          install-only: true
+      - name: Install gdkit
+        run: go install github.com/cafecito-games/gdkit/cmd/gdkit@v0.10.0
+      - name: Run canonical checks
+        run: scripts/check

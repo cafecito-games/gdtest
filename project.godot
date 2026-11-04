@@ -1,0 +1,8 @@
+; Engine configuration for developing and validating the shipped addon.
+config_version=5
+
+[application]
+config/name="gdtest"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"

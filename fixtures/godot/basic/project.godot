@@ -1,0 +1,10 @@
+; Executable gdtest end-to-end fixture.
+config_version=5
+
+[application]
+
+config/name="gdtest basic fixture"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"

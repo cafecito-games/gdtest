@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "$(uname -s):$(uname -m)" in
+	Darwin:arm64) binary="macos-arm64/gdtest" ;;
+	Darwin:x86_64) binary="macos-x86_64/gdtest" ;;
+	Linux:aarch64 | Linux:arm64) binary="linux-arm64/gdtest" ;;
+	Linux:x86_64 | Linux:amd64) binary="linux-x86_64/gdtest" ;;
+	*) echo "gdtest: unsupported host $(uname -s)/$(uname -m)" >&2; exit 2 ;;
+esac
+exec "$script_dir/bin/$binary" "$@"

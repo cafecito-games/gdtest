@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "source_roots": ["addons/gdtest", "fixtures"],
+  "exclude": [".git/**", ".godot/**", ".gdkit/**", "fixtures/**/invalid/**"],
+  "line_width": 100,
+  "tab_width": 4,
+  "indent": "tabs",
+  "quote_style": "double",
+  "comment_spacing": "normalize",
+  "operators": "words",
+  "numbers": "normalize",
+  "trailing_commas": "when-broken",
+  "blank_lines": {"top_level": 2, "nested": 1}
+}

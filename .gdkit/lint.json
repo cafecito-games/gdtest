@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "source_roots": ["addons/gdtest", "fixtures"],
+  "exclude": [".git/**", ".godot/**", ".gdkit/**", "fixtures/**/invalid/**"],
+  "godot_version": "4.7",
+  "enable_new_rules": true,
+  "max-public-methods": 40,
+  "enable": [
+    "require-return-type",
+    "require-argument-type",
+    "require-variable-type",
+    "require-typed-collection",
+    "require-signal-argument-type",
+    "require-typed-loop-variable",
+    "inconsistent-return-statements",
+    "unused-private-member"
+  ],
+  "missing-docstring": ["class", "signal", "func", "var", "const", "enum"]
+}

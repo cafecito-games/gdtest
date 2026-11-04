@@ -1,0 +1,5 @@
+/.godot/
+/build/
+/dist/
+/.gpm-state.toml
+*.log
