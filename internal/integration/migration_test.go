@@ -55,5 +55,5 @@ func TestMigratedVestFixtureExecutesInGodot(t *testing.T) {
 		"run", "--no-daemon", "--project", root, "tests/migrated.test.gd",
 	}, app.IO{Out: &output, Err: &diagnostics})
 	require.Equal(t, app.ExitOK, code, "output:\n%s\ndiagnostics:\n%s", output.String(), diagnostics.String())
-	assert.Contains(t, output.String(), "2 passed")
+	assert.Contains(t, output.String(), "3 passed")
 }

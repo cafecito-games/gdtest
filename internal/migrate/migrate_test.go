@@ -23,15 +23,17 @@ func TestCommonVestFixtureMigratesToGoldenAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, string(want), string(result.Output))
 	assert.Equal(t, []string{
 		"rewrite.base-class",
+		"rewrite.utility",
 		"rewrite.hook-type",
 		"rewrite.hook-type", "rewrite.utility",
 		"rewrite.parameter-provider",
 		"rewrite.utility",
 		"rewrite.fluent-assertion",
+		"rewrite.inherited-name-conflict",
 	}, findingCodes(result.Findings))
 	plan, err := discovery.Parse("tests/common.test.gd", result.Output)
 	require.NoError(t, err, "migrated output must satisfy gdtest's static provider contract")
-	assert.Len(t, plan.Cases, 1)
+	assert.Len(t, plan.Cases, 2)
 
 	again, err := Transform("tests/common.test.gd", result.Output)
 	require.NoError(t, err)
@@ -92,19 +94,66 @@ func test_conflict() -> void:
 
 	assert.Equal(t, []string{
 		"rewrite.base-class",
-		"unsupported.inherited-name-conflict",
-		"unsupported.inherited-name-conflict",
-		"unsupported.inherited-name-conflict",
-		"unsupported.inherited-name-conflict",
-		"unsupported.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
 	}, findingCodes(result.Findings))
+	assert.Equal(t, 5, strings.Count(string(result.Output), `@warning_ignore("shadowed_variable_base_class")`))
 	for _, finding := range result.Findings[1:] {
-		assert.Equal(t, Warning, finding.Severity)
-		assert.Contains(t, finding.Message, "shadows the inherited gdtest API")
+		assert.Equal(t, Info, finding.Severity)
+		assert.True(t, finding.Planned)
+		assert.Contains(t, finding.Message, "suppress inherited gdtest API shadowing")
 	}
 }
 
-func TestVestUtilitiesInNestedClassesRemainForManualMigration(t *testing.T) {
+func TestMigrationLeavesActualInheritedMethodAndMemberOverridesForReview(t *testing.T) {
+	t.Parallel()
+
+	source := []byte(`extends VestTest
+
+var message: String = "member"
+
+func reference() -> bool:
+	return false
+`)
+	result, err := Transform("tests/overrides.test.gd", source)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(result.Output), `@warning_ignore("shadowed_variable_base_class")`)
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.inherited-name-conflict",
+		"unsupported.inherited-name-conflict",
+	}, findingCodes(result.Findings))
+	assert.Equal(t, Warning, result.Findings[1].Severity)
+	assert.Equal(t, Warning, result.Findings[2].Severity)
+}
+
+func TestMigrationIgnoresInheritedNamesInsideNestedClasses(t *testing.T) {
+	t.Parallel()
+
+	source := []byte(`extends VestTest
+
+class Spy extends RefCounted:
+	func emit_failed(message: String) -> void:
+		var reference: Variant = message
+
+func test_conflict() -> void:
+	var message := "root"
+`)
+	result, err := Transform("tests/nested-names.test.gd", source)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"rewrite.inherited-name-conflict",
+	}, findingCodes(result.Findings))
+	assert.Equal(t, 8, result.Findings[1].Line)
+}
+
+func TestVestTreeAccessInNestedClassesUsesTheEngineSceneTree(t *testing.T) {
 	t.Parallel()
 
 	source := []byte(`extends VestTest
@@ -119,11 +168,11 @@ func helper() -> void:
 	result, err := Transform("tests/nested.test.gd", source)
 	require.NoError(t, err)
 
-	assert.Contains(t, string(result.Output), "Vest.get_tree()")
+	assert.Contains(t, string(result.Output), "(Engine.get_main_loop() as SceneTree).root.add_child")
 	assert.Contains(t, string(result.Output), "await sleep(0.0)")
 	assert.Equal(t, []string{
 		"rewrite.base-class",
-		"unsupported.utility-context",
+		"rewrite.utility",
 		"rewrite.utility",
 	}, findingCodes(result.Findings))
 }

@@ -2,6 +2,7 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -227,9 +228,41 @@ func (t *transformer) inheritedAPINameConflicts(tree *ast.File) {
 	if !t.migratingVest {
 		return
 	}
-	report := func(name string, span token.Span) {
+	rootFunctions := make([]*ast.FunctionDeclaration, 0)
+	for _, statement := range tree.Statements {
+		if function, ok := statement.(*ast.FunctionDeclaration); ok {
+			rootFunctions = append(rootFunctions, function)
+		}
+	}
+	parents := parentNodes(tree)
+	suppressed := make(map[ast.Node]bool)
+	report := func(name string, node ast.Node, span token.Span, canSuppress bool) {
 		if _, conflicts := gdtestInheritedNames[name]; !conflicts {
 			return
+		}
+		if canSuppress {
+			owner := containingFunction(rootFunctions, span)
+			if owner != nil {
+				target := containingStatement(node, parents)
+				if target != nil && !suppressed[target] {
+					start := target.Span().Start.Offset
+					lineStart := bytes.LastIndexByte(t.source[:start], '\n') + 1
+					indent := string(t.source[lineStart:start])
+					suppressed[target] = t.addEdit(edit{
+						start: start,
+						end:   start,
+						text:  "@warning_ignore(\"shadowed_variable_base_class\")\n" + indent,
+					})
+				}
+				if target != nil && suppressed[target] {
+					t.plan(
+						span,
+						"rewrite.inherited-name-conflict",
+						fmt.Sprintf("suppress inherited gdtest API shadowing for %q", name),
+					)
+					return
+				}
+			}
 		}
 		t.manualOnce(
 			span,
@@ -239,22 +272,58 @@ func (t *transformer) inheritedAPINameConflicts(tree *ast.File) {
 	}
 	ast.Inspect(tree, func(node ast.Node) bool {
 		switch value := node.(type) {
+		case *ast.ClassDeclaration:
+			// An inner class has its own base type and does not inherit the
+			// enclosing script's GDTest API. Descending would report harmless
+			// parameters and locals as base-class shadowing conflicts.
+			return false
 		case *ast.FunctionDeclaration:
-			report(value.Name, value.NameSpan)
+			report(value.Name, value, value.NameSpan, false)
 			for _, parameter := range value.Parameters {
-				report(parameter.Name, parameter.NameSpan)
+				report(parameter.Name, value, parameter.NameSpan, true)
 			}
 		case *ast.LambdaExpression:
 			for _, parameter := range value.Parameters {
-				report(parameter.Name, parameter.NameSpan)
+				report(parameter.Name, value, parameter.NameSpan, true)
 			}
 		case *ast.VariableDeclaration:
-			report(value.Name, value.NameSpan)
+			report(value.Name, value, value.NameSpan, true)
 		case *ast.ForStatement:
-			report(value.Variable, value.VariableSpan)
+			report(value.Variable, value, value.VariableSpan, true)
 		}
 		return true
 	})
+}
+
+func parentNodes(root ast.Node) map[ast.Node]ast.Node {
+	parents := make(map[ast.Node]ast.Node)
+	var visit func(ast.Node)
+	visit = func(node ast.Node) {
+		for _, child := range ast.Children(node) {
+			parents[child] = node
+			visit(child)
+		}
+	}
+	visit(root)
+	return parents
+}
+
+func containingStatement(node ast.Node, parents map[ast.Node]ast.Node) ast.Node {
+	for current := node; current != nil; current = parents[current] {
+		if _, ok := current.(ast.Statement); ok {
+			return current
+		}
+	}
+	return nil
+}
+
+func containingFunction(functions []*ast.FunctionDeclaration, span token.Span) *ast.FunctionDeclaration {
+	for _, function := range functions {
+		if spanContains(function.Span(), span) {
+			return function
+		}
+	}
+	return nil
 }
 
 func (t *transformer) hookTypes(tree *ast.File) {
@@ -486,6 +555,13 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 					case "get_tree", "sleep", "until":
 						if t.instanceContextIsSafe(value.Span()) {
 							t.rewrite(member.Span(), member.Property, "rewrite.utility", "remove Vest singleton qualifier")
+						} else if member.Property == "get_tree" {
+							t.rewrite(
+								value.Span(),
+								"(Engine.get_main_loop() as SceneTree)",
+								"rewrite.utility",
+								"replace nested Vest tree access with the active engine SceneTree",
+							)
 						} else {
 							t.manualOnce(
 								value.Span(),
