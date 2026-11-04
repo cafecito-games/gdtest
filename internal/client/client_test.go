@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -123,6 +124,29 @@ func TestExecutableStarterPreparesNamespaceBeforeOpeningLog(t *testing.T) {
 	err = ExecutableStarter("/definitely/missing/gdtest")(context.Background(), namespace)
 	require.Error(t, err)
 	require.DirExists(t, namespace.Root)
+}
+
+func TestCallRejectsOversizedRequestBeforeStartingDaemon(t *testing.T) {
+	t.Parallel()
+
+	namespace, err := daemon.NewNamespace(shortTempDir(t), daemon.ProtocolVersion, "bounded-build")
+	require.NoError(t, err)
+	var starts atomic.Int32
+	client := Client{
+		Namespace: namespace,
+		MaxSize:   128,
+		Starter: func(context.Context, daemon.Namespace) error {
+			starts.Add(1)
+			return nil
+		},
+	}
+
+	_, err = client.Call(context.Background(), "test.large", map[string]string{
+		"value": strings.Repeat("x", 256),
+	}, nil)
+
+	require.ErrorContains(t, err, "exceeds the 128-byte protocol limit")
+	assert.Zero(t, starts.Load())
 }
 
 func shortTempDir(t *testing.T) string {

@@ -262,6 +262,39 @@ func TestGodotOutcomeMessagesCrossTheProtocolBoundary(t *testing.T) {
 	assert.Equal(t, "outcomes", outputEvents[0].RunID)
 }
 
+func TestGodotDiscoveryReportsNonInstantiableScriptAtItsSource(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot script-load test skipped: godot is not on PATH")
+	}
+	root := copyGodotProject(t, repositoryRoot(t))
+	path := filepath.Join(root, "tests", "compile_error.test.gd")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte(
+		"extends GDTest\n\nfunc test_bad() -> void:\n\tvar value: MissingType\n",
+	), 0o600))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "script-load-error", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	manifest, err := process.Discover(ctx, model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "script-load-error", Generation: 1,
+		ContentFingerprint: "script-load-content",
+		Files:              []model.FilePlan{{Path: "tests/compile_error.test.gd"}},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, manifest.Files, 1)
+	assert.Equal(t, "tests/compile_error.test.gd", manifest.Files[0].Path)
+	require.Len(t, manifest.Errors, 1)
+	assert.Equal(t, "worker.script_load", manifest.Errors[0].Code)
+	require.NotNil(t, manifest.Errors[0].Location)
+	assert.Equal(t, "tests/compile_error.test.gd", manifest.Errors[0].Location.File)
+}
+
 func run(
 	t *testing.T,
 	ctx context.Context,

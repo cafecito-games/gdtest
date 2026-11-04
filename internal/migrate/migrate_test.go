@@ -72,6 +72,62 @@ func test_message() -> void:
 	}, findingCodes(result.Findings))
 }
 
+func TestMigrationReportsNamesThatConflictWithInheritedGDTestAPI(t *testing.T) {
+	t.Parallel()
+
+	source := []byte(`extends VestTest
+
+func helper(message: String) -> void:
+	var time: float = 0.0
+	var harmless: String = message
+
+func test_conflict() -> void:
+	var fail: bool = false
+	var callback := func(skip: bool) -> void: pass
+	for message: String in [] as Array[String]:
+		pass
+`)
+	result, err := Transform("tests/names.test.gd", source)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.inherited-name-conflict",
+		"unsupported.inherited-name-conflict",
+		"unsupported.inherited-name-conflict",
+		"unsupported.inherited-name-conflict",
+		"unsupported.inherited-name-conflict",
+	}, findingCodes(result.Findings))
+	for _, finding := range result.Findings[1:] {
+		assert.Equal(t, Warning, finding.Severity)
+		assert.Contains(t, finding.Message, "shadows the inherited gdtest API")
+	}
+}
+
+func TestVestUtilitiesInNestedClassesRemainForManualMigration(t *testing.T) {
+	t.Parallel()
+
+	source := []byte(`extends VestTest
+
+class Rig extends RefCounted:
+	func attach() -> void:
+		Vest.get_tree().root.add_child(Node.new())
+
+func helper() -> void:
+	await Vest.sleep(0.0)
+`)
+	result, err := Transform("tests/nested.test.gd", source)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(result.Output), "Vest.get_tree()")
+	assert.Contains(t, string(result.Output), "await sleep(0.0)")
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.utility-context",
+		"rewrite.utility",
+	}, findingCodes(result.Findings))
+}
+
 func TestContextualFluentAssertionsProduceManualFindingsWithoutRewrites(t *testing.T) {
 	t.Parallel()
 
@@ -128,6 +184,51 @@ func test_second(value: int, _params: String = "mapped_rows") -> void:
 	plan, err := discovery.Parse("tests/providers.test.gd", result.Output)
 	require.NoError(t, err, "all generated providers must satisfy static discovery")
 	assert.Len(t, plan.Cases, 2)
+}
+
+func TestVestProviderInFirstDefaultArgumentKeepsTheDataParameter(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func _slug_forms() -> Array[Variant]:
+	return [["dire-wolf", "Dire Wolf"], ["", ""]]
+
+func test_template_id_name(template_id: String = "_slug_forms", expected: String = "") -> void:
+	expect_equal(template_id.capitalize(), expected)
+`)
+	result, err := Transform("tests/first-default-provider.test.gd", source)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(result.Output), `func test_template_id_name(template_id: String, expected: String = "") -> void:`)
+	assert.Contains(t, string(result.Output), "func test_template_id_name__cases() -> Array[Variant]:")
+	assert.Contains(t, string(result.Output), "\treturn _slug_forms()")
+	assert.NotContains(t, string(result.Output), `template_id: String = "_slug_forms"`)
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"rewrite.parameter-provider",
+	}, findingCodes(result.Findings))
+
+	plan, err := discovery.Parse("tests/first-default-provider.test.gd", result.Output)
+	require.NoError(t, err)
+	assert.Len(t, plan.Cases, 1)
+}
+
+func TestMigrationDoesNotInterpretGDTestDefaultsAsVestProviders(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends GDTest
+
+func rows() -> Array[Variant]:
+	return [["rows"]]
+
+func test_label(value: String = "rows") -> void:
+	expect_equal(value, "rows")
+`)
+	result, err := Transform("tests/already-gdtest.test.gd", source)
+	require.NoError(t, err)
+
+	assert.False(t, result.Changed)
+	assert.Equal(t, source, result.Output)
+	assert.Empty(t, result.Findings)
 }
 
 func TestUnsupportedVestFeaturesRemainIntactWithExactFindings(t *testing.T) {

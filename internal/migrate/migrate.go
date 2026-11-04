@@ -129,13 +129,17 @@ func Transform(path string, source []byte) (FileResult, error) {
 	if err != nil {
 		return FileResult{}, fmt.Errorf("parse migration source %s: %w", path, err)
 	}
-	state := transformer{path: path, source: source, functions: make(map[string]*ast.FunctionDeclaration)}
+	state := transformer{
+		path: path, source: source,
+		functions: make(map[string]*ast.FunctionDeclaration), unsupported: make(map[string]struct{}),
+	}
 	for _, statement := range tree.Statements {
 		if function, ok := statement.(*ast.FunctionDeclaration); ok {
 			state.functions[function.Name] = function
 		}
 	}
 	state.directives(tree)
+	state.inheritedAPINameConflicts(tree)
 	state.hookTypes(tree)
 	state.parameterProviders(tree)
 	state.fluentAssertions(tree)
@@ -175,13 +179,14 @@ type edit struct {
 }
 
 type transformer struct {
-	path        string
-	source      []byte
-	functions   map[string]*ast.FunctionDeclaration
-	edits       []edit
-	findings    []Finding
-	wrappers    []string
-	unsupported map[string]struct{}
+	path          string
+	source        []byte
+	functions     map[string]*ast.FunctionDeclaration
+	edits         []edit
+	findings      []Finding
+	wrappers      []string
+	unsupported   map[string]struct{}
+	migratingVest bool
 }
 
 func (t *transformer) directives(tree *ast.File) {
@@ -192,6 +197,7 @@ func (t *transformer) directives(tree *ast.File) {
 		}
 		identifier, ok := directive.Value.(*ast.Identifier)
 		if ok && identifier.Name == "VestTest" {
+			t.migratingVest = true
 			t.rewrite(identifier.Span(), "GDTest", "rewrite.base-class", "replace VestTest base class with GDTest")
 			continue
 		}
@@ -203,6 +209,52 @@ func (t *transformer) directives(tree *ast.File) {
 			t.manual(literal.Span(), "unsupported.mixin", "generated Vest mixin inheritance requires manual migration")
 		}
 	}
+}
+
+var gdtestInheritedNames = map[string]struct{}{
+	"define": {}, "define_only": {}, "test": {}, "test_only": {}, "test_each": {}, "test_each_only": {},
+	"expect": {}, "expect_not": {}, "expect_true": {}, "expect_false": {}, "expect_equal": {},
+	"expect_not_equal": {}, "expect_same": {}, "expect_not_same": {}, "expect_approx": {},
+	"expect_not_approx": {}, "expect_null": {}, "expect_not_null": {}, "expect_empty": {},
+	"expect_not_empty": {}, "expect_contains": {}, "expect_does_not_contain": {},
+	"ok": {}, "fail": {}, "skip": {}, "todo": {}, "message": {}, "get_tree": {}, "sleep": {},
+	"until": {}, "time": {},
+	// GDTest is RefCounted, unlike VestTest's Object base.
+	"reference": {}, "unreference": {}, "get_reference_count": {},
+}
+
+func (t *transformer) inheritedAPINameConflicts(tree *ast.File) {
+	if !t.migratingVest {
+		return
+	}
+	report := func(name string, span token.Span) {
+		if _, conflicts := gdtestInheritedNames[name]; !conflicts {
+			return
+		}
+		t.manualOnce(
+			span,
+			"unsupported.inherited-name-conflict",
+			fmt.Sprintf("%q shadows the inherited gdtest API and must be renamed or warning-suppressed", name),
+		)
+	}
+	ast.Inspect(tree, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.FunctionDeclaration:
+			report(value.Name, value.NameSpan)
+			for _, parameter := range value.Parameters {
+				report(parameter.Name, parameter.NameSpan)
+			}
+		case *ast.LambdaExpression:
+			for _, parameter := range value.Parameters {
+				report(parameter.Name, parameter.NameSpan)
+			}
+		case *ast.VariableDeclaration:
+			report(value.Name, value.NameSpan)
+		case *ast.ForStatement:
+			report(value.Variable, value.VariableSpan)
+		}
+		return true
+	})
 }
 
 func (t *transformer) hookTypes(tree *ast.File) {
@@ -229,15 +281,28 @@ func (t *transformer) hookTypes(tree *ast.File) {
 }
 
 func (t *transformer) parameterProviders(tree *ast.File) {
+	if !t.migratingVest {
+		return
+	}
 	usedTargets := make(map[string]bool)
 	for _, statement := range tree.Statements {
 		function, ok := statement.(*ast.FunctionDeclaration)
 		if !ok || !strings.HasPrefix(function.Name, "test_") || len(function.Parameters) == 0 {
 			continue
 		}
-		parameter := function.Parameters[len(function.Parameters)-1]
+		providerIndex := -1
+		for index, candidate := range function.Parameters {
+			if candidate.Default != nil {
+				providerIndex = index
+				break
+			}
+		}
+		if providerIndex < 0 {
+			continue
+		}
+		parameter := function.Parameters[providerIndex]
 		literal, ok := parameter.Default.(*ast.Literal)
-		if !ok || literal.Kind != ast.StringLiteral || !strings.HasPrefix(parameter.Name, "_") {
+		if !ok || literal.Kind != ast.StringLiteral {
 			continue
 		}
 		provider, ok := stringLiteral(literal)
@@ -255,17 +320,12 @@ func (t *transformer) parameterProviders(tree *ast.File) {
 			t.manual(parameter.Span(), "unsupported.parameter-provider", fmt.Sprintf("target provider %q already exists", target))
 			continue
 		}
-		start := parameter.Span().Start.Offset
-		if len(function.Parameters) > 1 {
-			previous := function.Parameters[len(function.Parameters)-2].Span().End.Offset
-			comma := strings.LastIndexByte(string(t.source[previous:start]), ',')
-			if comma < 0 {
-				t.manual(parameter.Span(), "unsupported.parameter-provider", "cannot locate provider parameter separator")
-				continue
-			}
-			start = previous + comma
+		providerEdit, editOK := t.parameterProviderEdit(function, providerIndex)
+		if !editOK {
+			t.manual(parameter.Span(), "unsupported.parameter-provider", "cannot locate provider default argument")
+			continue
 		}
-		if !t.addEdit(edit{start: start, end: parameter.Span().End.Offset}) {
+		if !t.addEdit(providerEdit) {
 			continue
 		}
 		t.plan(parameter.Span(), "rewrite.parameter-provider", fmt.Sprintf("use %s as the parameter provider", target))
@@ -281,6 +341,41 @@ func (t *transformer) parameterProviders(tree *ast.File) {
 			usedTargets[target] = true
 		}
 	}
+}
+
+func (t *transformer) parameterProviderEdit(function *ast.FunctionDeclaration, index int) (edit, bool) {
+	parameter := function.Parameters[index]
+	if strings.HasPrefix(parameter.Name, "_") {
+		if index != len(function.Parameters)-1 {
+			return edit{}, false
+		}
+		start := parameter.Span().Start.Offset
+		if index > 0 {
+			previous := function.Parameters[index-1].Span().End.Offset
+			comma := strings.LastIndexByte(string(t.source[previous:start]), ',')
+			if comma < 0 {
+				return edit{}, false
+			}
+			start = previous + comma
+		}
+		return edit{start: start, end: parameter.Span().End.Offset}, true
+	}
+
+	defaultSpan := parameter.Default.Span()
+	parameterStart := parameter.Span().Start.Offset
+	defaultStart := defaultSpan.Start.Offset
+	if parameterStart < 0 || defaultStart > len(t.source) || parameterStart >= defaultStart {
+		return edit{}, false
+	}
+	equals := strings.LastIndexByte(string(t.source[parameterStart:defaultStart]), '=')
+	if equals < 0 {
+		return edit{}, false
+	}
+	start := parameterStart + equals
+	for start > parameterStart && (t.source[start-1] == ' ' || t.source[start-1] == '\t') {
+		start--
+	}
+	return edit{start: start, end: defaultSpan.End.Offset}, true
 }
 
 func providerReturnTypeAllowed(value string) bool {
@@ -389,7 +484,15 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 							)
 						}
 					case "get_tree", "sleep", "until":
-						t.rewrite(member.Span(), member.Property, "rewrite.utility", "remove Vest singleton qualifier")
+						if t.instanceContextIsSafe(value.Span()) {
+							t.rewrite(member.Span(), member.Property, "rewrite.utility", "remove Vest singleton qualifier")
+						} else {
+							t.manualOnce(
+								value.Span(),
+								"unsupported.utility-context",
+								"Vest utility calls outside the GDTest instance require manual migration",
+							)
+						}
 					case "timeout":
 						t.manualOnce(value.Span(), "unsupported.timeout", "Vest.timeout has no gdtest v1 equivalent")
 					}
@@ -440,6 +543,15 @@ func (t *transformer) messageContextIsSafe(span token.Span) bool {
 		return strings.HasPrefix(function.Name, "test_") ||
 			function.Name == "before_case" || function.Name == "after_case" ||
 			function.Name == "before_each" || function.Name == "after_each"
+	}
+	return false
+}
+
+func (t *transformer) instanceContextIsSafe(span token.Span) bool {
+	for _, function := range t.functions {
+		if spanContains(function.Span(), span) {
+			return true
+		}
 	}
 	return false
 }

@@ -76,6 +76,18 @@ func TestRunHelpDocumentsIsolationPolicies(t *testing.T) {
 	assert.Contains(t, stdout.String(), "0 uses automatic concurrency")
 }
 
+func TestListHelpDocumentsForegroundDiscovery(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"list", "--help"}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitOK, exitCode)
+	assert.Empty(t, stderr.String())
+	assert.Contains(t, stdout.String(), "--no-daemon")
+}
+
 func TestRunRejectsNegativeJobsBeforeProjectAccess(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer

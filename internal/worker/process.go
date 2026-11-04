@@ -300,7 +300,7 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 }
 
 func bootstrapProject(ctx context.Context, options ProcessOptions, project string) error {
-	arguments := []string{"--headless", "--editor", "--path", project, "--quit-after", "2"}
+	arguments := []string{"--headless", "--editor", "--path", project, "--quit"}
 	var command *exec.Cmd
 	if options.commandFactory != nil {
 		command = options.commandFactory(arguments)

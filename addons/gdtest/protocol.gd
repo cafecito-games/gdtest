@@ -198,7 +198,7 @@ static func discovery_manifest(
 	var files: Array[Variant] = []
 	var errors: Array[Variant] = []
 	for prepared_value: Variant in prepared_files:
-		var prepared: Dictionary[String, Variant] = _string_dictionary(prepared_value)
+		var prepared: Dictionary[String, Variant] = string_dictionary(prepared_value)
 		var root_value: Variant = prepared.get("root_info")
 		var path: String = str(prepared.get("path", "")).trim_prefix("res://")
 		var name: String = path
@@ -210,7 +210,7 @@ static func discovery_manifest(
 		var cases: Array[Variant] = []
 		for case_value: Variant in prepared.get("cases", []):
 			if case_value is Dictionary:
-				cases.append(_discovery_case(_string_dictionary(case_value), path))
+				cases.append(_discovery_case(string_dictionary(case_value), path))
 		files.append({ "path": path, "name": name, "line": line, "cases": cases })
 		for error_value: Variant in prepared.get("errors", []):
 			if error_value is Dictionary:
@@ -226,8 +226,8 @@ static func discovery_manifest(
 
 ## Normalizes one runtime discovery diagnostic while retaining its location.
 static func discovery_error(value: Variant, default_file: String) -> Dictionary[String, Variant]:
-	var diagnostic: Dictionary[String, Variant] = _string_dictionary(value)
-	var location: Dictionary[String, Variant] = _string_dictionary(diagnostic.get("location", {}))
+	var diagnostic: Dictionary[String, Variant] = string_dictionary(value)
+	var location: Dictionary[String, Variant] = string_dictionary(diagnostic.get("location", {}))
 	if str(location.get("file", "")).is_empty():
 		location["file"] = default_file
 	if not location.has("line"):
@@ -326,12 +326,13 @@ static func _serialized_discovery_error(
 		default_file: String
 ) -> Dictionary[String, Variant]:
 	var normalized: Dictionary[String, Variant] = discovery_error(diagnostic, default_file)
-	var location: Dictionary[String, Variant] = _string_dictionary(normalized["location"])
+	var location: Dictionary[String, Variant] = string_dictionary(normalized["location"])
 	location["file"] = str(location.get("file", default_file)).trim_prefix("res://")
 	return { "code": normalized["code"], "message": normalized["message"], "location": location }
 
 
-static func _string_dictionary(value: Variant) -> Dictionary[String, Variant]:
+## Converts an untyped Dictionary Variant into the protocol's string-keyed form.
+static func string_dictionary(value: Variant) -> Dictionary[String, Variant]:
 	var result: Dictionary[String, Variant] = {}
 	if not value is Dictionary:
 		return result

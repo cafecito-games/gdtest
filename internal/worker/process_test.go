@@ -123,6 +123,8 @@ func TestStartBootstrapsOnceThenRetriesBeforeReturningWorker(t *testing.T) {
 		commandFactory: func(arguments []string) *exec.Cmd {
 			if containsArgument(arguments, "--editor") {
 				bootstrapAttempts++
+				assert.Contains(t, arguments, "--quit")
+				assert.NotContains(t, arguments, "--quit-after")
 				return startupTestCommand("bootstrap-success", arguments)
 			}
 			workerAttempts++

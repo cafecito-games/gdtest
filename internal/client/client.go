@@ -30,6 +30,29 @@ type Client struct {
 
 // Call streams events and returns the exactly one terminal response payload.
 func (c Client) Call(ctx context.Context, method string, payload any, onEvent func(json.RawMessage) error) (json.RawMessage, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode daemon request: %w", err)
+	}
+	requestID, err := requestID()
+	if err != nil {
+		return nil, err
+	}
+	request := daemon.Message{
+		Version: daemon.ProtocolVersion, Type: daemon.MessageRequest,
+		RequestID: requestID, Method: method, Payload: data,
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("encode daemon request envelope: %w", err)
+	}
+	maxSize := c.MaxSize
+	if maxSize <= 0 {
+		maxSize = protocol.DefaultMaxMessageSize
+	}
+	if len(encoded)+1 > maxSize {
+		return nil, fmt.Errorf("daemon request for %s is %d bytes and exceeds the %d-byte protocol limit", method, len(encoded)+1, maxSize)
+	}
 	if err := c.Ensure(ctx); err != nil {
 		return nil, err
 	}
@@ -40,20 +63,9 @@ func (c Client) Call(ctx context.Context, method string, payload any, onEvent fu
 	defer func() { _ = connection.Close() }()
 	stopCancellation := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stopCancellation()
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("encode daemon request: %w", err)
-	}
-	requestID, err := requestID()
-	if err != nil {
-		return nil, err
-	}
 	encoder := protocol.NewEncoder(connection)
 	decoder := protocol.NewDecoder(connection, c.MaxSize)
-	if err := encoder.Encode(daemon.Message{
-		Version: daemon.ProtocolVersion, Type: daemon.MessageRequest,
-		RequestID: requestID, Method: method, Payload: data,
-	}); err != nil {
+	if err := encoder.Encode(request); err != nil {
 		return nil, fmt.Errorf("send daemon request: %w", err)
 	}
 	for {

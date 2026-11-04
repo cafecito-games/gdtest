@@ -106,6 +106,7 @@ type listOptions struct {
 	project    string
 	godot      string
 	allowEmpty bool
+	noDaemon   bool
 	name       string
 	onlyMode   string
 	selectors  []string
@@ -212,6 +213,7 @@ func newListCommand(streams IO) *cobra.Command {
 	addProjectFlag(command, &options.project)
 	command.Flags().StringVar(&options.godot, "godot", "", "Godot executable (overrides project and user configuration)")
 	command.Flags().BoolVar(&options.allowEmpty, "allow-empty", false, "allow selectors that match no tests")
+	command.Flags().BoolVar(&options.noDaemon, "no-daemon", false, "run discovery in the foreground")
 	command.Flags().StringVar(&options.name, "name", "", "select tests whose name contains this text")
 	command.Flags().StringVar(&options.onlyMode, "only", "", "focus policy: auto, ignore, require, or forbid")
 	return command
@@ -750,7 +752,7 @@ func listTests(ctx context.Context, options listOptions, streams IO) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := completeManifest(ctx, root, projectConfig, discoveryManifest, sessionID, false, streams)
+	manifest, err := completeManifest(ctx, root, projectConfig, discoveryManifest, sessionID, options.noDaemon, streams)
 	if err != nil {
 		return err
 	}

@@ -30,6 +30,16 @@ func TestDecoderRejectsOversizedLine(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeds")
 }
 
+func TestDefaultDecoderAcceptsLargeProjectManifest(t *testing.T) {
+	t.Parallel()
+
+	input := strings.NewReader(`{"payload":"` + strings.Repeat("x", 2<<20) + `"}` + "\n")
+	var value map[string]string
+
+	require.NoError(t, NewDecoder(input, DefaultMaxMessageSize).Decode(&value))
+	assert.Len(t, value["payload"], 2<<20)
+}
+
 func TestDecoderRejectsExcessiveNestingButIgnoresDelimitersInStrings(t *testing.T) {
 	t.Parallel()
 
