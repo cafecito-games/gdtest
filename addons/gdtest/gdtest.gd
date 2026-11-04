@@ -36,7 +36,7 @@ var _gdtest_outcome_data: Array[Variant] = []
 var _gdtest_dynamic_cases: Array[Variant] = []
 var _gdtest_dynamic_suites: Array[Variant] = []
 var _gdtest_suite_stack: Array[GDTestSuiteInfo] = []
-var _gdtest_registration_awaitables: Array[Signal] = []
+var _gdtest_pending_registrations: int = 0
 var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
 
@@ -47,6 +47,9 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only)
 	if name.is_empty():
 		_record_discovery_error("define requires a non-empty name")
+		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only)
+	if not _valid_registration_callback(callback, "define", 0):
+		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only)
 	var location: Dictionary[String, Variant] = _user_location()
 	var parent_id: String = (
 			_gdtest_suite_stack.back().id if not _gdtest_suite_stack.is_empty()
@@ -65,10 +68,8 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 	)
 	_gdtest_dynamic_suites.append({ "info": info, "parent_id": parent_id })
 	_gdtest_suite_stack.append(info)
-	var callback_result: Variant = callback.call()
-	if callback_result is Signal:
-		_gdtest_registration_awaitables.append(callback_result)
-	_gdtest_suite_stack.pop_back()
+	_gdtest_pending_registrations += 1
+	_gdtest_run_definition(callback)
 	return info
 
 
@@ -83,6 +84,8 @@ func test(description: String, callback: Callable, is_only: bool = false) -> voi
 		return
 	if description.is_empty():
 		_record_discovery_error("test requires a non-empty description")
+		return
+	if not _valid_registration_callback(callback, "test", 0):
 		return
 	_register_dynamic_case(description, callback, [], "", is_only)
 
@@ -104,6 +107,9 @@ func test_each(
 	if description.is_empty():
 		_record_discovery_error("test_each requires a non-empty description")
 		return
+	if not callback.is_valid():
+		_record_discovery_error("test_each requires a valid callback")
+		return
 	if cases is Dictionary:
 		var dictionary: Dictionary[Variant, Variant] = cases
 		var names: Array[String] = []
@@ -118,7 +124,7 @@ func test_each(
 				continue
 			rows[parameter_name] = dictionary[key]
 			names.append(parameter_name)
-		names.sort()
+		names.sort_custom(_utf8_less)
 		for parameter_name: String in names:
 			_register_dynamic_row(
 					description,
@@ -131,7 +137,14 @@ func test_each(
 	if cases is Array:
 		var array: Array[Variant] = cases
 		for index: int in range(array.size()):
-			_register_dynamic_row(description, callback, array[index], str(index), is_only)
+			_register_dynamic_row(
+					description,
+					callback,
+					array[index],
+					str(index),
+					is_only,
+					index + 1
+			)
 		return
 	_record_discovery_error("test_each cases must be a Dictionary or Array")
 
@@ -169,7 +182,7 @@ func expect_equal(actual: Variant, expected: Variant, message: String = "") -> v
 		if not equal is bool:
 			_record_failure(
 					"expect_equal",
-					message if not message.is_empty() else "equals() must return bool",
+					_framework_message(message, "equals() must return bool"),
 					actual,
 					expected,
 					true
@@ -186,7 +199,7 @@ func expect_not_equal(actual: Variant, expected: Variant, message: String = "") 
 		if not equal is bool:
 			_record_failure(
 					"expect_not_equal",
-					message if not message.is_empty() else "equals() must return bool",
+					_framework_message(message, "equals() must return bool"),
 					actual,
 					expected,
 					true
@@ -402,9 +415,7 @@ func until(
 		return ERR_UNAVAILABLE
 	var started: float = time()
 	while true:
-		var condition_result: Variant = condition.call()
-		if condition_result is Signal:
-			condition_result = await condition_result
+		var condition_result: Variant = await condition.call()
 		if bool(condition_result):
 			return OK
 		if timeout_seconds > 0.0 and time() - started >= timeout_seconds:
@@ -432,14 +443,20 @@ func _gdtest_begin_registration() -> void:
 	_gdtest_dynamic_cases.clear()
 	_gdtest_dynamic_suites.clear()
 	_gdtest_suite_stack.clear()
-	_gdtest_registration_awaitables.clear()
+	_gdtest_pending_registrations = 0
 	_gdtest_discovery_errors.clear()
 
 
 func _gdtest_finish_registration() -> void:
-	for pending: Signal in _gdtest_registration_awaitables:
-		await pending
+	while _gdtest_pending_registrations > 0:
+		await _gdtest_tree.process_frame
 	_gdtest_registration_active = false
+
+
+func _gdtest_run_definition(callback: Callable) -> void:
+	await callback.call()
+	_gdtest_pending_registrations -= 1
+	_gdtest_suite_stack.pop_back()
 
 
 func _gdtest_manifest() -> Dictionary[String, Variant]:
@@ -486,14 +503,29 @@ func _register_dynamic_row(
 		callback: Callable,
 		row: Variant,
 		parameter_name: String,
-		is_only: bool
+		is_only: bool,
+		ordinal: int = 0
 ) -> void:
 	if not row is Array:
 		_record_discovery_error("test_each row " + parameter_name + " must be an Array")
 		return
 	var parameters: Array[Variant] = []
 	parameters.assign(row)
-	_register_dynamic_case(description, callback, parameters, parameter_name, is_only)
+	if callback.get_argument_count() != parameters.size():
+		_record_discovery_error(
+				"test_each row %s has %d arguments; callback takes %d" % [
+					parameter_name,
+					parameters.size(),
+					callback.get_argument_count(),
+				]
+		)
+		return
+	var display_name: String = "%s %d: %s" % [
+		description,
+		ordinal,
+		str(parameters),
+	] if ordinal > 0 else "%s [%s]" % [description, parameter_name]
+	_register_dynamic_case(description, callback, parameters, parameter_name, is_only, display_name)
 
 
 func _register_dynamic_case(
@@ -501,7 +533,8 @@ func _register_dynamic_case(
 		callback: Callable,
 		parameters: Array[Variant],
 		parameter_name: String,
-		is_only: bool
+		is_only: bool,
+		display_name: String = ""
 ) -> void:
 	var location: Dictionary[String, Variant] = _user_location()
 	var suite_path: Array[String] = []
@@ -524,7 +557,7 @@ func _register_dynamic_case(
 	_gdtest_dynamic_cases.append(
 			{
 				"id": case_id,
-				"name": description,
+				"name": description if display_name.is_empty() else display_name,
 				"file": str(location.get("file", _gdtest_file)),
 				"line": line,
 				"callback": callback,
@@ -532,6 +565,7 @@ func _register_dynamic_case(
 				"parameter_name": parameter_name,
 				"is_only": is_only or inherited_only,
 				"suite_path": suite_path,
+				"suite_infos": _gdtest_suite_stack.duplicate(),
 			}
 	)
 
@@ -611,6 +645,22 @@ func _record_framework_error(text: String) -> void:
 		_gdtest_record_error(text)
 	else:
 		_record_discovery_error(text)
+
+
+func _valid_registration_callback(callback: Callable, operation: String, arguments: int) -> bool:
+	if not callback.is_valid():
+		_record_discovery_error(operation + " requires a valid callback")
+		return false
+	if callback.get_argument_count() != arguments:
+		_record_discovery_error(
+				"%s callback takes %d arguments; expected %d" % [
+					operation,
+					callback.get_argument_count(),
+					arguments,
+				]
+		)
+		return false
+	return true
 
 
 func _promote_status(status: String) -> void:
@@ -694,6 +744,16 @@ func _encode_component(value: Variant) -> String:
 		else:
 			result += "%%%02X" % byte
 	return result
+
+
+func _utf8_less(left: String, right: String) -> bool:
+	var left_bytes: PackedByteArray = left.to_utf8_buffer()
+	var right_bytes: PackedByteArray = right.to_utf8_buffer()
+	var shared_size: int = mini(left_bytes.size(), right_bytes.size())
+	for index: int in range(shared_size):
+		if left_bytes[index] != right_bytes[index]:
+			return left_bytes[index] < right_bytes[index]
+	return left_bytes.size() < right_bytes.size()
 
 
 func _string_dictionary(value: Variant) -> Dictionary[String, Variant]:

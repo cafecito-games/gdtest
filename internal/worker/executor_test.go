@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/cafecito-games/gdtest/internal/protocol"
 	"github.com/cafecito-games/gdtest/internal/version"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVerifyHandshake(t *testing.T) {
@@ -21,22 +21,16 @@ func TestVerifyHandshake(t *testing.T) {
 		SessionID:      "session-1",
 		Generation:     4,
 	})
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
+	require.NoError(t, err)
 	var stream bytes.Buffer
-	if err := protocol.NewEncoder(&stream).Encode(protocol.Envelope{
+	require.NoError(t, protocol.NewEncoder(&stream).Encode(protocol.Envelope{
 		Version: protocol.Version,
 		Type:    "hello",
 		Token:   "secret",
 		Payload: payload,
-	}); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	}))
 	err = verifyHandshake(protocol.NewDecoder(&stream, 4096), "secret", project, "session-1", 4)
-	if err != nil {
-		t.Fatalf("verifyHandshake: %v", err)
-	}
+	require.NoError(t, err)
 }
 
 func TestVerifyHandshakeRejectsProjectMismatch(t *testing.T) {
@@ -49,17 +43,11 @@ func TestVerifyHandshakeRejectsProjectMismatch(t *testing.T) {
 		SessionID:      "session-1",
 		Generation:     4,
 	})
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
+	require.NoError(t, err)
 	var stream bytes.Buffer
-	if err := protocol.NewEncoder(&stream).Encode(protocol.Envelope{
+	require.NoError(t, protocol.NewEncoder(&stream).Encode(protocol.Envelope{
 		Version: protocol.Version, Type: "hello", Token: "secret", Payload: payload,
-	}); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	}))
 	err = verifyHandshake(protocol.NewDecoder(&stream, 4096), "secret", project, "session-1", 4)
-	if err == nil || !strings.Contains(err.Error(), "does not match") {
-		t.Fatalf("verifyHandshake error = %v, want project mismatch", err)
-	}
+	require.ErrorContains(t, err, "does not match")
 }

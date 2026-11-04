@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -93,7 +92,7 @@ func Start(ctx context.Context, options ProcessOptions) (*Process, error) {
 	if options.CancelGrace <= 0 {
 		options.CancelGrace = 2 * time.Second
 	}
-	project, err := filepath.Abs(options.Project)
+	project, err := canonicalProjectPath(options.Project)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize project: %w", err)
 	}
@@ -270,7 +269,9 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 			return err
 		}
 		if event.Type == model.EventWorkerError {
-			return p.crashError(errors.New(event.Message))
+			if !recoverableRunDiagnostic(event) {
+				return fmt.Errorf("worker rejected run: %s: %s", event.Name, event.Message)
+			}
 		}
 		if event.Type == model.EventRunFinished {
 			if canceled || ctx.Err() != nil {
@@ -278,6 +279,21 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 			}
 			return nil
 		}
+	}
+}
+
+func recoverableRunDiagnostic(event model.Event) bool {
+	code := event.Name
+	if event.Metadata != nil {
+		if value, ok := event.Metadata["code"].(string); ok {
+			code = value
+		}
+	}
+	switch code {
+	case "worker.discovery", "worker.script_load", "worker.invalid_test":
+		return true
+	default:
+		return false
 	}
 }
 

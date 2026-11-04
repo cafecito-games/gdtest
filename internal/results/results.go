@@ -11,36 +11,39 @@ import (
 
 // CaseResult is one terminal case result plus its streamed diagnostics.
 type CaseResult struct {
-	ID       string
-	Name     string
-	Status   string
-	File     string
-	Line     int
-	Failures []model.Event
-	Output   []model.Event
+	ID       string        `json:"id"`
+	Name     string        `json:"name,omitempty"`
+	Status   string        `json:"status"`
+	File     string        `json:"file,omitempty"`
+	Line     int           `json:"line,omitempty"`
+	Failures []model.Event `json:"failures,omitempty"`
+	Output   []model.Event `json:"output,omitempty"`
 }
 
 // Summary is a deterministic folded run result.
 type Summary struct {
-	Cases    []CaseResult
-	Passed   int
-	Failed   int
-	Skipped  int
-	Todo     int
-	Void     int
-	Errored  int
-	Canceled int
-	Stale    bool
+	Cases          []CaseResult  `json:"cases"`
+	Infrastructure []model.Event `json:"infrastructure,omitempty"`
+	Passed         int           `json:"passed"`
+	Failed         int           `json:"failed"`
+	Skipped        int           `json:"skipped"`
+	Todo           int           `json:"todo"`
+	Void           int           `json:"void"`
+	Errored        int           `json:"errored"`
+	Canceled       int           `json:"canceled"`
+	Stale          bool          `json:"stale,omitempty"`
 }
 
 // Collector safely folds an event stream without reserializing accumulated state.
 type Collector struct {
-	mu      sync.Mutex
-	cases   map[string]*CaseResult
-	order   []string
-	stale   bool
-	started bool
-	ended   bool
+	mu             sync.Mutex
+	cases          map[string]*CaseResult
+	order          []string
+	stale          bool
+	started        bool
+	ended          bool
+	infrastructure []model.Event
+	runStatus      string
 }
 
 // NewCollector creates an empty collector.
@@ -80,6 +83,9 @@ func (c *Collector) Emit(event model.Event) error {
 		}
 		c.ended = true
 		c.stale = event.Stale
+		c.runStatus = event.Status
+	case model.EventWorkerError:
+		c.infrastructure = append(c.infrastructure, event)
 	}
 	return nil
 }
@@ -100,7 +106,11 @@ func (c *Collector) Summary() Summary {
 	defer c.mu.Unlock()
 	ids := append([]string(nil), c.order...)
 	sort.Strings(ids)
-	summary := Summary{Cases: make([]CaseResult, 0, len(ids)), Stale: c.stale}
+	summary := Summary{
+		Cases: make([]CaseResult, 0, len(ids)), Stale: c.stale,
+		Infrastructure: append([]model.Event(nil), c.infrastructure...),
+		Errored:        len(c.infrastructure),
+	}
 	for _, id := range ids {
 		result := *c.cases[id]
 		result.Failures = append([]model.Event(nil), result.Failures...)
@@ -123,8 +133,20 @@ func (c *Collector) Summary() Summary {
 			summary.Canceled++
 		}
 	}
+	if summary.Errored == 0 && c.runStatus == "error" {
+		summary.Errored = 1
+	}
+	if c.runStatus == "canceled" && summary.Canceled == 0 {
+		summary.Canceled = 1
+	}
 	return summary
 }
 
 // HasFailures reports whether the run has a failing or infrastructure status.
 func (s Summary) HasFailures() bool { return s.Failed+s.Errored > 0 }
+
+// HasInfrastructureFailure reports whether discovery, protocol, or worker
+// diagnostics made the run non-authoritative independently of case failures.
+func (s Summary) HasInfrastructureFailure() bool {
+	return len(s.Infrastructure) > 0
+}

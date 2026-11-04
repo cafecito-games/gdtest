@@ -14,13 +14,15 @@ import (
 	"unicode"
 
 	"github.com/cafecito-games/gdparser"
-	"github.com/cafecito-games/gdparser/ast"
 	"github.com/cafecito-games/gdtest/internal/model"
 )
 
 // Manifest is an ordered, project-relative static test manifest.
 type Manifest struct {
-	Files []model.FilePlan `json:"files"`
+	Files                 []model.FilePlan `json:"files"`
+	Scripts               []ScriptMetadata `json:"scripts,omitempty"`
+	StructuralFingerprint string           `json:"structural_fingerprint"`
+	ContentFingerprint    string           `json:"content_fingerprint"`
 }
 
 // Options controls filesystem discovery.
@@ -29,7 +31,9 @@ type Options struct {
 	Exclude  []string
 }
 
-// Discover walks root and parses matching tests in stable path order.
+// Discover walks root and builds a deterministic static index. All GDScript
+// files participate in inheritance and dependency resolution, while only
+// matching GDTest descendants contribute executable plans.
 func Discover(root string, options Options) (Manifest, error) {
 	if len(options.Patterns) == 0 {
 		options.Patterns = []string{"**/*.test.gd"}
@@ -50,7 +54,7 @@ func Discover(root string, options Options) (Manifest, error) {
 		if entry.IsDir() && matchesAny(relative+"/placeholder", options.Exclude) {
 			return fs.SkipDir
 		}
-		if entry.Type().IsRegular() && matchesAny(relative, options.Patterns) && !matchesAny(relative, options.Exclude) {
+		if entry.Type().IsRegular() && strings.HasSuffix(relative, ".gd") && !matchesAny(relative, options.Exclude) {
 			paths = append(paths, relative)
 		}
 		return nil
@@ -59,18 +63,59 @@ func Discover(root string, options Options) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("walk project: %w", err)
 	}
 	sort.Strings(paths)
-	manifest := Manifest{Files: make([]model.FilePlan, 0, len(paths))}
+	scripts := make(map[string]*parsedScript, len(paths))
 	for _, relative := range paths {
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
 		if err != nil {
 			return Manifest{}, fmt.Errorf("read %s: %w", relative, err)
 		}
-		file, err := Parse(relative, data)
+		tree, err := gdparser.ParseFile(relative, data)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("parse %s: %w", relative, err)
+		}
+		script, err := inspectScript(relative, data, tree, false)
 		if err != nil {
 			return Manifest{}, err
 		}
-		manifest.Files = append(manifest.Files, file)
+		scripts[script.metadata.Path] = &script
 	}
+	resolveInheritance(scripts)
+	for _, relative := range paths {
+		script := scripts[normalizeRelative(relative)]
+		if !script.metadata.ExtendsGDTest {
+			continue
+		}
+		if _, err := inspectScript(script.metadata.Path, script.source, script.tree, true); err != nil {
+			return Manifest{}, err
+		}
+	}
+
+	manifest := Manifest{
+		Files:   make([]model.FilePlan, 0),
+		Scripts: make([]ScriptMetadata, 0, len(paths)),
+	}
+	var structural, content strings.Builder
+	for _, relative := range paths {
+		relative = normalizeRelative(relative)
+		script := scripts[relative]
+		manifest.Scripts = append(manifest.Scripts, script.metadata)
+		structural.WriteString(relative)
+		structural.WriteByte(0)
+		structural.WriteString(script.metadata.StructuralFingerprint)
+		if script.metadata.ExtendsGDTest {
+			structural.WriteString(":gdtest")
+		}
+		structural.WriteByte('\n')
+		content.WriteString(relative)
+		content.WriteByte(0)
+		content.WriteString(script.metadata.ContentFingerprint)
+		content.WriteByte('\n')
+		if matchesAny(relative, options.Patterns) && script.metadata.ExtendsGDTest {
+			manifest.Files = append(manifest.Files, script.plan)
+		}
+	}
+	manifest.StructuralFingerprint = fingerprint([]byte(structural.String()))
+	manifest.ContentFingerprint = fingerprint([]byte(content.String()))
 	return manifest, nil
 }
 
@@ -80,45 +125,11 @@ func Parse(relative string, source []byte) (model.FilePlan, error) {
 	if err != nil {
 		return model.FilePlan{}, fmt.Errorf("parse %s: %w", relative, err)
 	}
-	file := model.FilePlan{Path: path.Clean(filepath.ToSlash(relative))}
-	for _, statement := range tree.Statements {
-		function, ok := statement.(*ast.FunctionDeclaration)
-		if !ok || !strings.HasPrefix(function.Name, "test_") || strings.HasSuffix(function.Name, "__cases") {
-			continue
-		}
-		logical := strings.TrimSuffix(function.Name, "__only")
-		if logical == "test_" {
-			continue
-		}
-		if len(function.Parameters) > 0 && !hasProvider(tree, logical) {
-			return model.FilePlan{}, fmt.Errorf(
-				"discover %s:%d: %s has required parameters but no %s__cases provider",
-				file.Path,
-				function.NameSpan.Start.Line,
-				function.Name,
-				logical,
-			)
-		}
-		file.Cases = append(file.Cases, model.CasePlan{
-			ID:         file.Path + "::" + logical,
-			Name:       displayName(strings.TrimPrefix(logical, "test_")),
-			MethodName: function.Name,
-			Line:       function.NameSpan.Start.Line,
-			IsOnly:     strings.HasSuffix(function.Name, "__only"),
-		})
+	script, err := inspectScript(relative, source, tree, true)
+	if err != nil {
+		return model.FilePlan{}, err
 	}
-	return file, nil
-}
-
-func hasProvider(tree *ast.File, method string) bool {
-	want := method + "__cases"
-	for _, statement := range tree.Statements {
-		function, ok := statement.(*ast.FunctionDeclaration)
-		if ok && function.Name == want {
-			return true
-		}
-	}
-	return false
+	return script.plan, nil
 }
 
 func matchesAny(filename string, patterns []string) bool {
@@ -178,7 +189,11 @@ func Select(manifest Manifest, selectors []string, allowEmpty bool) (Manifest, e
 	if len(selectors) == 0 {
 		return manifest, nil
 	}
-	selected := Manifest{}
+	selected := Manifest{
+		Scripts:               manifest.Scripts,
+		StructuralFingerprint: manifest.StructuralFingerprint,
+		ContentFingerprint:    manifest.ContentFingerprint,
+	}
 	known := make([]bool, len(selectors))
 	for _, file := range manifest.Files {
 		out := model.FilePlan{Path: file.Path}

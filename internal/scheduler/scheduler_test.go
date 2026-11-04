@@ -2,11 +2,13 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGlobalBoundAndUniqueSlots(t *testing.T) {
@@ -38,12 +40,10 @@ func TestGlobalBoundAndUniqueSlots(t *testing.T) {
 	}
 	first := receiveLease(t, started)
 	second := receiveLease(t, started)
-	if first.Slot == second.Slot {
-		t.Fatalf("simultaneous leases shared slot %d", first.Slot)
-	}
+	assert.NotEqual(t, first.Slot, second.Slot, "simultaneous leases must use unique slots")
 	select {
 	case third := <-started:
-		t.Fatalf("capacity exceeded by lease %#v", third)
+		require.FailNow(t, "capacity exceeded", "unexpected lease: %#v", third)
 	case <-time.After(30 * time.Millisecond):
 	}
 	for range 5 {
@@ -52,13 +52,10 @@ func TestGlobalBoundAndUniqueSlots(t *testing.T) {
 	}
 	for _, future := range futures {
 		result := waitResult(t, future)
-		if result.Err != nil {
-			t.Fatalf("scheduled work: %v", result.Err)
-		}
+		require.NoError(t, result.Err)
 	}
-	if peak.Load() != 2 || scheduler.Stats().PeakActive != 2 {
-		t.Fatalf("peak active = %d, stats = %#v", peak.Load(), scheduler.Stats())
-	}
+	assert.Equal(t, int32(2), peak.Load())
+	assert.Equal(t, 2, scheduler.Stats().PeakActive)
 }
 
 func TestManySessionsNeverExceedGlobalBound(t *testing.T) {
@@ -93,18 +90,15 @@ func TestManySessionsNeverExceedGlobalBound(t *testing.T) {
 	}
 	select {
 	case <-started:
-		t.Fatal("a fifth session started above the global bound")
+		require.FailNow(t, "a fifth session started above the global bound")
 	case <-time.After(30 * time.Millisecond):
 	}
 	close(release)
 	for _, future := range futures {
-		if result := waitResult(t, future); result.Err != nil {
-			t.Fatalf("stress work: %v", result.Err)
-		}
+		require.NoError(t, waitResult(t, future).Err)
 	}
-	if peak.Load() != 4 || scheduler.Stats().PeakActive != 4 {
-		t.Fatalf("peak = %d, stats = %#v", peak.Load(), scheduler.Stats())
-	}
+	assert.Equal(t, int32(4), peak.Load())
+	assert.Equal(t, 4, scheduler.Stats().PeakActive)
 }
 
 func TestBackgroundWorkIsCappedWithoutBlockingInteractiveSlots(t *testing.T) {
@@ -123,16 +117,14 @@ func TestBackgroundWorkIsCappedWithoutBlockingInteractiveSlots(t *testing.T) {
 	for range 2 {
 		select {
 		case priority := <-started:
-			if priority != Background {
-				t.Fatalf("priority = %d", priority)
-			}
+			assert.Equal(t, Background, priority)
 		case <-time.After(2 * time.Second):
-			t.Fatal("background work did not start")
+			require.FailNow(t, "background work did not start")
 		}
 	}
 	select {
 	case <-started:
-		t.Fatal("background limit exceeded")
+		require.FailNow(t, "background limit exceeded")
 	case <-time.After(30 * time.Millisecond):
 	}
 	for index := range 2 {
@@ -144,21 +136,17 @@ func TestBackgroundWorkIsCappedWithoutBlockingInteractiveSlots(t *testing.T) {
 	for range 2 {
 		select {
 		case priority := <-started:
-			if priority != Interactive {
-				t.Fatalf("priority = %d, want interactive", priority)
-			}
+			assert.Equal(t, Interactive, priority)
 		case <-time.After(2 * time.Second):
-			t.Fatal("interactive work did not fill spare slot")
+			require.FailNow(t, "interactive work did not fill spare slot")
 		}
 	}
-	if stats := scheduler.Stats(); stats.Active != 4 || stats.BackgroundActive != 2 {
-		t.Fatalf("stats = %#v", stats)
-	}
+	stats := scheduler.Stats()
+	assert.Equal(t, 4, stats.Active)
+	assert.Equal(t, 2, stats.BackgroundActive)
 	close(release)
 	for _, future := range futures {
-		if result := waitResult(t, future); result.Err != nil {
-			t.Fatalf("scheduled work: %v", result.Err)
-		}
+		require.NoError(t, waitResult(t, future).Err)
 	}
 }
 
@@ -179,22 +167,16 @@ func TestRoundRobinFairnessAcrossSessions(t *testing.T) {
 		})
 	}
 	futures := []Future{submit("a", "a1")}
-	if got := receiveString(t, started); got != "a1" {
-		t.Fatalf("first start = %q", got)
-	}
+	assert.Equal(t, "a1", receiveString(t, started))
 	futures = append(futures, submit("a", "a2"), submit("b", "b1"), submit("c", "c1"))
 	releases <- struct{}{}
 	want := []string{"b1", "c1", "a2"}
 	for _, expected := range want {
-		if got := receiveString(t, started); got != expected {
-			t.Fatalf("start order = %q, want %q", got, expected)
-		}
+		assert.Equal(t, expected, receiveString(t, started))
 		releases <- struct{}{}
 	}
 	for _, future := range futures {
-		if result := waitResult(t, future); result.Err != nil {
-			t.Fatalf("scheduled work: %v", result.Err)
-		}
+		require.NoError(t, waitResult(t, future).Err)
 	}
 }
 
@@ -221,23 +203,17 @@ func TestInteractivePriorityHasBoundedBurst(t *testing.T) {
 		futures = append(futures, submit(fmt.Sprintf("interactive-%d", index), fmt.Sprintf("i%d", index), Interactive))
 	}
 	releases <- struct{}{}
-	if got := receiveString(t, started); got != "i0" {
-		t.Fatalf("first queued start = %q, want i0", got)
-	}
+	assert.Equal(t, "i0", receiveString(t, started))
 	releases <- struct{}{}
-	if got := receiveString(t, started); got != "background" {
-		// seed consumed one interactive slot, then i0 reached the burst of two.
-		t.Fatalf("bounded-priority start = %q, want background", got)
-	}
+	// seed consumed one interactive slot, then i0 reached the burst of two.
+	assert.Equal(t, "background", receiveString(t, started))
 	releases <- struct{}{}
 	for range 3 {
 		_ = receiveString(t, started)
 		releases <- struct{}{}
 	}
 	for _, future := range futures {
-		if result := waitResult(t, future); result.Err != nil {
-			t.Fatalf("scheduled work: %v", result.Err)
-		}
+		require.NoError(t, waitResult(t, future).Err)
 	}
 }
 
@@ -264,9 +240,7 @@ func TestQueuedContextCancellationAndGenerationAdvance(t *testing.T) {
 		Run: func(context.Context, Lease) error { ranCanceled.Store(true); return nil },
 	})
 	cancel()
-	if result := waitResult(t, canceled); !errors.Is(result.Err, context.Canceled) {
-		t.Fatalf("canceled result = %v", result.Err)
-	}
+	require.ErrorIs(t, waitResult(t, canceled).Err, context.Canceled)
 
 	ranObsolete := atomic.Bool{}
 	obsolete := scheduler.Submit(context.Background(), Request{
@@ -274,22 +248,16 @@ func TestQueuedContextCancellationAndGenerationAdvance(t *testing.T) {
 		Run: func(context.Context, Lease) error { ranObsolete.Store(true); return nil },
 	})
 	scheduler.AdvanceGeneration("generation", 2)
-	if result := waitResult(t, obsolete); !errors.Is(result.Err, ErrObsoleteGeneration) {
-		t.Fatalf("obsolete result = %v", result.Err)
-	}
-	if future := scheduler.Submit(context.Background(), Request{
+	require.ErrorIs(t, waitResult(t, obsolete).Err, ErrObsoleteGeneration)
+	future := scheduler.Submit(context.Background(), Request{
 		Session: "generation", Generation: 1, Priority: Interactive,
 		Run: func(context.Context, Lease) error { return nil },
-	}); !errors.Is(waitResult(t, future).Err, ErrObsoleteGeneration) {
-		t.Fatal("future obsolete work was accepted")
-	}
-	if ranCanceled.Load() || ranObsolete.Load() {
-		t.Fatal("canceled queued work ran")
-	}
+	})
+	require.ErrorIs(t, waitResult(t, future).Err, ErrObsoleteGeneration)
+	assert.False(t, ranCanceled.Load())
+	assert.False(t, ranObsolete.Load())
 	close(block)
-	if result := waitResult(t, running); result.Err != nil {
-		t.Fatalf("running work: %v", result.Err)
-	}
+	require.NoError(t, waitResult(t, running).Err)
 }
 
 func TestExclusiveWaitsForAllSlotsAndBlocksFollowers(t *testing.T) {
@@ -310,51 +278,39 @@ func TestExclusiveWaitsForAllSlotsAndBlocksFollowers(t *testing.T) {
 	b := makeRequest("b", "b", Reuse, releaseB)
 	first := receiveString(t, started)
 	second := receiveString(t, started)
-	if first == second || (first != "a" && first != "b") || (second != "a" && second != "b") {
-		t.Fatalf("initial starts = %q, %q", first, second)
-	}
+	assert.ElementsMatch(t, []string{"a", "b"}, []string{first, second})
 	exclusive := makeRequest("exclusive", "exclusive", Exclusive, releaseExclusive)
 	followerRelease := make(chan struct{})
 	follower := makeRequest("follower", "follower", Reuse, followerRelease)
 	close(releaseA)
 	select {
 	case got := <-started:
-		t.Fatalf("started %q before all workers drained", got)
+		require.FailNow(t, "work started before all workers drained", "started %q", got)
 	case <-time.After(30 * time.Millisecond):
 	}
 	close(releaseB)
-	if got := receiveString(t, started); got != "exclusive" {
-		t.Fatalf("start after drain = %q, want exclusive", got)
-	}
+	assert.Equal(t, "exclusive", receiveString(t, started))
 	select {
 	case got := <-started:
-		t.Fatalf("started %q beside exclusive work", got)
+		require.FailNow(t, "work started beside exclusive work", "started %q", got)
 	case <-time.After(30 * time.Millisecond):
 	}
 	close(releaseExclusive)
-	if got := receiveString(t, started); got != "follower" {
-		t.Fatalf("start after exclusive = %q, want follower", got)
-	}
+	assert.Equal(t, "follower", receiveString(t, started))
 	close(followerRelease)
 	for _, future := range []Future{a, b, exclusive, follower} {
-		if result := waitResult(t, future); result.Err != nil {
-			t.Fatalf("scheduled work: %v", result.Err)
-		}
+		require.NoError(t, waitResult(t, future).Err)
 	}
 }
 
 func newTestScheduler(t *testing.T, options Options) *Scheduler {
 	t.Helper()
 	scheduler, err := New(options)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := scheduler.Shutdown(ctx); err != nil {
-			t.Errorf("Shutdown: %v", err)
-		}
+		assert.NoError(t, scheduler.Shutdown(ctx))
 	})
 	return scheduler
 }
@@ -364,9 +320,7 @@ func waitResult(t *testing.T, future Future) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	result, err := future.Wait(ctx)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
+	require.NoError(t, err)
 	return result
 }
 
@@ -376,7 +330,7 @@ func receiveLease(t *testing.T, values <-chan Lease) Lease {
 	case value := <-values:
 		return value
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for lease")
+		require.FailNow(t, "timed out waiting for lease")
 		return Lease{}
 	}
 }
@@ -387,7 +341,7 @@ func receiveString(t *testing.T, values <-chan string) string {
 	case value := <-values:
 		return value
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for start")
+		require.FailNow(t, "timed out waiting for start")
 		return ""
 	}
 }
@@ -397,6 +351,6 @@ func waitSignal(t *testing.T, signal <-chan struct{}) {
 	select {
 	case <-signal:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for signal")
+		require.FailNow(t, "timed out waiting for signal")
 	}
 }

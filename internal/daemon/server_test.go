@@ -4,71 +4,53 @@ import (
 	"context"
 	"net"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/cafecito-games/gdtest/internal/protocol"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestServerRejectsProtocolMismatch(t *testing.T) {
 	t.Parallel()
 
 	root, err := os.MkdirTemp("/tmp", "gdt-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	namespace, err := NewNamespace(root, ProtocolVersion, "protocol-build")
-	if err != nil {
-		t.Fatalf("NewNamespace: %v", err)
-	}
+	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{Namespace: namespace}
 	errors := make(chan error, 1)
 	go func() { errors <- server.Serve(ctx) }()
 	waitForMetadata(t, namespace)
 	connection, err := net.Dial("unix", namespace.SocketPath)
-	if err != nil {
-		cancel()
-		t.Fatalf("dial: %v", err)
-	}
-	if err := protocol.NewEncoder(connection).Encode(Message{
+	require.NoError(t, err)
+	require.NoError(t, protocol.NewEncoder(connection).Encode(Message{
 		Version: 999, Type: MessageRequest, RequestID: "bad", Method: "daemon.status",
-	}); err != nil {
-		_ = connection.Close()
-		cancel()
-		t.Fatalf("encode: %v", err)
-	}
+	}))
 	var response Message
-	if err := protocol.NewDecoder(connection, 1024).Decode(&response); err != nil {
-		_ = connection.Close()
-		cancel()
-		t.Fatalf("decode: %v", err)
-	}
-	_ = connection.Close()
-	if response.Type != MessageError || !response.Terminal || !strings.Contains(string(response.Payload), "does not match") {
-		t.Fatalf("response = %#v", response)
-	}
+	require.NoError(t, protocol.NewDecoder(connection, 1024).Decode(&response))
+	require.NoError(t, connection.Close())
+	assert.Equal(t, MessageError, response.Type)
+	assert.True(t, response.Terminal)
+	assert.Contains(t, string(response.Payload), "does not match")
 	cancel()
 	select {
 	case err := <-errors:
-		if err != nil {
-			t.Fatalf("Serve: %v", err)
-		}
+		require.NoError(t, err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("server did not stop")
+		require.FailNow(t, "server did not stop")
 	}
 }
 
 func waitForMetadata(t *testing.T, namespace Namespace) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		if _, err := namespace.ReadMetadata(); err == nil {
-			return
+			return true
 		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("daemon metadata did not appear")
+		return false
+	}, 2*time.Second, time.Millisecond, "daemon metadata did not appear")
 }

@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLanguageNeutralFixturesDecode(t *testing.T) {
@@ -16,14 +19,8 @@ func TestLanguageNeutralFixturesDecode(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			file, err := os.Open(filepath.Join("..", "..", "fixtures", "protocol", name))
-			if err != nil {
-				t.Fatalf("open fixture: %v", err)
-			}
-			defer func() {
-				if err := file.Close(); err != nil {
-					t.Errorf("close fixture: %v", err)
-				}
-			}()
+			require.NoError(t, err)
+			defer func() { assert.NoError(t, file.Close()) }()
 			decoder := NewDecoder(file, DefaultMaxMessageSize)
 			count := 0
 			for {
@@ -32,17 +29,12 @@ func TestLanguageNeutralFixturesDecode(t *testing.T) {
 				if errors.Is(err, io.EOF) {
 					break
 				}
-				if err != nil {
-					t.Fatalf("decode message %d: %v", count, err)
-				}
-				if envelope.Version != Version || envelope.Type == "" {
-					t.Fatalf("invalid envelope: %#v", envelope)
-				}
+				require.NoError(t, err, "decode message %d", count)
+				assert.Equal(t, Version, envelope.Version)
+				assert.NotEmpty(t, envelope.Type)
 				count++
 			}
-			if count == 0 {
-				t.Fatal("fixture contains no messages")
-			}
+			assert.Positive(t, count, "fixture contains no messages")
 		})
 	}
 }

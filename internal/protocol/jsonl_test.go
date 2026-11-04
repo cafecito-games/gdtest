@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestJSONLRoundTrip(t *testing.T) {
@@ -11,16 +14,10 @@ func TestJSONLRoundTrip(t *testing.T) {
 
 	var buffer bytes.Buffer
 	want := Envelope{Version: Version, Type: "ping", RequestID: "request-1"}
-	if err := NewEncoder(&buffer).Encode(want); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	require.NoError(t, NewEncoder(&buffer).Encode(want))
 	var got Envelope
-	if err := NewDecoder(&buffer, 1024).Decode(&got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.Version != want.Version || got.Type != want.Type || got.RequestID != want.RequestID {
-		t.Fatalf("decoded %#v, want %#v", got, want)
-	}
+	require.NoError(t, NewDecoder(&buffer, 1024).Decode(&got))
+	assert.Equal(t, want, got)
 }
 
 func TestDecoderRejectsOversizedLine(t *testing.T) {
@@ -29,7 +26,6 @@ func TestDecoderRejectsOversizedLine(t *testing.T) {
 	input := strings.NewReader(`{"type":"` + strings.Repeat("x", 40) + `"}` + "\n")
 	var value Envelope
 	err := NewDecoder(input, 16).Decode(&value)
-	if err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("Decode error = %v, want size error", err)
-	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
 }

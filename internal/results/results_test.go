@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/cafecito-games/gdtest/internal/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCollectorSortsByStableID(t *testing.T) {
@@ -17,12 +19,38 @@ func TestCollectorSortsByStableID(t *testing.T) {
 		{Type: model.EventCaseFinished, TestID: "a::test", Status: "fail"},
 	}
 	for _, event := range events {
-		if err := collector.Emit(event); err != nil {
-			t.Fatalf("Emit: %v", err)
-		}
+		require.NoError(t, collector.Emit(event))
 	}
 	summary := collector.Summary()
-	if summary.Cases[0].ID != "a::test" || summary.Passed != 1 || summary.Failed != 1 {
-		t.Fatalf("unexpected summary: %#v", summary)
+	require.Len(t, summary.Cases, 2)
+	assert.Equal(t, "a::test", summary.Cases[0].ID)
+	assert.Equal(t, 1, summary.Passed)
+	assert.Equal(t, 1, summary.Failed)
+}
+
+func TestCollectorFoldsDiscoveryDiagnosticsAsInfrastructure(t *testing.T) {
+	t.Parallel()
+	collector := NewCollector()
+	events := []model.Event{
+		{Type: model.EventRunStarted, RunID: "run"},
+		{Type: model.EventWorkerError, RunID: "run", Name: "worker.discovery", Message: "invalid provider"},
+		{Type: model.EventRunFinished, RunID: "run", Status: "error"},
 	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+	summary := collector.Summary()
+	assert.Equal(t, 1, summary.Errored)
+	assert.True(t, summary.HasInfrastructureFailure())
+	assert.True(t, summary.HasFailures())
+	assert.Len(t, summary.Infrastructure, 1)
+}
+
+func TestCollectorCountsRunErrorWithoutDiagnostic(t *testing.T) {
+	t.Parallel()
+	collector := NewCollector()
+	require.NoError(t, collector.Emit(model.Event{Type: model.EventRunFinished, Status: "error"}))
+	summary := collector.Summary()
+	assert.Equal(t, 1, summary.Errored)
+	assert.False(t, summary.HasInfrastructureFailure())
 }

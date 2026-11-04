@@ -22,12 +22,14 @@ import (
 	"github.com/cafecito-games/gdtest/internal/daemon"
 	"github.com/cafecito-games/gdtest/internal/discovery"
 	"github.com/cafecito-games/gdtest/internal/executor"
+	"github.com/cafecito-games/gdtest/internal/index"
 	"github.com/cafecito-games/gdtest/internal/model"
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/reporter"
 	"github.com/cafecito-games/gdtest/internal/results"
 	"github.com/cafecito-games/gdtest/internal/service"
 	"github.com/cafecito-games/gdtest/internal/version"
+	sourcewatch "github.com/cafecito-games/gdtest/internal/watch"
 	"github.com/cafecito-games/gdtest/internal/worker"
 )
 
@@ -62,6 +64,8 @@ func Run(ctx context.Context, arguments []string, streams IO) int {
 	switch arguments[0] {
 	case "run":
 		return runTests(ctx, arguments[1:], streams)
+	case "watch":
+		return watchTests(ctx, arguments[1:], streams)
 	case "list":
 		err = listTests(arguments[1:], streams)
 	case "doctor":
@@ -77,7 +81,7 @@ func Run(ctx context.Context, arguments []string, streams IO) int {
 		err = warm(ctx, arguments[1:], streams)
 	case "daemon":
 		err = daemonCommand(ctx, arguments[1:], streams)
-	case "watch", "migrate":
+	case "migrate":
 		err = fmt.Errorf("%s is not available in this build milestone", arguments[0])
 	default:
 		err = fmt.Errorf("unknown command %q", arguments[0])
@@ -87,6 +91,57 @@ func Run(ctx context.Context, arguments []string, streams IO) int {
 		return ExitError
 	}
 	return ExitOK
+}
+
+func watchTests(ctx context.Context, arguments []string, streams IO) int {
+	flags := flag.NewFlagSet("watch", flag.ContinueOnError)
+	flags.SetOutput(streams.Err)
+	_ = flags.Bool("json", false, "write JSON Lines events")
+	_ = flags.Bool("allow-empty", false, "allow selectors that match no tests")
+	_ = flags.Bool("no-daemon", false, "run orchestration in the foreground")
+	projectFlag := flags.String("project", "", "Godot project root")
+	if err := flags.Parse(arguments); err != nil {
+		return ExitError
+	}
+	root, err := projectRoot(*projectFlag)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	reconciler := sourcewatch.New(root)
+	current, err := reconciler.Reconcile(ctx, sourcewatch.Initial)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest: watch:", err)
+		return ExitError
+	}
+	for {
+		exitCode := runTests(ctx, arguments, streams)
+		if exitCode == ExitError || exitCode == ExitCanceled {
+			return exitCode
+		}
+		_, _ = fmt.Fprintf(streams.Err, "gdtest: watching generation %d\n", current.Update.Generation)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		changed := false
+		for !changed {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return ExitCanceled
+			case <-ticker.C:
+				result, reconcileErr := reconciler.Reconcile(ctx, sourcewatch.Periodic)
+				if reconcileErr != nil {
+					ticker.Stop()
+					writeDiagnostic(streams.Err, "gdtest: watch:", reconcileErr)
+					return ExitError
+				}
+				if result.Update.Generation > current.Update.Generation {
+					current = result
+					changed = true
+				}
+			}
+		}
+		ticker.Stop()
+	}
 }
 
 func initialize(arguments []string, streams IO) error {
@@ -127,7 +182,7 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
-	manifest, err := discovery.Discover(root, discovery.Options{
+	manifest, err := index.Discover(ctx, root, discovery.Options{
 		Patterns: projectConfig.Tests,
 		Exclude:  projectConfig.Exclude,
 	})
@@ -192,6 +247,9 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest: report:", err)
 		return ExitError
 	}
+	if summary.HasInfrastructureFailure() {
+		return ExitError
+	}
 	if summary.HasFailures() {
 		return ExitFailures
 	}
@@ -249,7 +307,7 @@ func listTests(arguments []string, streams IO) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := discovery.Discover(root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
+	manifest, err := index.Discover(context.Background(), root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
 	if err != nil {
 		return err
 	}
@@ -286,7 +344,7 @@ func doctor(ctx context.Context, arguments []string, streams IO) error {
 	if err != nil {
 		return fmt.Errorf("godot executable %q was not found: %w", projectConfig.Godot, err)
 	}
-	manifest, err := discovery.Discover(root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
+	manifest, err := index.Discover(ctx, root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
 	if err != nil {
 		return err
 	}
@@ -419,13 +477,25 @@ func serveDaemon(ctx context.Context, arguments []string, streams IO) error {
 	janitorDone := make(chan struct{})
 	go func() {
 		defer close(janitorDone)
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
+		sourceTicker := time.NewTicker(time.Second)
+		lifecycleTicker := time.NewTicker(5 * time.Second)
+		defer sourceTicker.Stop()
+		defer lifecycleTicker.Stop()
 		for {
 			select {
 			case <-janitorCtx.Done():
 				return
-			case now := <-ticker.C:
+			case <-sourceTicker.C:
+				updates, failures := sessions.ReconcileSources(janitorCtx)
+				if len(updates) > 0 {
+					_ = logger.Write(map[string]any{"event": "source_generations_advanced", "sessions": updates})
+				}
+				for sessionID, reconcileErr := range failures {
+					_ = logger.Write(map[string]any{
+						"event": "source_reconcile_error", "session": sessionID, "error": reconcileErr.Error(),
+					})
+				}
+			case now := <-lifecycleTicker.C:
 				removed, reconcileErr := sessions.Reconcile(now, 2*time.Second, 2*time.Minute)
 				if reconcileErr != nil {
 					_ = logger.Write(map[string]any{"event": "session_reconcile_error", "error": reconcileErr.Error()})

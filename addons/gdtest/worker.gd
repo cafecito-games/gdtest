@@ -223,13 +223,26 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		_send_worker_error("protocol.invalid_plan", "plan.files must be an array")
 		_finish_run_state()
 		return
+	var prepared_files: Array[Dictionary] = []
+	var has_focus: bool = false
 	for file_value: Variant in files_value:
 		if _cancel_requested:
 			break
 		if not file_value is Dictionary:
 			_send_worker_error("protocol.invalid_plan", "each plan file must be an object")
 			continue
-		var file_totals: Dictionary[String, int] = await _run_file(_string_dictionary(file_value))
+		var prepared: Dictionary[String, Variant] = await _prepare_file(
+				_string_dictionary(file_value)
+		)
+		prepared_files.append(prepared)
+		for case_value: Variant in prepared.get("cases", []):
+			if case_value is Dictionary and bool(case_value.get("is_only", false)):
+				has_focus = true
+	for prepared_value: Variant in prepared_files:
+		var prepared: Dictionary[String, Variant] = _string_dictionary(prepared_value)
+		if _cancel_requested:
+			break
+		var file_totals: Dictionary[String, int] = await _run_prepared_file(prepared, has_focus)
 		for status: String in totals:
 			totals[status] += file_totals.get(status, 0)
 	if _cancel_requested:
@@ -245,32 +258,28 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 	_finish_run_state()
 
 
-func _run_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String, int]:
-	var totals: Dictionary[String, int] = {
-		"pass": 0,
-		"fail": 0,
-		"error": 0,
-		"skip": 0,
-		"todo": 0,
-		"void": 0,
-		"canceled": 0,
+func _prepare_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String, Variant]:
+	var prepared: Dictionary[String, Variant] = {
+		"path": "",
+		"instance": null,
+		"cases": [],
+		"root_info": null,
+		"discovery_error_count": 0,
 	}
 	var path: String = str(file_plan.get("file", file_plan.get("path", "")))
 	if not path.begins_with("res://"):
 		path = "res://" + path.trim_prefix("/")
-	_send_event("suite_started", { "id": path.trim_prefix("res://"), "name": path, "file": path })
+	prepared["path"] = path
 	var resource: Resource = ResourceLoader.load(path, "Script", ResourceLoader.CACHE_MODE_REPLACE)
 	if not resource is Script:
 		_send_worker_error("worker.script_load", "unable to load test script " + path)
-		totals["error"] += 1
-		_send_event("suite_finished", { "id": path.trim_prefix("res://"), "status": "error" })
-		return totals
+		prepared["discovery_error_count"] = 1
+		return prepared
 	var instance_value: Variant = resource.new()
 	if not instance_value is GDTest:
 		_send_worker_error("worker.invalid_test", path + " does not extend GDTest")
-		totals["error"] += 1
-		_send_event("suite_finished", { "id": path.trim_prefix("res://"), "status": "error" })
-		return totals
+		prepared["discovery_error_count"] = 1
+		return prepared
 	var instance: GDTest = instance_value
 	_active_test = instance
 	instance._gdtest_configure(self, path, _on_assertion_failed)
@@ -280,37 +289,90 @@ func _run_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String, int
 	await instance._gdtest_finish_registration()
 	var manifest: Dictionary[String, Variant] = instance._gdtest_manifest()
 	var discovery_errors: Array[Variant] = manifest.get("errors", [])
+	var cases: Array[Variant] = _planned_cases(file_plan, instance, manifest, discovery_errors)
+	if instance.has_method("before_case") and instance.has_method("before_each"):
+		discovery_errors.append({ "message": "before_case and before_each cannot both be defined" })
+	if instance.has_method("after_case") and instance.has_method("after_each"):
+		discovery_errors.append({ "message": "after_case and after_each cannot both be defined" })
+	var suite_name: String = await _suite_name(instance, resource, path, discovery_errors)
 	for discovery_error: Variant in discovery_errors:
-		_send_worker_error("worker.discovery", str(discovery_error))
-	if not discovery_errors.is_empty():
-		totals["error"] += 1
-	var cases: Array[Variant] = _planned_cases(file_plan, instance, manifest)
-	var root_info := GDTestSuiteInfo.new(
+		_send_discovery_error(discovery_error, path)
+	prepared["instance"] = instance
+	prepared["cases"] = cases
+	prepared["root_info"] = GDTestSuiteInfo.new(
 			path.trim_prefix("res://"),
-			str(file_plan.get("name", path.trim_prefix("res://"))),
+			suite_name,
 			path,
 			int(file_plan.get("line", 1)),
 			false
 	)
+	prepared["discovery_error_count"] = discovery_errors.size()
+	_active_test = null
+	return prepared
+
+
+func _run_prepared_file(
+		prepared: Dictionary[String, Variant],
+		focus_only: bool
+) -> Dictionary[String, int]:
+	var totals: Dictionary[String, int] = {
+		"pass": 0,
+		"fail": 0,
+		"error": 0,
+		"skip": 0,
+		"todo": 0,
+		"void": 0,
+		"canceled": 0,
+	}
+	var path: String = str(prepared.get("path", ""))
+	var instance_value: Variant = prepared.get("instance")
+	var discovery_error_count: int = int(prepared.get("discovery_error_count", 0))
+	if discovery_error_count > 0:
+		totals["error"] += discovery_error_count
+	if not instance_value is GDTest:
+		_send_event(
+				"suite_finished",
+				{ "id": path.trim_prefix("res://"), "status": "error", "counts": totals }
+		)
+		return totals
+	var instance: GDTest = instance_value
+	_active_test = instance
+	var root_info: GDTestSuiteInfo = prepared.get("root_info")
+	var cases: Array[Variant] = []
+	if discovery_error_count == 0:
+		for case_value: Variant in prepared.get("cases", []):
+			if (
+					case_value is Dictionary
+					and (not focus_only or bool(case_value.get("is_only", false)))
+			):
+				cases.append(case_value)
+	_send_event("suite_started", { "id": root_info.id, "name": root_info.name, "file": path })
 	if not cases.is_empty():
 		await _call_optional(instance, &"before_all", [])
 		await _call_optional(instance, &"before_suite", [root_info])
+	var open_suites: Array[GDTestSuiteInfo] = []
 	for case_value: Variant in cases:
 		if _cancel_requested:
 			break
 		var case_plan: Dictionary[String, Variant] = _string_dictionary(case_value)
+		var desired_suites: Array[GDTestSuiteInfo] = _suite_infos(case_plan.get("suite_infos", []))
+		var common_count: int = _common_suite_count(open_suites, desired_suites)
+		for index: int in range(open_suites.size() - 1, common_count - 1, -1):
+			await _call_optional(instance, &"after_suite", [open_suites[index]])
+		open_suites.resize(common_count)
+		for index: int in range(common_count, desired_suites.size()):
+			await _call_optional(instance, &"before_suite", [desired_suites[index]])
+			open_suites.append(desired_suites[index])
 		var status: String = await _run_case(instance, path, case_plan)
 		totals[status] = totals.get(status, 0) + 1
 	if not cases.is_empty():
+		for index: int in range(open_suites.size() - 1, -1, -1):
+			await _call_optional(instance, &"after_suite", [open_suites[index]])
 		await _call_optional(instance, &"after_suite", [root_info])
 		await _call_optional(instance, &"after_all", [])
 	_send_event(
 			"suite_finished",
-			{
-				"id": path.trim_prefix("res://"),
-				"status": _aggregate_status(totals),
-				"counts": totals,
-			}
+			{ "id": root_info.id, "status": _aggregate_status(totals), "counts": totals }
 	)
 	_active_test = null
 	return totals
@@ -319,41 +381,278 @@ func _run_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String, int
 func _planned_cases(
 		file_plan: Dictionary[String, Variant],
 		instance: GDTest,
-		manifest: Dictionary[String, Variant]
+		manifest: Dictionary[String, Variant],
+		discovery_errors: Array[Variant]
 ) -> Array[Variant]:
 	var planned: Array[Variant] = []
-	var provided: Variant = file_plan.get("cases", [])
-	if provided is Array and not provided.is_empty():
-		for value: Variant in provided:
-			if value is Dictionary:
-				planned.append(_string_dictionary(value))
-		return planned
 	var dynamic_cases: Array[Variant] = manifest.get("cases", [])
 	for dynamic_case: Variant in dynamic_cases:
 		if dynamic_case is Dictionary:
 			planned.append(_string_dictionary(dynamic_case))
-	var method_list: Array[Variant] = instance.get_method_list()
-	method_list.sort_custom(
-			func(left: Variant, right: Variant) -> bool:
-				return str(left.get("name", "")) < str(right.get("name", ""))
-	)
+	var provided: Variant = file_plan.get("cases", [])
+	if provided is Array and not provided.is_empty():
+		for value: Variant in provided:
+			if value is Dictionary:
+				_expand_method_case(planned, _string_dictionary(value), instance, discovery_errors)
+		return planned
+	var method_list: Array[Dictionary] = instance.get_script().get_script_method_list()
 	for method_value: Variant in method_list:
 		var method: Dictionary[String, Variant] = _string_dictionary(method_value)
 		var method_name: String = str(method.get("name", ""))
 		if not method_name.begins_with("test_") or method_name.ends_with("__cases"):
 			continue
 		var logical_name: String = method_name.trim_suffix("__only")
-		planned.append(
+		_expand_method_case(
+				planned,
 				{
 					"id": file_plan.get("file", file_plan.get("path", "")) + "::" + logical_name,
 					"name": logical_name.trim_prefix("test_").capitalize(),
-					"method": method_name,
+					"method_name": method_name,
 					"parameters": [],
 					"line": -1,
 					"is_only": method_name.ends_with("__only"),
-				}
+				},
+				instance,
+				discovery_errors
 		)
 	return planned
+
+
+func _expand_method_case(
+		planned: Array[Variant],
+		base_case: Dictionary[String, Variant],
+		instance: GDTest,
+		discovery_errors: Array[Variant]
+) -> void:
+	var method_name: String = str(base_case.get("method_name", base_case.get("method", "")))
+	var logical_name: String = method_name.trim_suffix("__only")
+	var provider_name: StringName = StringName(logical_name + "__cases")
+	var method: Dictionary[String, Variant] = _method_metadata(instance, StringName(method_name))
+	if not instance.has_method(provider_name):
+		if _required_argument_count(method) > 0:
+			discovery_errors.append(
+					{
+						"message": "%s has required arguments but no %s provider" % [
+							method_name,
+							provider_name,
+						],
+					}
+			)
+			return
+		base_case["method_name"] = method_name
+		base_case["method"] = method_name
+		base_case["parameters"] = []
+		planned.append(base_case)
+		return
+	var provider: Dictionary[String, Variant] = _method_metadata(instance, provider_name)
+	if _argument_count(provider) != 0:
+		discovery_errors.append({ "message": str(provider_name) + " must take no arguments" })
+		return
+	var rows_value: Variant = instance.callv(provider_name, [])
+	if rows_value is Dictionary:
+		var rows: Dictionary[Variant, Variant] = rows_value
+		var names: Array[String] = []
+		var named_rows: Dictionary[String, Variant] = {}
+		for key: Variant in rows:
+			var parameter_name: String = str(key)
+			if parameter_name.is_empty():
+				discovery_errors.append(
+						{ "message": str(provider_name) + " has an empty row name" }
+				)
+				continue
+			if named_rows.has(parameter_name):
+				discovery_errors.append(
+						{ "message": str(provider_name) + " has duplicate row " + parameter_name }
+				)
+				continue
+			named_rows[parameter_name] = rows[key]
+			names.append(parameter_name)
+		names.sort_custom(_utf8_less)
+		for parameter_name: String in names:
+			_append_parameter_row(
+					planned,
+					base_case,
+					method,
+					named_rows[parameter_name],
+					parameter_name,
+					_encode_component(parameter_name),
+					discovery_errors
+			)
+		return
+	if rows_value is Array:
+		var rows: Array[Variant] = rows_value
+		for index: int in range(rows.size()):
+			_append_parameter_row(
+					planned,
+					base_case,
+					method,
+					rows[index],
+					str(index),
+					str(index),
+					discovery_errors,
+					index + 1
+			)
+		return
+	discovery_errors.append(
+			{ "message": str(provider_name) + " must return a Dictionary or Array" }
+	)
+
+
+func _append_parameter_row(
+		planned: Array[Variant],
+		base_case: Dictionary[String, Variant],
+		method: Dictionary[String, Variant],
+		row_value: Variant,
+		parameter_name: String,
+		id_component: String,
+		discovery_errors: Array[Variant],
+		ordinal: int = 0
+) -> void:
+	var method_name: String = str(base_case.get("method_name", base_case.get("method", "")))
+	var provider_name: String = method_name.trim_suffix("__only") + "__cases"
+	if not row_value is Array:
+		discovery_errors.append(
+				{ "message": "%s row %s must be an Array" % [provider_name, parameter_name] }
+		)
+		return
+	var row: Array[Variant] = row_value
+	var arguments: Array[Variant] = method.get("args", [])
+	var required: int = _required_argument_count(method)
+	if row.size() < required or row.size() > arguments.size():
+		discovery_errors.append(
+				{
+					"message": "%s row %s has %d arguments; expected %d to %d" % [
+						provider_name,
+						parameter_name,
+						row.size(),
+						required,
+						arguments.size(),
+					],
+				}
+		)
+		return
+	for index: int in range(row.size()):
+		if not _argument_matches(row[index], _string_dictionary(arguments[index])):
+			discovery_errors.append(
+					{
+						"message": "%s row %s argument %d has incompatible type" % [
+							provider_name,
+							parameter_name,
+							index + 1,
+						],
+					}
+			)
+			return
+	var row_case: Dictionary[String, Variant] = base_case.duplicate(true)
+	row_case["id"] = str(base_case.get("id", "")) + "[" + id_component + "]"
+	row_case["method"] = method_name
+	row_case["method_name"] = method_name
+	row_case["parameters"] = row.duplicate(true)
+	row_case["parameter_name"] = parameter_name
+	if ordinal > 0:
+		row_case["name"] = "%s %d: %s" % [
+			str(base_case.get("name", method_name)),
+			ordinal,
+			str(row),
+		]
+	else:
+		row_case["name"] = "%s [%s]" % [str(base_case.get("name", method_name)), parameter_name]
+	planned.append(row_case)
+
+
+func _suite_name(
+		instance: GDTest,
+		script: Script,
+		path: String,
+		discovery_errors: Array[Variant]
+) -> String:
+	if instance.has_method("get_suite_name"):
+		var metadata: Dictionary[String, Variant] = _method_metadata(instance, &"get_suite_name")
+		if _argument_count(metadata) != 0:
+			discovery_errors.append({ "message": "get_suite_name must take no arguments" })
+			return path.trim_prefix("res://")
+		var value: Variant = instance.call(&"get_suite_name")
+		if not value is String or value.is_empty():
+			discovery_errors.append(
+					{ "message": "get_suite_name must synchronously return a non-empty String" }
+			)
+			return path.trim_prefix("res://")
+		return value
+	var global_name: StringName = script.get_global_name()
+	if not global_name.is_empty():
+		return str(global_name)
+	return path.trim_prefix("res://")
+
+
+func _method_metadata(instance: Object, method_name: StringName) -> Dictionary[String, Variant]:
+	for method_value: Variant in instance.get_method_list():
+		if method_value is Dictionary and str(method_value.get("name", "")) == method_name:
+			return _string_dictionary(method_value)
+	return {}
+
+
+func _argument_count(method: Dictionary[String, Variant]) -> int:
+	var arguments: Variant = method.get("args", [])
+	return arguments.size() if arguments is Array else 0
+
+
+func _required_argument_count(method: Dictionary[String, Variant]) -> int:
+	var defaults: Variant = method.get("default_args", [])
+	return _argument_count(method) - (defaults.size() if defaults is Array else 0)
+
+
+func _argument_matches(value: Variant, argument: Dictionary[String, Variant]) -> bool:
+	var expected_type: int = int(argument.get("type", TYPE_NIL))
+	var usage: int = int(argument.get("usage", 0))
+	if expected_type == TYPE_NIL or usage & PROPERTY_USAGE_NIL_IS_VARIANT != 0:
+		return true
+	if value == null and expected_type == TYPE_OBJECT:
+		return true
+	return typeof(value) == expected_type
+
+
+func _utf8_less(left: String, right: String) -> bool:
+	var left_bytes: PackedByteArray = left.to_utf8_buffer()
+	var right_bytes: PackedByteArray = right.to_utf8_buffer()
+	var shared_size: int = mini(left_bytes.size(), right_bytes.size())
+	for index: int in range(shared_size):
+		if left_bytes[index] != right_bytes[index]:
+			return left_bytes[index] < right_bytes[index]
+	return left_bytes.size() < right_bytes.size()
+
+
+func _encode_component(value: Variant) -> String:
+	var bytes: PackedByteArray = str(value).to_utf8_buffer()
+	var result: String = ""
+	for byte: int in bytes:
+		var character: String = String.chr(byte)
+		if (
+				byte >= 65 and byte <= 90
+				or byte >= 97 and byte <= 122
+				or byte >= 48 and byte <= 57
+				or character in ["-", ".", "_", "~"]
+		):
+			result += character
+		else:
+			result += "%%%02X" % byte
+	return result
+
+
+func _suite_infos(value: Variant) -> Array[GDTestSuiteInfo]:
+	var result: Array[GDTestSuiteInfo] = []
+	if not value is Array:
+		return result
+	for suite_value: Variant in value:
+		if suite_value is GDTestSuiteInfo:
+			result.append(suite_value)
+	return result
+
+
+func _common_suite_count(left: Array[GDTestSuiteInfo], right: Array[GDTestSuiteInfo]) -> int:
+	var result: int = 0
+	while result < left.size() and result < right.size() and left[result].id == right[result].id:
+		result += 1
+	return result
 
 
 func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Variant]) -> String:
@@ -383,9 +682,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	)
 	instance._gdtest_begin_case()
 	var started_usec: int = Time.get_ticks_usec()
-	if instance.has_method("before_case") and instance.has_method("before_each"):
-		instance._gdtest_record_error("before_case and before_each cannot both be defined")
-	elif instance.has_method("before_case"):
+	if instance.has_method("before_case"):
 		await _call(instance, &"before_case", [info])
 	else:
 		await _call_optional(instance, &"before_each", [info])
@@ -397,9 +694,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 			await _call(instance, method_name, parameters)
 		else:
 			instance._gdtest_record_error("case callback is unavailable")
-	if instance.has_method("after_case") and instance.has_method("after_each"):
-		instance._gdtest_record_error("after_case and after_each cannot both be defined")
-	elif instance.has_method("after_case"):
+	if instance.has_method("after_case"):
 		await _call(instance, &"after_case", [info])
 	else:
 		await _call_optional(instance, &"after_each", [info])
@@ -505,7 +800,34 @@ func _send_event(event_type: String, data: Dictionary[String, Variant]) -> void:
 
 
 func _send_worker_error(code: String, text: String) -> void:
-	_send_event("worker_error", { "code": code, "message": text, "case_id": _active_case_id })
+	_send_event(
+			"worker_error",
+			{
+				"name": code,
+				"message": text,
+				"test_id": _active_case_id,
+				"metadata": { "code": code },
+			}
+	)
+
+
+func _send_discovery_error(value: Variant, default_file: String) -> void:
+	var diagnostic: Dictionary[String, Variant] = _string_dictionary(value)
+	var location: Dictionary[String, Variant] = _string_dictionary(diagnostic.get("location", {}))
+	if str(location.get("file", "")).is_empty():
+		location["file"] = default_file
+	if not location.has("line"):
+		location["line"] = -1
+	_send_event(
+			"worker_error",
+			{
+				"name": "worker.discovery",
+				"message": str(diagnostic.get("message", value)),
+				"test_id": _active_case_id,
+				"location": location,
+				"metadata": { "code": "worker.discovery" },
+			}
+	)
 
 
 func _send(message: Dictionary[String, Variant]) -> void:

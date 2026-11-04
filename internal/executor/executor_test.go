@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/cafecito-games/gdtest/internal/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEventSinkFunc(t *testing.T) {
@@ -15,10 +17,6 @@ func TestEventSinkFunc(t *testing.T) {
 		return nil
 	})
 	want := model.Event{ProtocolVersion: model.ProtocolVersion, Type: model.EventRunStarted}
-	if err := sink.Emit(want); err != nil {
-		t.Fatalf("Emit: %v", err)
-	}
-	if got.Type != want.Type {
-		t.Fatalf("event type = %q, want %q", got.Type, want.Type)
-	}
+	require.NoError(t, sink.Emit(want))
+	assert.Equal(t, want.Type, got.Type)
 }

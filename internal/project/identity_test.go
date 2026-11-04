@@ -6,6 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestResolveLinkedDirtyWorktrees(t *testing.T) {
@@ -28,53 +31,32 @@ func TestResolveLinkedDirtyWorktrees(t *testing.T) {
 	mustWrite(t, filepath.Join(worktreeB, "value.gd"), "const VALUE: int = 2\n")
 
 	identityA, err := Resolve(context.Background(), worktreeA)
-	if err != nil {
-		t.Fatalf("Resolve worktree A: %v", err)
-	}
+	require.NoError(t, err)
 	identityB, err := Resolve(context.Background(), worktreeB)
-	if err != nil {
-		t.Fatalf("Resolve worktree B: %v", err)
-	}
-	if !identityA.Git || !identityB.Git {
-		t.Fatalf("linked worktrees were not identified as Git: %#v %#v", identityA, identityB)
-	}
-	if identityA.Repository != identityB.Repository {
-		t.Fatalf("common directories differ: %q != %q", identityA.Repository, identityB.Repository)
-	}
-	if identityA.WorktreeRoot == identityB.WorktreeRoot || identityA.WorktreeGit == identityB.WorktreeGit {
-		t.Fatalf("worktree identity leaked: %#v %#v", identityA, identityB)
-	}
+	require.NoError(t, err)
+	assert.True(t, identityA.Git)
+	assert.True(t, identityB.Git)
+	assert.Equal(t, identityA.Repository, identityB.Repository)
+	assert.NotEqual(t, identityA.WorktreeRoot, identityB.WorktreeRoot)
+	assert.NotEqual(t, identityA.WorktreeGit, identityB.WorktreeGit)
 	keyA := mustSessionKey(t, identityA, "build-a")
 	keyB := mustSessionKey(t, identityB, "build-a")
-	if keyA.ID() == keyB.ID() {
-		t.Fatal("conflicting worktrees received the same session ID")
-	}
+	assert.NotEqual(t, keyA.ID(), keyB.ID())
 
 	before := keyA.ID()
 	mustWrite(t, filepath.Join(worktreeA, "untracked.gd"), "const DIRTY: bool = true\n")
 	afterIdentity, err := Resolve(context.Background(), worktreeA)
-	if err != nil {
-		t.Fatalf("Resolve dirty worktree: %v", err)
-	}
-	if after := mustSessionKey(t, afterIdentity, "build-a").ID(); after != before {
-		t.Fatalf("dirty content changed live identity: %s != %s", before, after)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, before, mustSessionKey(t, afterIdentity, "build-a").ID())
 
 	buildB := mustSessionKey(t, identityA, "build-b")
-	if buildB.ID() == keyA.ID() {
-		t.Fatal("development build identities shared a session ID")
-	}
+	assert.NotEqual(t, keyA.ID(), buildB.ID())
 	pathA, err := RelativePath(worktreeA, filepath.Join(worktreeA, "tests", "same.test.gd"))
-	if err != nil {
-		t.Fatalf("RelativePath A: %v", err)
-	}
+	require.NoError(t, err)
 	pathB, err := RelativePath(worktreeB, filepath.Join(worktreeB, "tests", "same.test.gd"))
-	if err != nil {
-		t.Fatalf("RelativePath B: %v", err)
-	}
-	if pathA != "tests/same.test.gd" || pathA != pathB {
-		t.Fatalf("relative identities differ: %q %q", pathA, pathB)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "tests/same.test.gd", pathA)
+	assert.Equal(t, pathA, pathB)
 }
 
 func TestResolveNonGitProject(t *testing.T) {
@@ -82,47 +64,37 @@ func TestResolveNonGitProject(t *testing.T) {
 
 	root := t.TempDir()
 	identity, err := Resolve(context.Background(), root)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if identity.Git || identity.ProjectRoot != identity.Repository || identity.ProjectRoot != identity.WorktreeRoot {
-		t.Fatalf("unexpected non-Git identity: %#v", identity)
-	}
+	require.NoError(t, err)
+	assert.False(t, identity.Git)
+	assert.Equal(t, identity.ProjectRoot, identity.Repository)
+	assert.Equal(t, identity.ProjectRoot, identity.WorktreeRoot)
 	first := mustSessionKey(t, identity, "build").ID()
 	second := mustSessionKey(t, identity, "build").ID()
-	if first == "" || first != second {
-		t.Fatalf("session ID is not stable: %q %q", first, second)
-	}
+	assert.NotEmpty(t, first)
+	assert.Equal(t, first, second)
 }
 
 func TestRelativePathRejectsEscape(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	if _, err := RelativePath(root, filepath.Join(root, "..", "outside.gd")); err == nil {
-		t.Fatal("RelativePath accepted an escaping path")
-	}
+	_, err := RelativePath(root, filepath.Join(root, "..", "outside.gd"))
+	require.Error(t, err)
 }
 
 func TestContentIdentity(t *testing.T) {
 	t.Parallel()
 
-	if ContentIdentity([]byte("a")) == ContentIdentity([]byte("b")) {
-		t.Fatal("different content shared an identity")
-	}
+	assert.NotEqual(t, ContentIdentity([]byte("a")), ContentIdentity([]byte("b")))
 	first := ContentIdentity([]byte("a"))
 	second := ContentIdentity(append([]byte(nil), 'a'))
-	if first != second {
-		t.Fatal("equal content did not share an identity")
-	}
+	assert.Equal(t, first, second)
 }
 
 func mustSessionKey(t *testing.T, identity Identity, build string) SessionKey {
 	t.Helper()
 	key, err := NewSessionKey(identity, "godot-4.7.2", "default-config-v1", build)
-	if err != nil {
-		t.Fatalf("NewSessionKey: %v", err)
-	}
+	require.NoError(t, err)
 	return key
 }
 
@@ -130,17 +102,12 @@ func mustRun(t *testing.T, directory, name string, arguments ...string) {
 	t.Helper()
 	command := exec.Command(name, arguments...)
 	command.Dir = directory
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("%s %v: %v\n%s", name, arguments, err, output)
-	}
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "%s %v\n%s", name, arguments, output)
 }
 
 func mustWrite(t *testing.T, filename, contents string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(filename, []byte(contents), 0o644); err != nil {
-		t.Fatalf("WriteFile %s: %v", filename, err)
-	}
+	require.NoError(t, os.MkdirAll(filepath.Dir(filename), 0o755))
+	require.NoError(t, os.WriteFile(filename, []byte(contents), 0o644))
 }

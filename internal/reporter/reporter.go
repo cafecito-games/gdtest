@@ -48,7 +48,7 @@ func (r *Terminal) Emit(event model.Event) error {
 		_, err := fmt.Fprintf(r.writer, "FAIL %s%s: %s\n", event.TestID, location, event.Message)
 		return err
 	case model.EventWorkerError:
-		_, err := fmt.Fprintf(r.writer, "ERROR %s\n", event.Name)
+		_, err := fmt.Fprintf(r.writer, "ERROR %s: %s\n", event.Name, event.Message)
 		return err
 	default:
 		return nil

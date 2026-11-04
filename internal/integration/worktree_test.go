@@ -17,6 +17,8 @@ import (
 	"github.com/cafecito-games/gdtest/internal/model"
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/service"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
@@ -36,9 +38,7 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 	worktreeRun(t, repository, "git", "config", "user.email", "gdtest@example.invalid")
 	worktreeWrite(t, filepath.Join(repository, "project.godot"), "config_version=5\n")
 	worktreeWrite(t, filepath.Join(repository, "tests/isolation.test.gd"), failingWorktreeSource("base"))
-	if err := gdtest.InstallRuntime(repository); err != nil {
-		t.Fatalf("install runtime: %v", err)
-	}
+	require.NoError(t, gdtest.InstallRuntime(repository))
 	worktreeRun(t, repository, "git", "add", ".")
 	worktreeRun(t, repository, "git", "commit", "-m", "worktree fixture")
 	worktreeRun(t, repository, "git", "worktree", "add", "--detach", worktreeA, "HEAD")
@@ -55,9 +55,7 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := sessions.Close(ctx); err != nil {
-			t.Errorf("close worktree sessions: %v", err)
-		}
+		assert.NoError(t, sessions.Close(ctx))
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -85,28 +83,17 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 	results := make(map[string]labeledOutcome, 2)
 	for range 2 {
 		outcome := <-outcomes
-		if outcome.err != nil {
-			t.Fatalf("worktree %s run: %v", outcome.label, outcome.err)
-		}
+		require.NoError(t, outcome.err, "worktree %s run", outcome.label)
 		results[outcome.label] = outcome
 	}
 	assertWorktreeOutcome(t, results["a"].events, "pass", "")
 	assertWorktreeOutcome(t, results["b"].events, "fail", "from-worktree-b")
 	worktreeAID := stableCaseID(results["a"].events)
 	worktreeBID := stableCaseID(results["b"].events)
-	if worktreeAID == "" || worktreeBID == "" {
-		t.Fatalf("missing stable case ID: a=%q b=%q", worktreeAID, worktreeBID)
-	}
-	if worktreeAID != worktreeBID {
-		t.Fatalf(
-			"equivalent worktree IDs differ: %q != %q",
-			worktreeAID,
-			worktreeBID,
-		)
-	}
-	if got := sessions.WorkerCount(); got > 2 {
-		t.Fatalf("initial worker count = %d, exceeded 2", got)
-	}
+	assert.NotEmpty(t, worktreeAID)
+	assert.NotEmpty(t, worktreeBID)
+	assert.Equal(t, worktreeAID, worktreeBID)
+	assert.LessOrEqual(t, sessions.WorkerCount(), 2)
 
 	stressRoots := make([]string, 6)
 	for index := range stressRoots {
@@ -153,22 +140,14 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 	<-monitorDone
 	close(stressErrors)
 	for err := range stressErrors {
-		if err != nil {
-			t.Fatalf("stress warm: %v", err)
-		}
+		require.NoError(t, err)
 	}
-	if got := sessions.WorkerCount(); got > 2 {
-		t.Fatalf("retained worker count = %d, exceeded 2", got)
-	}
-	if got := peak.Load(); got > 2 {
-		t.Fatalf("peak worker count = %d, exceeded 2", got)
-	}
+	assert.LessOrEqual(t, sessions.WorkerCount(), 2)
+	assert.LessOrEqual(t, peak.Load(), int64(2))
 
 	worktreeRun(t, repository, "git", "worktree", "remove", "--force", worktreeBRegistered)
 	events, err := runWorktreePlan(ctx, sessions, worktreeA, worktreeSessionID(t, worktreeA))
-	if err != nil {
-		t.Fatalf("surviving worktree run after peer removal: %v", err)
-	}
+	require.NoError(t, err)
 	assertWorktreeOutcome(t, events, "pass", "")
 }
 
@@ -235,13 +214,9 @@ func warmWorktree(
 func worktreeSessionID(t *testing.T, root string) string {
 	t.Helper()
 	identity, err := projectidentity.Resolve(context.Background(), root)
-	if err != nil {
-		t.Fatalf("resolve worktree identity: %v", err)
-	}
+	require.NoError(t, err)
 	key, err := projectidentity.NewSessionKey(identity, "godot-4.7", "fixture-config", "fixture-build")
-	if err != nil {
-		t.Fatalf("create worktree session key: %v", err)
-	}
+	require.NoError(t, err)
 	return key.ID()
 }
 
@@ -257,11 +232,9 @@ func assertWorktreeOutcome(t *testing.T, events []model.Event, status, failureMe
 			finishedStatus = event.Status
 		}
 	}
-	if finishedStatus != status {
-		t.Fatalf("case status = %q, want %q; events = %#v", finishedStatus, status, events)
-	}
+	assert.Equal(t, status, finishedStatus, "events = %#v", events)
 	if failureMessage != "" && message != failureMessage {
-		t.Fatalf("failure message = %q, want %q", message, failureMessage)
+		assert.Equal(t, failureMessage, message)
 	}
 }
 
@@ -300,9 +273,7 @@ func bootstrapWorktree(t *testing.T, root string) {
 func canonicalWorktree(t *testing.T, root string) string {
 	t.Helper()
 	canonical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("canonicalize worktree %s: %v", root, err)
-	}
+	require.NoError(t, err, "canonicalize worktree %s", root)
 	return canonical
 }
 
@@ -310,17 +281,12 @@ func worktreeRun(t *testing.T, directory, name string, arguments ...string) {
 	t.Helper()
 	command := exec.Command(name, arguments...)
 	command.Dir = directory
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("%s %v in %s: %v\n%s", name, arguments, directory, err, output)
-	}
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "%s %v in %s\n%s", name, arguments, directory, output)
 }
 
 func worktreeWrite(t *testing.T, filename, contents string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
-		t.Fatalf("create %s: %v", filepath.Dir(filename), err)
-	}
-	if err := os.WriteFile(filename, []byte(contents), 0o644); err != nil {
-		t.Fatalf("write %s: %v", filename, err)
-	}
+	require.NoError(t, os.MkdirAll(filepath.Dir(filename), 0o755))
+	require.NoError(t, os.WriteFile(filename, []byte(contents), 0o644))
 }

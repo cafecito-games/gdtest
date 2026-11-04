@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -17,15 +16,15 @@ import (
 	"github.com/cafecito-games/gdtest/internal/model"
 	"github.com/cafecito-games/gdtest/internal/protocol"
 	"github.com/cafecito-games/gdtest/internal/version"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPersistentProcessReusesOneChild(t *testing.T) {
 	t.Parallel()
 	process := startHelperProcess(t, 3)
 	pid := process.PID()
-	if err := process.Ping(context.Background()); err != nil {
-		t.Fatalf("Ping: %v", err)
-	}
+	require.NoError(t, process.Ping(context.Background()))
 	for index := range 2 {
 		plan := helperPlan(fmt.Sprintf("run-%d", index), 3)
 		var events []model.Event
@@ -33,25 +32,14 @@ func TestPersistentProcessReusesOneChild(t *testing.T) {
 			events = append(events, event)
 			return nil
 		}))
-		if err != nil {
-			t.Fatalf("Run %d: %v", index, err)
-		}
-		if process.PID() != pid {
-			t.Fatalf("worker PID changed from %d to %d", pid, process.PID())
-		}
-		if len(events) < 4 || events[len(events)-1].Type != model.EventRunFinished {
-			t.Fatalf("events = %#v", events)
-		}
+		require.NoError(t, err, "run %d", index)
+		assert.Equal(t, pid, process.PID())
+		require.GreaterOrEqual(t, len(events), 4)
+		assert.Equal(t, model.EventRunFinished, events[len(events)-1].Type)
 	}
-	if err := process.Reset(context.Background()); err != nil {
-		t.Fatalf("Reset: %v", err)
-	}
-	if err := process.Reload(context.Background(), 4); err != nil {
-		t.Fatalf("Reload: %v", err)
-	}
-	if process.Generation() != 4 {
-		t.Fatalf("generation = %d, want 4", process.Generation())
-	}
+	require.NoError(t, process.Reset(context.Background()))
+	require.NoError(t, process.Reload(context.Background(), 4))
+	assert.EqualValues(t, 4, process.Generation())
 	shutdownProcess(t, process)
 }
 
@@ -66,14 +54,10 @@ func TestPersistentProcessCancellation(t *testing.T) {
 		}
 		return nil
 	}))
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run error = %v, want context cancellation", err)
-	}
-	if err := process.Run(context.Background(), helperPlan("after-cancel", 1), executor.EventSinkFunc(func(model.Event) error {
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, process.Run(context.Background(), helperPlan("after-cancel", 1), executor.EventSinkFunc(func(model.Event) error {
 		return nil
-	})); err != nil {
-		t.Fatalf("worker was not reusable after cancellation: %v", err)
-	}
+	})))
 	shutdownProcess(t, process)
 }
 
@@ -84,12 +68,8 @@ func TestPersistentProcessCrashNamesLastCase(t *testing.T) {
 		return nil
 	}))
 	var crash *WorkerCrashError
-	if !errors.As(err, &crash) {
-		t.Fatalf("Run error = %T %v, want WorkerCrashError", err, err)
-	}
-	if crash.LastCase != "case-crash" {
-		t.Fatalf("last case = %q, want case-crash", crash.LastCase)
-	}
+	require.ErrorAs(t, err, &crash)
+	assert.Equal(t, "case-crash", crash.LastCase)
 }
 
 func startHelperProcess(t *testing.T, generation uint64) *Process {
@@ -105,9 +85,7 @@ func startHelperProcess(t *testing.T, generation uint64) *Process {
 			return command
 		},
 	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	require.NoError(t, err)
 	return process
 }
 
@@ -115,9 +93,7 @@ func shutdownProcess(t *testing.T, process *Process) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := process.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	require.NoError(t, process.Shutdown(ctx))
 }
 
 func helperPlan(runID string, generation uint64) model.TestPlan {

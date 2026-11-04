@@ -38,7 +38,7 @@ type GodotExecutor struct {
 
 // Run starts one authenticated worker, streams one plan, then shuts it down.
 func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink executor.EventSink) error {
-	project, err := filepath.Abs(e.Project)
+	project, err := canonicalProjectPath(e.Project)
 	if err != nil {
 		return fmt.Errorf("canonicalize project: %w", err)
 	}
@@ -197,14 +197,27 @@ func verifyHandshake(decoder *protocol.Decoder, token, project, session string, 
 	if hello.RuntimeVersion != version.Product {
 		return fmt.Errorf("runtime version %q does not match executable %q", hello.RuntimeVersion, version.Product)
 	}
-	cleanProject, err := filepath.Abs(hello.ProjectPath)
-	if err != nil || filepath.Clean(cleanProject) != filepath.Clean(project) {
+	cleanProject, err := canonicalProjectPath(hello.ProjectPath)
+	expectedProject, expectedErr := canonicalProjectPath(project)
+	if err != nil || expectedErr != nil || cleanProject != expectedProject {
 		return fmt.Errorf("worker project %q does not match session project %q", hello.ProjectPath, project)
 	}
 	if hello.SessionID != session || hello.Generation != generation {
 		return errors.New("worker session or generation does not match lease")
 	}
 	return nil
+}
+
+func canonicalProjectPath(value string) (string, error) {
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
 }
 
 func randomToken() (string, error) {

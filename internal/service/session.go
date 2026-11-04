@@ -16,6 +16,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/model"
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/scheduler"
+	sourcewatch "github.com/cafecito-games/gdtest/internal/watch"
 	"github.com/cafecito-games/gdtest/internal/worker"
 )
 
@@ -40,6 +41,7 @@ type managedWorker interface {
 	Run(context.Context, model.TestPlan, executor.EventSink) error
 	Ping(context.Context) error
 	Reset(context.Context) error
+	Reload(context.Context, uint64) error
 	Shutdown(context.Context) error
 	PID() int
 	Generation() uint64
@@ -48,14 +50,17 @@ type managedWorker interface {
 type workerFactory func(context.Context, worker.ProcessOptions) (managedWorker, error)
 
 type session struct {
-	mu        sync.Mutex
-	id        string
-	project   string
-	godot     string
-	worker    managedWorker
-	lastUsed  time.Time
-	runs      uint64
-	lifecycle projectidentity.Lifecycle
+	mu             sync.Mutex
+	generationMu   sync.Mutex
+	id             string
+	project        string
+	godot          string
+	worker         managedWorker
+	source         *sourcewatch.Reconciler
+	lastStructural uint64
+	lastUsed       time.Time
+	runs           uint64
+	lifecycle      projectidentity.Lifecycle
 }
 
 // SessionInfo is the stable daemon-sessions response.
@@ -71,13 +76,14 @@ type SessionInfo struct {
 
 // SessionService implements daemon operations with one persistent worker per live project.
 type SessionService struct {
-	mu          sync.Mutex
-	sessions    map[string]*session
-	factory     workerFactory
-	maxWorkers  int
-	liveWorkers int
-	workerFreed chan struct{}
-	scheduler   *scheduler.Scheduler
+	mu            sync.Mutex
+	sessions      map[string]*session
+	factory       workerFactory
+	maxWorkers    int
+	liveWorkers   int
+	workerFreed   chan struct{}
+	scheduler     *scheduler.Scheduler
+	sourceFactory func(string) *sourcewatch.Reconciler
 }
 
 // ServiceOptions controls user-scoped process resource limits.
@@ -113,6 +119,7 @@ func newSessionServiceWithCapacity(factory workerFactory, capacity int) *Session
 	return &SessionService{
 		sessions: make(map[string]*session), factory: factory, maxWorkers: capacity,
 		workerFreed: make(chan struct{}, 1), scheduler: globalScheduler,
+		sourceFactory: sourcewatch.New,
 	}
 }
 
@@ -124,6 +131,17 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if err := decodeStrict(request.Payload, &value); err != nil {
 			return nil, err
 		}
+		if value.SessionID == "" || value.Project == "" || value.Godot == "" || value.Plan.RunID == "" {
+			return nil, errors.New("run needs session_id, project, godot, and plan.run_id")
+		}
+		entry := s.get(value.SessionID, value.Project, value.Godot)
+		result, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile source before run: %w", err)
+		}
+		if result.Update.Generation > 0 {
+			value.Plan.Generation = result.Update.Generation
+		}
 		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, func(runCtx context.Context) (any, error) {
 			return s.run(runCtx, value, emit)
 		})
@@ -131,6 +149,17 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		var value WarmRequest
 		if err := decodeStrict(request.Payload, &value); err != nil {
 			return nil, err
+		}
+		if value.SessionID == "" || value.Project == "" || value.Godot == "" {
+			return nil, errors.New("warm needs session_id, project, and godot")
+		}
+		entry := s.get(value.SessionID, value.Project, value.Godot)
+		result, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile source before warm: %w", err)
+		}
+		if result.Update.Generation > 0 {
+			value.Generation = result.Update.Generation
 		}
 		return s.schedule(ctx, value.SessionID, value.Generation, scheduler.Background, func(runCtx context.Context) (any, error) {
 			return s.warm(runCtx, value)
@@ -172,17 +201,39 @@ func (s *SessionService) schedule(
 }
 
 func (s *SessionService) run(ctx context.Context, request RunRequest, emit daemon.EmitFunc) (any, error) {
-	if request.SessionID == "" || request.Project == "" || request.Godot == "" || request.Plan.RunID == "" {
-		return nil, errors.New("run needs session_id, project, godot, and plan.run_id")
-	}
 	entry := s.get(request.SessionID, request.Project, request.Godot)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
+	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Filesystem)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile source at run start: %w", err)
+	}
+	if latest.Update.Generation > 0 {
+		request.Plan.Generation = latest.Update.Generation
+	}
 	process, err := s.ensureWorker(ctx, entry, request.Plan.Generation)
 	if err != nil {
 		return nil, err
 	}
-	sink := executor.EventSinkFunc(func(event model.Event) error { return emit(event) })
+	sink := executor.EventSinkFunc(func(event model.Event) error {
+		if event.Type == model.EventRunFinished {
+			if _, reconcileErr := s.reconcileSource(ctx, entry, sourcewatch.Filesystem); reconcileErr != nil {
+				return fmt.Errorf("reconcile source after run: %w", reconcileErr)
+			}
+		}
+		if entry.source != nil {
+			stamp := entry.source.Stamp(request.Plan.Generation)
+			event.Stale = stamp.Stale
+			if stamp.Stale {
+				if event.Metadata == nil {
+					event.Metadata = make(map[string]any)
+				}
+				event.Metadata["requested_generation"] = stamp.Requested
+				event.Metadata["current_generation"] = stamp.Current
+			}
+		}
+		return emit(event)
+	})
 	if err := process.Run(ctx, request.Plan, sink); err != nil {
 		s.discardWorker(entry)
 		return nil, err
@@ -203,12 +254,16 @@ func (s *SessionService) run(ctx context.Context, request RunRequest, emit daemo
 }
 
 func (s *SessionService) warm(ctx context.Context, request WarmRequest) (any, error) {
-	if request.SessionID == "" || request.Project == "" || request.Godot == "" {
-		return nil, errors.New("warm needs session_id, project, and godot")
-	}
 	entry := s.get(request.SessionID, request.Project, request.Godot)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
+	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Filesystem)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile source before worker warmup: %w", err)
+	}
+	if latest.Update.Generation > 0 {
+		request.Generation = latest.Update.Generation
+	}
 	process, err := s.ensureWorker(ctx, entry, request.Generation)
 	if err != nil {
 		return nil, err
@@ -237,6 +292,9 @@ func (s *SessionService) get(id, project, godot string) *session {
 		id: id, project: project, godot: godot, lastUsed: now,
 		lifecycle: projectidentity.Lifecycle{ProjectRoot: project, LastUsed: now},
 	}
+	if s.sourceFactory != nil {
+		created.source = s.sourceFactory(project)
+	}
 	s.sessions[key] = created
 	return created
 }
@@ -247,6 +305,11 @@ func (s *SessionService) ensureWorker(ctx context.Context, entry *session, gener
 	}
 	if entry.worker != nil && entry.worker.Generation() == generation {
 		return entry.worker, nil
+	}
+	if entry.worker != nil && entry.worker.Generation() < generation && s.canReload(entry, entry.worker.Generation()) {
+		if err := entry.worker.Reload(ctx, generation); err == nil {
+			return entry.worker, nil
+		}
 	}
 	hasSlot := entry.worker != nil
 	if hasSlot {
@@ -278,6 +341,38 @@ func (s *SessionService) ensureWorker(ctx context.Context, entry *session, gener
 	entry.lastUsed = time.Now().UTC()
 	entry.lifecycle.Touch(entry.lastUsed)
 	return process, nil
+}
+
+func (s *SessionService) reconcileSource(
+	ctx context.Context,
+	entry *session,
+	trigger sourcewatch.Trigger,
+) (sourcewatch.Result, error) {
+	if entry.source == nil {
+		return sourcewatch.Result{}, nil
+	}
+	result, err := entry.source.Reconcile(ctx, trigger)
+	if err != nil {
+		return sourcewatch.Result{}, err
+	}
+	if len(result.Update.Changes) == 0 {
+		return result, nil
+	}
+	entry.generationMu.Lock()
+	if result.Update.Structural {
+		entry.lastStructural = result.Update.Generation
+	}
+	entry.generationMu.Unlock()
+	if s.scheduler != nil {
+		s.scheduler.AdvanceGeneration(entry.id, result.Update.Generation)
+	}
+	return result, nil
+}
+
+func (s *SessionService) canReload(entry *session, workerGeneration uint64) bool {
+	entry.generationMu.Lock()
+	defer entry.generationMu.Unlock()
+	return entry.lastStructural <= workerGeneration
 }
 
 func (s *SessionService) reserveWorkerSlot(ctx context.Context, current *session) error {
@@ -420,6 +515,37 @@ func (s *SessionService) Reconcile(
 		s.mu.Unlock()
 	}
 	return removed, nil
+}
+
+// ReconcileSources performs an authoritative scan for every live session.
+// It is safe to call periodically because each project reconciler serializes
+// its own scans and only content changes advance a generation.
+func (s *SessionService) ReconcileSources(
+	ctx context.Context,
+) (map[string]sourcewatch.Result, map[string]error) {
+	s.mu.Lock()
+	entries := make([]*session, 0, len(s.sessions))
+	for _, entry := range s.sessions {
+		entries = append(entries, entry)
+	}
+	s.mu.Unlock()
+	updates := make(map[string]sourcewatch.Result)
+	failures := make(map[string]error)
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			failures[entry.id] = err
+			break
+		}
+		result, err := s.reconcileSource(ctx, entry, sourcewatch.Periodic)
+		if err != nil {
+			failures[entry.id] = err
+			continue
+		}
+		if len(result.Update.Changes) > 0 {
+			updates[entry.id] = result
+		}
+	}
+	return updates, failures
 }
 
 // List snapshots live sessions in project-path order.
