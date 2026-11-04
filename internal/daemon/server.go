@@ -133,6 +133,9 @@ func (s *Server) handleConnection(ctx context.Context, connection net.Conn) {
 				"pid": os.Getpid(), "protocol": ProtocolVersion, "build_id": s.Namespace.BuildID,
 				"started_at": s.startedAt, "uptime_ns": time.Since(s.startedAt).Nanoseconds(),
 			}
+			if provider, ok := s.Handler.(StatusProvider); ok {
+				result["service"] = provider.DaemonStatus()
+			}
 			if err := encodeMessage(encoder, MessageResponse, request.ID, request.Method, true, result); err != nil {
 				return
 			}

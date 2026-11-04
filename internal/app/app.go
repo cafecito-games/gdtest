@@ -23,6 +23,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/discovery"
 	"github.com/cafecito-games/gdtest/internal/executor"
 	"github.com/cafecito-games/gdtest/internal/model"
+	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/reporter"
 	"github.com/cafecito-games/gdtest/internal/results"
 	"github.com/cafecito-games/gdtest/internal/service"
@@ -153,6 +154,11 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 		Generation:      1,
 		Files:           manifest.Files,
 	}
+	sessionID, err := resolveSessionID(ctx, root, projectConfig)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
 	collector := results.NewCollector()
 	var eventReporter executor.EventSink
 	var finish func(results.Summary) error
@@ -171,7 +177,10 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 		}
 		return eventReporter.Emit(event)
 	})
-	if err := executePlan(ctx, root, projectConfig.Godot, plan, sink, *noDaemon, streams); err != nil {
+	if err := executePlan(
+		ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
+		plan, sink, *noDaemon, streams,
+	); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return ExitCanceled
 		}
@@ -191,8 +200,10 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 
 func executePlan(
 	ctx context.Context,
+	sessionID string,
 	root string,
 	godot string,
+	workerMaxRuns int,
 	plan model.TestPlan,
 	sink executor.EventSink,
 	noDaemon bool,
@@ -210,7 +221,8 @@ func executePlan(
 		return err
 	}
 	_, err = daemonClient.Call(ctx, "session.run", service.RunRequest{
-		Project: root, Godot: godot, Plan: plan,
+		SessionID: sessionID, Project: root, Godot: godot,
+		Plan: plan, WorkerMaxRuns: workerMaxRuns,
 	}, func(data json.RawMessage) error {
 		var event model.Event
 		if err := json.Unmarshal(data, &event); err != nil {
@@ -293,8 +305,12 @@ func doctor(ctx context.Context, arguments []string, streams IO) error {
 	if err != nil {
 		return err
 	}
+	sessionID, err := resolveSessionID(ctx, root, projectConfig)
+	if err != nil {
+		return err
+	}
 	response, err := daemonClient.Call(ctx, "session.warm", service.WarmRequest{
-		Project: root, Godot: projectConfig.Godot, Generation: 1,
+		SessionID: sessionID, Project: root, Godot: projectConfig.Godot, Generation: 1,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("headless worker handshake: %w", err)
@@ -322,8 +338,12 @@ func warm(ctx context.Context, arguments []string, streams IO) error {
 	if err != nil {
 		return err
 	}
+	sessionID, err := resolveSessionID(ctx, root, projectConfig)
+	if err != nil {
+		return err
+	}
 	response, err := daemonClient.Call(ctx, "session.warm", service.WarmRequest{
-		Project: root, Godot: projectConfig.Godot, Generation: 1,
+		SessionID: sessionID, Project: root, Godot: projectConfig.Godot, Generation: 1,
 	}, nil)
 	if err != nil {
 		return err
@@ -395,7 +415,29 @@ func serveDaemon(ctx context.Context, arguments []string, streams IO) error {
 	}
 	defer func() { _ = logger.Close() }()
 	sessions := service.NewSessionService()
+	janitorCtx, stopJanitor := context.WithCancel(ctx)
+	janitorDone := make(chan struct{})
+	go func() {
+		defer close(janitorDone)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-janitorCtx.Done():
+				return
+			case now := <-ticker.C:
+				removed, reconcileErr := sessions.Reconcile(now, 2*time.Second, 2*time.Minute)
+				if reconcileErr != nil {
+					_ = logger.Write(map[string]any{"event": "session_reconcile_error", "error": reconcileErr.Error()})
+				} else if len(removed) > 0 {
+					_ = logger.Write(map[string]any{"event": "sessions_evicted", "sessions": removed})
+				}
+			}
+		}
+	}()
 	defer func() {
+		stopJanitor()
+		<-janitorDone
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = sessions.Close(shutdownCtx)
 		cancel()
@@ -414,6 +456,35 @@ func compatibleClient(autoStart bool) (client.Client, error) {
 		result.Starter = client.ExecutableStarter("")
 	}
 	return result, nil
+}
+
+func resolveSessionID(ctx context.Context, root string, projectConfig config.Project) (string, error) {
+	identity, err := projectidentity.Resolve(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	godotExecutable, err := exec.LookPath(projectConfig.Godot)
+	if err != nil {
+		return "", fmt.Errorf("identify Godot executable: %w", err)
+	}
+	godotIdentity, err := projectidentity.ExecutableIdentity(godotExecutable)
+	if err != nil {
+		return "", fmt.Errorf("identify Godot executable: %w", err)
+	}
+	configuration, err := json.Marshal(projectConfig)
+	if err != nil {
+		return "", fmt.Errorf("identify project configuration: %w", err)
+	}
+	key, err := projectidentity.NewSessionKey(
+		identity,
+		godotIdentity,
+		projectidentity.ContentIdentity(configuration),
+		version.BuildID(),
+	)
+	if err != nil {
+		return "", err
+	}
+	return key.ID(), nil
 }
 
 func printJSON(writer io.Writer, data []byte) error {

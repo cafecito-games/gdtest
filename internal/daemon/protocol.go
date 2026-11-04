@@ -38,6 +38,11 @@ type Handler interface {
 	Handle(context.Context, Request, EmitFunc) (any, error)
 }
 
+// StatusProvider contributes resource/session details to daemon.status.
+type StatusProvider interface {
+	DaemonStatus() any
+}
+
 // HandlerFunc adapts a function to Handler.
 type HandlerFunc func(context.Context, Request, EmitFunc) (any, error)
 

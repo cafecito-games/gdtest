@@ -3,11 +3,15 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/cafecito-games/gdtest/internal/daemon"
 	"github.com/cafecito-games/gdtest/internal/executor"
 	"github.com/cafecito-games/gdtest/internal/model"
+	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/worker"
 )
 
@@ -42,7 +46,7 @@ func TestSessionServiceReusesWorker(t *testing.T) {
 		},
 	}
 	request := RunRequest{
-		Project: "/project", Godot: "godot",
+		SessionID: "session-project", Project: "/project", Godot: "godot",
 		Plan: model.TestPlan{ProtocolVersion: 1, RunID: "run-1", Generation: 1},
 	}
 	for index := range 2 {
@@ -83,7 +87,9 @@ func TestSessionServiceReplacesGeneration(t *testing.T) {
 		},
 	}
 	for _, generation := range []uint64{1, 2} {
-		payload, err := json.Marshal(WarmRequest{Project: "/project", Godot: "godot", Generation: generation})
+		payload, err := json.Marshal(WarmRequest{
+			SessionID: "session-project", Project: "/project", Godot: "godot", Generation: generation,
+		})
 		if err != nil {
 			t.Fatalf("marshal warm: %v", err)
 		}
@@ -95,5 +101,109 @@ func TestSessionServiceReplacesGeneration(t *testing.T) {
 	}
 	if len(processes) != 2 || !processes[0].closed || processes[1].closed {
 		t.Fatalf("process lifecycle = %#v", processes)
+	}
+}
+
+func TestSessionServiceBoundsRetainedWorkers(t *testing.T) {
+	t.Parallel()
+
+	var processes []*fakeWorker
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 100 + len(processes), generation: options.Generation}
+		processes = append(processes, process)
+		return process, nil
+	})
+	service.maxWorkers = 3
+	for index := range 10 {
+		payload, err := json.Marshal(WarmRequest{
+			SessionID: fmt.Sprintf("session-%02d", index),
+			Project:   fmt.Sprintf("/worktree-%02d", index), Godot: "godot", Generation: 1,
+		})
+		if err != nil {
+			t.Fatalf("marshal warm: %v", err)
+		}
+		if _, err := service.Handle(context.Background(), daemon.Request{
+			ID: "warm", Method: "session.warm", Payload: payload,
+		}, nil); err != nil {
+			t.Fatalf("warm %d: %v", index, err)
+		}
+		if got := service.WorkerCount(); got > 3 {
+			t.Fatalf("worker count = %d, exceeded 3", got)
+		}
+	}
+	closed := 0
+	for _, process := range processes {
+		if process.closed {
+			closed++
+		}
+	}
+	if service.WorkerCount() != 3 || closed != 7 {
+		t.Fatalf("workers=%d closed=%d, want 3/7", service.WorkerCount(), closed)
+	}
+}
+
+func TestSessionServiceReconcilesDeletedWorktree(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	process := &fakeWorker{pid: 88, generation: 1}
+	service := &SessionService{
+		sessions: make(map[string]*session),
+		factory: func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+			return process, nil
+		},
+	}
+	payload, err := json.Marshal(WarmRequest{
+		SessionID: "deleted-worktree", Project: root, Godot: "godot", Generation: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal warm: %v", err)
+	}
+	if _, err := service.Handle(context.Background(), daemon.Request{
+		ID: "warm", Method: "session.warm", Payload: payload,
+	}, nil); err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatalf("remove worktree: %v", err)
+	}
+	now := time.Now().UTC()
+	removed, err := service.Reconcile(now, time.Minute, time.Hour)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("first reconcile = %#v, %v", removed, err)
+	}
+	removed, err = service.Reconcile(now.Add(2*time.Minute), time.Minute, time.Hour)
+	if err != nil || removed["deleted-worktree"] != projectidentity.RemoveMissing {
+		t.Fatalf("expired reconcile = %#v, %v", removed, err)
+	}
+	if !process.closed || service.WorkerCount() != 0 {
+		t.Fatalf("closed=%t workers=%d", process.closed, service.WorkerCount())
+	}
+}
+
+func TestSessionServiceRecyclesAtRunLimit(t *testing.T) {
+	t.Parallel()
+
+	process := &fakeWorker{pid: 91, generation: 1}
+	service := &SessionService{
+		sessions: make(map[string]*session),
+		factory: func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+			return process, nil
+		},
+	}
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "recycle", Project: "/project", Godot: "godot", WorkerMaxRuns: 1,
+		Plan: model.TestPlan{ProtocolVersion: 1, RunID: "run", Generation: 1},
+	})
+	if err != nil {
+		t.Fatalf("marshal run: %v", err)
+	}
+	if _, err := service.Handle(context.Background(), daemon.Request{
+		ID: "run", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil }); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !process.closed || service.WorkerCount() != 0 {
+		t.Fatalf("closed=%t workers=%d", process.closed, service.WorkerCount())
 	}
 }

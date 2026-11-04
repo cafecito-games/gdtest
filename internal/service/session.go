@@ -4,8 +4,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,18 +14,23 @@ import (
 	"github.com/cafecito-games/gdtest/internal/daemon"
 	"github.com/cafecito-games/gdtest/internal/executor"
 	"github.com/cafecito-games/gdtest/internal/model"
+	projectidentity "github.com/cafecito-games/gdtest/internal/project"
+	"github.com/cafecito-games/gdtest/internal/scheduler"
 	"github.com/cafecito-games/gdtest/internal/worker"
 )
 
 // RunRequest contains the path-specific lease data and path-neutral plan.
 type RunRequest struct {
-	Project string         `json:"project"`
-	Godot   string         `json:"godot"`
-	Plan    model.TestPlan `json:"plan"`
+	SessionID     string         `json:"session_id"`
+	Project       string         `json:"project"`
+	Godot         string         `json:"godot"`
+	Plan          model.TestPlan `json:"plan"`
+	WorkerMaxRuns int            `json:"worker_max_runs,omitempty"`
 }
 
 // WarmRequest prepares one worker for a project generation.
 type WarmRequest struct {
+	SessionID  string `json:"session_id"`
 	Project    string `json:"project"`
 	Godot      string `json:"godot"`
 	Generation uint64 `json:"generation"`
@@ -45,16 +48,19 @@ type managedWorker interface {
 type workerFactory func(context.Context, worker.ProcessOptions) (managedWorker, error)
 
 type session struct {
-	mu       sync.Mutex
-	project  string
-	godot    string
-	worker   managedWorker
-	lastUsed time.Time
-	runs     uint64
+	mu        sync.Mutex
+	id        string
+	project   string
+	godot     string
+	worker    managedWorker
+	lastUsed  time.Time
+	runs      uint64
+	lifecycle projectidentity.Lifecycle
 }
 
 // SessionInfo is the stable daemon-sessions response.
 type SessionInfo struct {
+	ID         string    `json:"id"`
 	Project    string    `json:"project"`
 	Godot      string    `json:"godot"`
 	Generation uint64    `json:"generation"`
@@ -65,20 +71,49 @@ type SessionInfo struct {
 
 // SessionService implements daemon operations with one persistent worker per live project.
 type SessionService struct {
-	mu       sync.Mutex
-	sessions map[string]*session
-	factory  workerFactory
+	mu          sync.Mutex
+	sessions    map[string]*session
+	factory     workerFactory
+	maxWorkers  int
+	liveWorkers int
+	workerFreed chan struct{}
+	scheduler   *scheduler.Scheduler
+}
+
+// ServiceOptions controls user-scoped process resource limits.
+type ServiceOptions struct {
+	MaxWorkers int
 }
 
 // NewSessionService creates an empty service using real Godot workers.
 func NewSessionService() *SessionService {
-	return newSessionService(func(ctx context.Context, options worker.ProcessOptions) (managedWorker, error) {
-		return worker.Start(ctx, options)
-	})
+	return NewSessionServiceWithOptions(ServiceOptions{MaxWorkers: 4})
+}
+
+// NewSessionServiceWithOptions creates a production service with a global worker bound.
+func NewSessionServiceWithOptions(options ServiceOptions) *SessionService {
+	if options.MaxWorkers <= 0 {
+		options.MaxWorkers = 4
+	}
+	result := newSessionServiceWithCapacity(func(ctx context.Context, workerOptions worker.ProcessOptions) (managedWorker, error) {
+		return worker.Start(ctx, workerOptions)
+	}, options.MaxWorkers)
+	return result
 }
 
 func newSessionService(factory workerFactory) *SessionService {
-	return &SessionService{sessions: make(map[string]*session), factory: factory}
+	return newSessionServiceWithCapacity(factory, 4)
+}
+
+func newSessionServiceWithCapacity(factory workerFactory, capacity int) *SessionService {
+	globalScheduler, err := scheduler.New(scheduler.Options{Capacity: capacity, BackgroundLimit: 1})
+	if err != nil {
+		panic(err)
+	}
+	return &SessionService{
+		sessions: make(map[string]*session), factory: factory, maxWorkers: capacity,
+		workerFreed: make(chan struct{}, 1), scheduler: globalScheduler,
+	}
 }
 
 // Handle implements daemon.Handler.
@@ -89,13 +124,17 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if err := decodeStrict(request.Payload, &value); err != nil {
 			return nil, err
 		}
-		return s.run(ctx, value, emit)
+		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, func(runCtx context.Context) (any, error) {
+			return s.run(runCtx, value, emit)
+		})
 	case "session.warm":
 		var value WarmRequest
 		if err := decodeStrict(request.Payload, &value); err != nil {
 			return nil, err
 		}
-		return s.warm(ctx, value)
+		return s.schedule(ctx, value.SessionID, value.Generation, scheduler.Background, func(runCtx context.Context) (any, error) {
+			return s.warm(runCtx, value)
+		})
 	case "daemon.sessions":
 		return s.List(), nil
 	default:
@@ -103,11 +142,40 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 	}
 }
 
-func (s *SessionService) run(ctx context.Context, request RunRequest, emit daemon.EmitFunc) (any, error) {
-	if request.Project == "" || request.Godot == "" || request.Plan.RunID == "" {
-		return nil, errors.New("run needs project, godot, and plan.run_id")
+func (s *SessionService) schedule(
+	ctx context.Context,
+	sessionID string,
+	generation uint64,
+	priority scheduler.Priority,
+	operation func(context.Context) (any, error),
+) (any, error) {
+	if s.scheduler == nil {
+		return operation(ctx)
 	}
-	entry := s.get(request.Project, request.Godot)
+	if generation == 0 {
+		generation = 1
+	}
+	var value any
+	future := s.scheduler.Submit(ctx, scheduler.Request{
+		Session: sessionID, Generation: generation, Priority: priority, Isolation: scheduler.Reuse,
+		Run: func(runCtx context.Context, _ scheduler.Lease) error {
+			var err error
+			value, err = operation(runCtx)
+			return err
+		},
+	})
+	result, err := future.Wait(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return value, result.Err
+}
+
+func (s *SessionService) run(ctx context.Context, request RunRequest, emit daemon.EmitFunc) (any, error) {
+	if request.SessionID == "" || request.Project == "" || request.Godot == "" || request.Plan.RunID == "" {
+		return nil, errors.New("run needs session_id, project, godot, and plan.run_id")
+	}
+	entry := s.get(request.SessionID, request.Project, request.Godot)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	process, err := s.ensureWorker(ctx, entry, request.Plan.Generation)
@@ -116,29 +184,29 @@ func (s *SessionService) run(ctx context.Context, request RunRequest, emit daemo
 	}
 	sink := executor.EventSinkFunc(func(event model.Event) error { return emit(event) })
 	if err := process.Run(ctx, request.Plan, sink); err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = process.Shutdown(shutdownCtx)
-		cancel()
-		entry.worker = nil
+		s.discardWorker(entry)
 		return nil, err
 	}
 	entry.runs++
 	entry.lastUsed = time.Now().UTC()
+	entry.lifecycle.Touch(entry.lastUsed)
 	if err := process.Reset(ctx); err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = process.Shutdown(shutdownCtx)
-		cancel()
-		entry.worker = nil
+		s.discardWorker(entry)
 		return nil, fmt.Errorf("reset worker after run: %w", err)
 	}
-	return map[string]any{"worker_pid": process.PID(), "reused": entry.runs > 1}, nil
+	pid := process.PID()
+	reused := entry.runs > 1
+	if request.WorkerMaxRuns > 0 && entry.runs >= uint64(request.WorkerMaxRuns) {
+		s.discardWorker(entry)
+	}
+	return map[string]any{"worker_pid": pid, "reused": reused}, nil
 }
 
 func (s *SessionService) warm(ctx context.Context, request WarmRequest) (any, error) {
-	if request.Project == "" || request.Godot == "" {
-		return nil, errors.New("warm needs project and godot")
+	if request.SessionID == "" || request.Project == "" || request.Godot == "" {
+		return nil, errors.New("warm needs session_id, project, and godot")
 	}
-	entry := s.get(request.Project, request.Godot)
+	entry := s.get(request.SessionID, request.Project, request.Godot)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	process, err := s.ensureWorker(ctx, entry, request.Generation)
@@ -146,15 +214,16 @@ func (s *SessionService) warm(ctx context.Context, request WarmRequest) (any, er
 		return nil, err
 	}
 	if err := process.Ping(ctx); err != nil {
-		entry.worker = nil
+		s.discardWorker(entry)
 		return nil, err
 	}
 	entry.lastUsed = time.Now().UTC()
+	entry.lifecycle.Touch(entry.lastUsed)
 	return map[string]any{"worker_pid": process.PID(), "generation": process.Generation()}, nil
 }
 
-func (s *SessionService) get(project, godot string) *session {
-	key := project + "\x00" + godot
+func (s *SessionService) get(id, project, godot string) *session {
+	key := id
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions == nil {
@@ -163,7 +232,11 @@ func (s *SessionService) get(project, godot string) *session {
 	if existing := s.sessions[key]; existing != nil {
 		return existing
 	}
-	created := &session{project: project, godot: godot, lastUsed: time.Now().UTC()}
+	now := time.Now().UTC()
+	created := &session{
+		id: id, project: project, godot: godot, lastUsed: now,
+		lifecycle: projectidentity.Lifecycle{ProjectRoot: project, LastUsed: now},
+	}
 	s.sessions[key] = created
 	return created
 }
@@ -175,13 +248,18 @@ func (s *SessionService) ensureWorker(ctx context.Context, entry *session, gener
 	if entry.worker != nil && entry.worker.Generation() == generation {
 		return entry.worker, nil
 	}
-	if entry.worker != nil {
+	hasSlot := entry.worker != nil
+	if hasSlot {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = entry.worker.Shutdown(shutdownCtx)
 		cancel()
 		entry.worker = nil
 	}
-	digest := sha256.Sum256([]byte(entry.project + "\x00" + entry.godot))
+	if !hasSlot {
+		if err := s.reserveWorkerSlot(ctx, entry); err != nil {
+			return nil, err
+		}
+	}
 	factory := s.factory
 	if factory == nil {
 		factory = func(ctx context.Context, options worker.ProcessOptions) (managedWorker, error) {
@@ -190,14 +268,158 @@ func (s *SessionService) ensureWorker(ctx context.Context, entry *session, gener
 	}
 	process, err := factory(ctx, worker.ProcessOptions{
 		Godot: entry.godot, Project: entry.project,
-		SessionID: "session-" + hex.EncodeToString(digest[:8]), Generation: generation,
+		SessionID: entry.id, Generation: generation,
 	})
 	if err != nil {
+		s.releaseWorkerSlot()
 		return nil, err
 	}
 	entry.worker = process
 	entry.lastUsed = time.Now().UTC()
+	entry.lifecycle.Touch(entry.lastUsed)
 	return process, nil
+}
+
+func (s *SessionService) reserveWorkerSlot(ctx context.Context, current *session) error {
+	for {
+		s.mu.Lock()
+		if s.maxWorkers <= 0 {
+			s.maxWorkers = 4
+		}
+		if s.workerFreed == nil {
+			s.workerFreed = make(chan struct{}, 1)
+		}
+		if s.liveWorkers < s.maxWorkers {
+			s.liveWorkers++
+			s.mu.Unlock()
+			return nil
+		}
+		candidates := make([]*session, 0, len(s.sessions))
+		for _, candidate := range s.sessions {
+			if candidate != current {
+				candidates = append(candidates, candidate)
+			}
+		}
+		notification := s.workerFreed
+		s.mu.Unlock()
+		var oldest *session
+		for _, candidate := range candidates {
+			if !candidate.mu.TryLock() {
+				continue
+			}
+			if candidate.worker == nil {
+				candidate.mu.Unlock()
+				continue
+			}
+			if oldest == nil || candidate.lastUsed.Before(oldest.lastUsed) {
+				if oldest != nil {
+					oldest.mu.Unlock()
+				}
+				oldest = candidate
+			} else {
+				candidate.mu.Unlock()
+			}
+		}
+		if oldest != nil {
+			s.discardWorker(oldest)
+			oldest.mu.Unlock()
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-notification:
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func (s *SessionService) discardWorker(entry *session) {
+	if entry.worker == nil {
+		return
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = entry.worker.Shutdown(shutdownCtx)
+	cancel()
+	entry.worker = nil
+	s.releaseWorkerSlot()
+}
+
+func (s *SessionService) releaseWorkerSlot() {
+	s.mu.Lock()
+	if s.liveWorkers > 0 {
+		s.liveWorkers--
+	}
+	if s.workerFreed == nil {
+		s.workerFreed = make(chan struct{}, 1)
+	}
+	notification := s.workerFreed
+	s.mu.Unlock()
+	select {
+	case notification <- struct{}{}:
+	default:
+	}
+}
+
+// WorkerCount returns the current global process count for diagnostics and tests.
+func (s *SessionService) WorkerCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.liveWorkers
+}
+
+// DaemonStatus reports global scheduling and process bounds.
+func (s *SessionService) DaemonStatus() any {
+	status := map[string]any{
+		"workers":     s.WorkerCount(),
+		"sessions":    len(s.List()),
+		"max_workers": s.maxWorkers,
+	}
+	if s.scheduler != nil {
+		status["scheduler"] = s.scheduler.Stats()
+	}
+	return status
+}
+
+// Reconcile removes idle or disappeared project sessions without touching other worktrees.
+func (s *SessionService) Reconcile(
+	now time.Time,
+	missingGrace time.Duration,
+	idleTTL time.Duration,
+) (map[string]projectidentity.RemovalReason, error) {
+	s.mu.Lock()
+	entries := make(map[string]*session, len(s.sessions))
+	for key, entry := range s.sessions {
+		entries[key] = entry
+	}
+	s.mu.Unlock()
+	removed := make(map[string]projectidentity.RemovalReason)
+	for key, entry := range entries {
+		if !entry.mu.TryLock() {
+			continue
+		}
+		reason, err := entry.lifecycle.Reconcile(now, missingGrace, idleTTL)
+		if err != nil {
+			entry.mu.Unlock()
+			return removed, err
+		}
+		if reason == projectidentity.KeepSession {
+			entry.mu.Unlock()
+			continue
+		}
+		if s.scheduler != nil {
+			s.scheduler.AdvanceGeneration(entry.id, ^uint64(0))
+		}
+		s.discardWorker(entry)
+		entry.mu.Unlock()
+		s.mu.Lock()
+		if s.sessions[key] == entry {
+			delete(s.sessions, key)
+			removed[entry.id] = reason
+		}
+		s.mu.Unlock()
+	}
+	return removed, nil
 }
 
 // List snapshots live sessions in project-path order.
@@ -213,7 +435,7 @@ func (s *SessionService) List() []SessionInfo {
 		entry.mu.Lock()
 		if entry.worker != nil {
 			result = append(result, SessionInfo{
-				Project: entry.project, Godot: entry.godot, Generation: entry.worker.Generation(),
+				ID: entry.id, Project: entry.project, Godot: entry.godot, Generation: entry.worker.Generation(),
 				WorkerPID: entry.worker.PID(), Runs: entry.runs, LastUsed: entry.lastUsed,
 			})
 		}
@@ -225,18 +447,22 @@ func (s *SessionService) List() []SessionInfo {
 
 // Close shuts down every exact child owned by this service.
 func (s *SessionService) Close(ctx context.Context) error {
+	var joined error
+	if s.scheduler != nil {
+		joined = errors.Join(joined, s.scheduler.Shutdown(ctx))
+	}
 	s.mu.Lock()
 	entries := make([]*session, 0, len(s.sessions))
 	for _, entry := range s.sessions {
 		entries = append(entries, entry)
 	}
 	s.mu.Unlock()
-	var joined error
 	for _, entry := range entries {
 		entry.mu.Lock()
 		if entry.worker != nil {
 			joined = errors.Join(joined, entry.worker.Shutdown(ctx))
 			entry.worker = nil
+			s.releaseWorkerSlot()
 		}
 		entry.mu.Unlock()
 	}
