@@ -461,6 +461,7 @@ func _reload_command(command: Dictionary[String, Variant]) -> void:
 	_generation = requested_generation
 	_send(
 			{
+				"version": Version.WORKER_PROTOCOL_VERSION,
 				"type": "reload_finished",
 				"request_id": str(command.get("request_id", "")),
 				"generation": _generation,
@@ -476,6 +477,7 @@ func _reset_command(command: Dictionary[String, Variant]) -> void:
 	_active_case_id = ""
 	_send(
 			{
+				"version": Version.WORKER_PROTOCOL_VERSION,
 				"type": "reset_finished",
 				"request_id": str(command.get("request_id", "")),
 				"generation": _generation,
