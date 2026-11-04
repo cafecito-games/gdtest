@@ -43,6 +43,25 @@ func TestPersistentProcessReusesOneChild(t *testing.T) {
 	shutdownProcess(t, process)
 }
 
+func TestPersistentProcessDiscoversSerializableManifest(t *testing.T) {
+	t.Parallel()
+	process := startHelperProcess(t, 3)
+	pid := process.PID()
+	plan := helperPlan("discover-plan", 3)
+	plan.ContentFingerprint = "content-a"
+	manifest, err := process.Discover(context.Background(), plan)
+	require.NoError(t, err)
+	assert.Equal(t, model.ProtocolVersion, manifest.ProtocolVersion)
+	assert.EqualValues(t, 3, manifest.Generation)
+	assert.Equal(t, "content-a", manifest.ContentFingerprint)
+	require.Len(t, manifest.Files, 1)
+	require.Len(t, manifest.Files[0].Cases, 1)
+	assert.Equal(t, "tests/example.test.gd::dynamic@2:0[case]", manifest.Files[0].Cases[0].ID)
+	assert.Equal(t, pid, process.PID())
+	require.NoError(t, process.Ping(context.Background()))
+	shutdownProcess(t, process)
+}
+
 func TestPersistentProcessCancellation(t *testing.T) {
 	t.Parallel()
 	process := startHelperProcess(t, 1)
@@ -154,6 +173,28 @@ func TestGDTestWorkerHelper(t *testing.T) {
 			_ = encoder.Encode(protocol.Envelope{Version: protocol.Version, Type: "reset_finished", RequestID: message.RequestID})
 		case "reload":
 			_ = encoder.Encode(protocol.Envelope{Version: protocol.Version, Type: "reload_finished", RequestID: message.RequestID})
+		case "discover":
+			var payload struct {
+				Generation uint64         `json:"generation"`
+				Plan       model.TestPlan `json:"plan"`
+			}
+			_ = json.Unmarshal(message.Payload, &payload)
+			manifest := model.DiscoveryManifest{
+				ProtocolVersion: model.ProtocolVersion,
+				Generation:      payload.Generation, ContentFingerprint: payload.Plan.ContentFingerprint,
+				Files: []model.DiscoveryFile{{
+					Path: "tests/example.test.gd", Name: "example", Line: 1,
+					Cases: []model.DiscoveryCase{{
+						ID: "tests/example.test.gd::dynamic@2:0[case]", Name: "case",
+						File: "tests/example.test.gd", Line: 2,
+					}},
+				}},
+			}
+			encoded, _ := json.Marshal(manifest)
+			_ = encoder.Encode(protocol.Envelope{
+				Version: protocol.Version, Type: "discover_finished",
+				RequestID: message.RequestID, Payload: encoded,
+			})
 		case "run":
 			var payload struct {
 				RunID string `json:"run_id"`

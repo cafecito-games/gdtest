@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -295,6 +297,148 @@ func recoverableRunDiagnostic(event model.Event) bool {
 	default:
 		return false
 	}
+}
+
+// Discover completes engine-dependent registration and provider expansion
+// without executing hooks or case bodies.
+func (p *Process) Discover(ctx context.Context, plan model.TestPlan) (model.DiscoveryManifest, error) {
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+	if plan.Generation != p.Generation() {
+		return model.DiscoveryManifest{}, fmt.Errorf(
+			"discovery plan generation %d does not match worker generation %d",
+			plan.Generation,
+			p.Generation(),
+		)
+	}
+	p.stateMu.Lock()
+	closed := p.closed
+	p.stateMu.Unlock()
+	if closed {
+		return model.DiscoveryManifest{}, errors.New("worker is closed")
+	}
+	requestID, err := randomToken()
+	if err != nil {
+		return model.DiscoveryManifest{}, err
+	}
+	payload, err := json.Marshal(struct {
+		Generation uint64         `json:"generation"`
+		Plan       model.TestPlan `json:"plan"`
+	}{Generation: plan.Generation, Plan: plan})
+	if err != nil {
+		return model.DiscoveryManifest{}, fmt.Errorf("encode discovery plan: %w", err)
+	}
+	if err := p.send(protocol.Envelope{
+		Version: protocol.Version, Type: "discover", RequestID: requestID, Payload: payload,
+	}); err != nil {
+		return model.DiscoveryManifest{}, err
+	}
+	for {
+		message, receiveErr := p.receive(ctx)
+		if receiveErr != nil {
+			if ctx.Err() != nil {
+				p.killAndWait()
+				return model.DiscoveryManifest{}, ctx.Err()
+			}
+			return model.DiscoveryManifest{}, p.crashError(receiveErr)
+		}
+		if message.Type == "event" {
+			event, decodeErr := decodeProcessEvent(message)
+			if decodeErr != nil {
+				return model.DiscoveryManifest{}, decodeErr
+			}
+			if event.Type == model.EventWorkerReady {
+				continue
+			}
+			if event.Type == model.EventWorkerError {
+				return model.DiscoveryManifest{}, fmt.Errorf(
+					"worker rejected discovery: %s: %s", event.Name, event.Message,
+				)
+			}
+			return model.DiscoveryManifest{}, fmt.Errorf(
+				"unexpected event %q during discovery", event.Type,
+			)
+		}
+		if message.Type != "discover_finished" {
+			return model.DiscoveryManifest{}, fmt.Errorf(
+				"unexpected worker message type %q during discovery", message.Type,
+			)
+		}
+		if message.RequestID != requestID {
+			return model.DiscoveryManifest{}, fmt.Errorf(
+				"discovery response request ID %q does not match %q", message.RequestID, requestID,
+			)
+		}
+		var manifest model.DiscoveryManifest
+		if err := json.Unmarshal(message.Payload, &manifest); err != nil {
+			return model.DiscoveryManifest{}, fmt.Errorf("decode discovery manifest: %w", err)
+		}
+		if err := validateDiscoveryManifest(manifest, plan); err != nil {
+			return model.DiscoveryManifest{}, err
+		}
+		return manifest, nil
+	}
+}
+
+func validateDiscoveryManifest(manifest model.DiscoveryManifest, plan model.TestPlan) error {
+	if manifest.ProtocolVersion != model.ProtocolVersion {
+		return fmt.Errorf(
+			"discovery manifest protocol %d does not match %d",
+			manifest.ProtocolVersion,
+			model.ProtocolVersion,
+		)
+	}
+	if manifest.Generation != plan.Generation {
+		return fmt.Errorf(
+			"discovery manifest generation %d does not match plan %d",
+			manifest.Generation,
+			plan.Generation,
+		)
+	}
+	if manifest.ContentFingerprint != plan.ContentFingerprint {
+		return errors.New("discovery manifest content fingerprint does not match plan")
+	}
+	seen := make(map[string]struct{})
+	for _, file := range manifest.Files {
+		if !validManifestPath(file.Path) {
+			return fmt.Errorf("discovery manifest has invalid project-relative path %q", file.Path)
+		}
+		for _, testCase := range file.Cases {
+			if testCase.ID == "" {
+				return errors.New("discovery manifest contains an empty case ID")
+			}
+			idFile, _, hasSeparator := strings.Cut(testCase.ID, "::")
+			if !hasSeparator || idFile != file.Path || !validManifestPath(testCase.File) {
+				return fmt.Errorf("discovery manifest contains an invalid case identity %q", testCase.ID)
+			}
+			if _, exists := seen[testCase.ID]; exists {
+				return fmt.Errorf("discovery manifest contains duplicate case ID %q", testCase.ID)
+			}
+			seen[testCase.ID] = struct{}{}
+			for _, suite := range testCase.Suites {
+				if suite.ID == "" || !validManifestPath(suite.File) {
+					return fmt.Errorf("discovery manifest contains invalid suite metadata for %q", testCase.ID)
+				}
+			}
+		}
+	}
+	for _, discoveryError := range manifest.Errors {
+		if discoveryError.Location != nil && !validManifestPath(discoveryError.Location.File) {
+			return fmt.Errorf("discovery manifest contains invalid diagnostic path %q", discoveryError.Location.File)
+		}
+	}
+	return nil
+}
+
+func validManifestPath(value string) bool {
+	if value == "" || filepath.IsAbs(value) || strings.Contains(value, `\`) ||
+		strings.HasPrefix(value, "res://") || strings.HasPrefix(value, "/") ||
+		(len(value) >= 3 && value[1] == ':' && value[2] == '/') {
+		return false
+	}
+	cleanPath := filepath.ToSlash(filepath.Clean(value))
+	return cleanPath == value && cleanPath != "." && cleanPath != ".." &&
+		!strings.HasPrefix(cleanPath, "../")
 }
 
 // Ping checks that the worker is responsive.

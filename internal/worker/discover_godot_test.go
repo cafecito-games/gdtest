@@ -1,0 +1,295 @@
+package worker_test
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cafecito-games/gdtest/internal/cache"
+	"github.com/cafecito-games/gdtest/internal/discovery"
+	"github.com/cafecito-games/gdtest/internal/dynamic"
+	"github.com/cafecito-games/gdtest/internal/executor"
+	"github.com/cafecito-games/gdtest/internal/model"
+	"github.com/cafecito-games/gdtest/internal/worker"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestGodotDynamicDiscoveryAndExactExecution(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot dynamic-discovery test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	conformance := parseFixture(t, root, "fixtures/godot/api/conformance.test.gd")
+	focus := parseFixture(t, root, "fixtures/godot/api/focus.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "dynamic-discovery", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "discover",
+		Generation: 1, ContentFingerprint: "api-content",
+		Files: []model.FilePlan{conformance, focus},
+	}
+	store, err := cache.Open(t.TempDir(), 1<<20)
+	require.NoError(t, err)
+	identity := dynamic.Identity{
+		ToolVersion: "test-build", RuntimeVersion: "test-runtime", GodotIdentity: "godot-test",
+		Configuration: []byte(`{"only_mode":"auto"}`), ContentFingerprint: plan.ContentFingerprint,
+		Generation: plan.Generation,
+	}
+	computed := 0
+	manifest, hit, err := dynamic.LoadOrCompute(ctx, store, identity, func(computeCtx context.Context) (model.DiscoveryManifest, error) {
+		computed++
+		return process.Discover(computeCtx, plan)
+	})
+	require.NoError(t, err)
+	assert.False(t, hit)
+	cached, hit, err := dynamic.LoadOrCompute(ctx, store, identity, nil)
+	require.NoError(t, err)
+	assert.True(t, hit)
+	assert.Equal(t, manifest, cached)
+	assert.Equal(t, 1, computed)
+	assert.Empty(t, manifest.Errors)
+	require.Len(t, manifest.Files, 2)
+	require.NotEmpty(t, manifest.Files[0].Cases)
+	dynamicID := manifest.Files[0].Cases[0].ID
+	assert.Contains(t, dynamicID, "::dynamic@")
+	assert.Equal(t, "async case", manifest.Files[0].Cases[0].Name)
+	assert.NotEmpty(t, manifest.Files[0].Cases[0].Suites)
+	assert.NotContains(t, dynamicID, root)
+	assert.Equal(t, "api-content", manifest.ContentFingerprint)
+	copyRoot := copyGodotProject(t, root)
+	copyProcess, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: copyRoot, SessionID: "dynamic-discovery-copy", Generation: 1,
+	})
+	require.NoError(t, err)
+	copyManifest, discoverErr := copyProcess.Discover(ctx, plan)
+	shutdown(t, copyProcess)
+	require.NoError(t, discoverErr)
+	assert.Equal(t, manifestCaseIDs(manifest), manifestCaseIDs(copyManifest))
+	var dynamicRow model.DiscoveryCase
+	for _, testCase := range manifest.Files[0].Cases {
+		if strings.Contains(testCase.Name, "dynamic rows [a/b]") {
+			dynamicRow = testCase
+			break
+		}
+	}
+	require.NotEmpty(t, dynamicRow.ID)
+	require.Len(t, dynamicRow.Parameters, 3)
+	var sideEffectGuard model.DiscoveryCase
+	for _, testCase := range manifest.Files[0].Cases {
+		if testCase.MethodName == "test_discovery_has_no_case_side_effects" {
+			sideEffectGuard = testCase
+			break
+		}
+	}
+	require.Len(t, sideEffectGuard.Parameters, 1)
+	assert.Equal(t, false, sideEffectGuard.Parameters[0].Value)
+	var staticRow model.DiscoveryCase
+	for _, testCase := range manifest.Files[0].Cases {
+		if testCase.MethodName == "test_named_provider" && testCase.ParameterName == "a/first" {
+			staticRow = testCase
+			break
+		}
+	}
+	require.NotEmpty(t, staticRow.ID)
+	assert.True(t, strings.HasSuffix(staticRow.ID, "[a%2Ffirst]"))
+
+	plan.RunID = "selected-dynamic"
+	plan.SelectionApplied = true
+	plan.SelectedIDs = []string{dynamicID}
+	plan.OnlyMode = "auto"
+	started, diagnostics := run(t, ctx, process, plan)
+	assert.Equal(t, []string{dynamicID}, started)
+	assert.Empty(t, diagnostics)
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "selected-dynamic-row"
+	plan.SelectedIDs = []string{dynamicRow.ID}
+	started, diagnostics = run(t, ctx, process, plan)
+	assert.Equal(t, []string{dynamicRow.ID}, started)
+	assert.Empty(t, diagnostics)
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "selected-static-provider-row"
+	plan.SelectedIDs = []string{staticRow.ID}
+	started, diagnostics = run(t, ctx, process, plan)
+	assert.Equal(t, []string{staticRow.ID}, started)
+	assert.Empty(t, diagnostics)
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "selected-empty"
+	plan.SelectedIDs = nil
+	started, diagnostics = run(t, ctx, process, plan)
+	assert.Empty(t, started)
+	assert.Empty(t, diagnostics)
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "focus-auto"
+	plan.SelectionApplied = false
+	plan.SelectedIDs = nil
+	plan.Files = []model.FilePlan{focus}
+	started, diagnostics = run(t, ctx, process, plan)
+	require.Len(t, started, 1)
+	assert.Contains(t, started[0], "test_focused_method[0]")
+	assert.Empty(t, diagnostics)
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "focus-ignore"
+	plan.OnlyMode = "ignore"
+	started, diagnostics = run(t, ctx, process, plan)
+	assert.Len(t, started, 2)
+	assert.Empty(t, diagnostics)
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "focus-forbid"
+	plan.OnlyMode = "forbid"
+	started, diagnostics = run(t, ctx, process, plan)
+	assert.Empty(t, started)
+	require.Len(t, diagnostics, 1)
+	assert.Contains(t, diagnostics[0], "forbidden")
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "focus-required-present"
+	plan.OnlyMode = "require"
+	started, diagnostics = run(t, ctx, process, plan)
+	require.Len(t, started, 1)
+	assert.Contains(t, started[0], "test_focused_method[0]")
+	assert.Empty(t, diagnostics)
+	require.NoError(t, process.Reset(ctx))
+
+	plan.RunID = "focus-required-missing"
+	plan.Files = []model.FilePlan{conformance}
+	started, diagnostics = run(t, ctx, process, plan)
+	assert.Empty(t, started)
+	require.Len(t, diagnostics, 1)
+	assert.Contains(t, diagnostics[0], "requires at least one focused")
+	require.NoError(t, process.Reset(ctx))
+
+	invalid := parseFixture(t, root, "fixtures/godot/api/discovery_invalid.test.gd")
+	invalidManifest, err := process.Discover(ctx, model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, Generation: 1,
+		ContentFingerprint: "invalid-content", Files: []model.FilePlan{invalid},
+	})
+	require.NoError(t, err)
+	require.Len(t, invalidManifest.Errors, 3)
+	var invalidMessages []string
+	for _, discoveryError := range invalidManifest.Errors {
+		assert.Equal(t, "worker.discovery", discoveryError.Code)
+		require.NotNil(t, discoveryError.Location)
+		assert.Equal(t, "fixtures/godot/api/discovery_invalid.test.gd", discoveryError.Location.File)
+		invalidMessages = append(invalidMessages, discoveryError.Message)
+	}
+	assert.Contains(t, invalidMessages, "expect is only valid while a case is executing")
+}
+
+func run(
+	t *testing.T,
+	ctx context.Context,
+	process *worker.Process,
+	plan model.TestPlan,
+) ([]string, []string) {
+	t.Helper()
+	var started []string
+	var diagnostics []string
+	err := process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		switch event.Type {
+		case model.EventCaseStarted:
+			started = append(started, event.TestID)
+		case model.EventWorkerError:
+			diagnostics = append(diagnostics, event.Message)
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	return started, diagnostics
+}
+
+func parseFixture(t *testing.T, root, relative string) model.FilePlan {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+	require.NoError(t, err)
+	file, err := discovery.Parse(relative, data)
+	require.NoError(t, err)
+	return file
+}
+
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+}
+
+func copyGodotProject(t *testing.T, root string) string {
+	t.Helper()
+	destination := t.TempDir()
+	addonFiles, err := filepath.Glob(filepath.Join(root, "addons", "gdtest", "*"))
+	require.NoError(t, err)
+	files := append([]string{filepath.Join(root, "project.godot")}, addonFiles...)
+	files = append(files,
+		filepath.Join(root, "fixtures", "godot", "api", "conformance.test.gd"),
+		filepath.Join(root, "fixtures", "godot", "api", "conformance.test.gd.uid"),
+		filepath.Join(root, "fixtures", "godot", "api", "focus.test.gd"),
+		filepath.Join(root, "fixtures", "godot", "api", "focus.test.gd.uid"),
+	)
+	for _, source := range files {
+		info, statErr := os.Stat(source)
+		require.NoError(t, statErr)
+		if info.IsDir() {
+			continue
+		}
+		relative, relativeErr := filepath.Rel(root, source)
+		require.NoError(t, relativeErr)
+		target := filepath.Join(destination, relative)
+		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+		data, readErr := os.ReadFile(source)
+		require.NoError(t, readErr)
+		require.NoError(t, os.WriteFile(target, data, 0o600))
+	}
+	bootstrap := exec.Command("godot", "--headless", "--editor", "--path", destination, "--quit")
+	output, err := bootstrap.CombinedOutput()
+	require.NoErrorf(t, err, "bootstrap copied Godot project:\n%s", output)
+	return destination
+}
+
+func manifestCaseIDs(manifest model.DiscoveryManifest) []string {
+	var ids []string
+	for _, file := range manifest.Files {
+		for _, testCase := range file.Cases {
+			ids = append(ids, testCase.ID)
+		}
+	}
+	return ids
+}
+
+func shutdown(t *testing.T, process *worker.Process) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	assert.NoError(t, process.Shutdown(ctx))
+}
+
+func TestDiscoveryManifestIDsAreProjectRelative(t *testing.T) {
+	t.Parallel()
+	manifest := model.DiscoveryManifest{Files: []model.DiscoveryFile{{
+		Path:  "tests/example.test.gd",
+		Cases: []model.DiscoveryCase{{ID: "tests/example.test.gd::dynamic@4:0[case]"}},
+	}}}
+	for _, file := range manifest.Files {
+		assert.False(t, filepath.IsAbs(file.Path))
+		for _, testCase := range file.Cases {
+			assert.False(t, strings.HasPrefix(testCase.ID, "/"))
+		}
+	}
+}

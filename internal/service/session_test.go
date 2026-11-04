@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,12 +21,15 @@ import (
 )
 
 type fakeWorker struct {
-	pid        int
-	generation uint64
-	runs       int
-	resets     int
-	closed     bool
-	runHook    func(model.TestPlan, executor.EventSink) error
+	pid          int
+	generation   uint64
+	runs         int
+	discovers    int
+	resets       int
+	closed       bool
+	runHook      func(model.TestPlan, executor.EventSink) error
+	discoverHook func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
+	resetErr     error
 }
 
 func (f *fakeWorker) Run(_ context.Context, plan model.TestPlan, sink executor.EventSink) error {
@@ -35,8 +39,19 @@ func (f *fakeWorker) Run(_ context.Context, plan model.TestPlan, sink executor.E
 	}
 	return sink.Emit(model.Event{ProtocolVersion: 1, Type: model.EventRunFinished, RunID: plan.RunID})
 }
+func (f *fakeWorker) Discover(ctx context.Context, plan model.TestPlan) (model.DiscoveryManifest, error) {
+	f.discovers++
+	if f.discoverHook != nil {
+		return f.discoverHook(ctx, plan)
+	}
+	return model.DiscoveryManifest{
+		ProtocolVersion:    model.ProtocolVersion,
+		Generation:         plan.Generation,
+		ContentFingerprint: plan.ContentFingerprint,
+	}, nil
+}
 func (f *fakeWorker) Ping(context.Context) error  { return nil }
-func (f *fakeWorker) Reset(context.Context) error { f.resets++; return nil }
+func (f *fakeWorker) Reset(context.Context) error { f.resets++; return f.resetErr }
 func (f *fakeWorker) Reload(_ context.Context, generation uint64) error {
 	f.generation = generation
 	return nil
@@ -332,4 +347,182 @@ func TestSessionServiceRecyclesAtRunLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, process.closed)
 	assert.Zero(t, service.WorkerCount())
+}
+
+func TestSessionServiceDiscoversWithReusedWorker(t *testing.T) {
+	t.Parallel()
+
+	created := 0
+	process := &fakeWorker{pid: 501, generation: 1}
+	process.discoverHook = func(_ context.Context, plan model.TestPlan) (model.DiscoveryManifest, error) {
+		return model.DiscoveryManifest{
+			ProtocolVersion:    model.ProtocolVersion,
+			Generation:         plan.Generation,
+			ContentFingerprint: plan.ContentFingerprint,
+			Files: []model.DiscoveryFile{{
+				Path: "tests/example.test.gd",
+				Cases: []model.DiscoveryCase{{
+					ID: "tests/example.test.gd::dynamic@4:0[value]", Name: "value",
+					File: "tests/example.test.gd", Line: 4,
+				}},
+			}},
+		}, nil
+	}
+	service := &SessionService{
+		sessions: make(map[string]*session),
+		factory: func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+			created++
+			return process, nil
+		},
+	}
+	request := DiscoverRequest{
+		SessionID: "discover-project", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "discover-1", Generation: 1,
+			ContentFingerprint: "content-1",
+		},
+	}
+	for index := range 2 {
+		request.Plan.RunID = fmt.Sprintf("discover-%d", index+1)
+		payload, err := json.Marshal(request)
+		require.NoError(t, err)
+		value, err := service.Handle(context.Background(), daemon.Request{
+			ID: request.Plan.RunID, Method: "session.discover", Payload: payload,
+		}, nil)
+		require.NoError(t, err)
+		manifest, ok := value.(model.DiscoveryManifest)
+		require.True(t, ok)
+		require.Len(t, manifest.Files, 1)
+		assert.Equal(t, "tests/example.test.gd::dynamic@4:0[value]", manifest.Files[0].Cases[0].ID)
+	}
+	assert.Equal(t, 1, created)
+	assert.Equal(t, 2, process.discovers)
+	assert.Equal(t, 2, process.resets)
+	assert.False(t, process.closed)
+	assert.Zero(t, service.List()[0].Runs, "discovery must not count as an executed run")
+}
+
+func TestSessionServiceDiscoveryReconcilesGenerationAndReloads(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
+	script := filepath.Join(root, "example.test.gd")
+	require.NoError(t, os.WriteFile(script, []byte("extends GDTest\nfunc test_value() -> void:\n\tpass\n"), 0o600))
+	process := &fakeWorker{pid: 502, generation: 1}
+	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	defer func() { require.NoError(t, service.Close(context.Background())) }()
+
+	discover := func(id string) model.DiscoveryManifest {
+		payload, err := json.Marshal(DiscoverRequest{
+			SessionID: "discover-generation", Project: root, Godot: "godot",
+			Plan: model.TestPlan{
+				ProtocolVersion: model.ProtocolVersion, RunID: id, Generation: 1,
+				ContentFingerprint: id,
+			},
+		})
+		require.NoError(t, err)
+		value, err := service.Handle(context.Background(), daemon.Request{
+			ID: id, Method: "session.discover", Payload: payload,
+		}, nil)
+		require.NoError(t, err)
+		manifest, ok := value.(model.DiscoveryManifest)
+		require.True(t, ok)
+		return manifest
+	}
+
+	assert.Equal(t, uint64(1), discover("initial").Generation)
+	require.NoError(t, os.WriteFile(
+		script,
+		[]byte("extends GDTest\nfunc test_value() -> void:\n\tvar changed: int = 1\n"),
+		0o600,
+	))
+	assert.Equal(t, uint64(2), discover("changed").Generation)
+	assert.Equal(t, uint64(2), process.Generation())
+	assert.Equal(t, 2, process.discovers)
+	assert.False(t, process.closed)
+}
+
+func TestSessionServiceDiscoveryFailureDiscardsWorker(t *testing.T) {
+	t.Parallel()
+
+	entered := make(chan struct{})
+	process := &fakeWorker{pid: 503, generation: 1}
+	process.discoverHook = func(ctx context.Context, _ model.TestPlan) (model.DiscoveryManifest, error) {
+		close(entered)
+		<-ctx.Done()
+		return model.DiscoveryManifest{}, ctx.Err()
+	}
+	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	service.sourceFactory = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	payload, err := json.Marshal(DiscoverRequest{
+		SessionID: "cancel-discovery", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "discover", Generation: 1},
+	})
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, handleErr := service.Handle(ctx, daemon.Request{
+			ID: "discover", Method: "session.discover", Payload: payload,
+		}, nil)
+		done <- handleErr
+	}()
+	<-entered
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+	require.Eventually(t, func() bool { return service.WorkerCount() == 0 }, time.Second, time.Millisecond)
+	assert.True(t, process.closed)
+}
+
+func TestSessionServiceDiscoveryResetFailureDiscardsWorker(t *testing.T) {
+	t.Parallel()
+
+	process := &fakeWorker{pid: 504, generation: 1, resetErr: errors.New("reset failed")}
+	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	service.sourceFactory = nil
+	payload, err := json.Marshal(DiscoverRequest{
+		SessionID: "reset-discovery", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "discover", Generation: 1},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "discover", Method: "session.discover", Payload: payload,
+	}, nil)
+	require.EqualError(t, err, "reset worker after discovery: reset failed")
+	assert.True(t, process.closed)
+	assert.Zero(t, service.WorkerCount())
+}
+
+func TestSessionServiceDiscoveryRequestValidation(t *testing.T) {
+	t.Parallel()
+
+	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+		return nil, errors.New("must not create worker")
+	})
+	service.sourceFactory = nil
+	tests := []struct {
+		name    string
+		payload string
+		match   string
+	}{
+		{name: "missing required", payload: `{}`, match: "discover needs session_id, project, godot, and plan.run_id"},
+		{name: "unknown field", payload: `{"session_id":"s","project":"/p","godot":"g","plan":{"run_id":"r"},"extra":true}`, match: `unknown field "extra"`},
+		{name: "trailing value", payload: `{"session_id":"s","project":"/p","godot":"g","plan":{"run_id":"r"}} {}`, match: "multiple JSON values"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := service.Handle(context.Background(), daemon.Request{
+				ID: "discover", Method: "session.discover", Payload: json.RawMessage(test.payload),
+			}, nil)
+			require.ErrorContains(t, err, test.match)
+		})
+	}
 }

@@ -463,7 +463,7 @@ func _gdtest_manifest() -> Dictionary[String, Variant]:
 	return {
 		"cases": _gdtest_dynamic_cases.duplicate(true),
 		"suites": _gdtest_dynamic_suites.duplicate(true),
-		"errors": _gdtest_discovery_errors.duplicate(true),
+		"errors": _gdtest_discovery_errors,
 	}
 
 

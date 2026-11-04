@@ -8,10 +8,14 @@ const ProtocolVersion = 1
 
 // TestPlan is independent of absolute worktree paths and concrete executors.
 type TestPlan struct {
-	ProtocolVersion int        `json:"protocol_version"`
-	RunID           string     `json:"run_id"`
-	Generation      uint64     `json:"generation"`
-	Files           []FilePlan `json:"files"`
+	ProtocolVersion    int        `json:"protocol_version"`
+	RunID              string     `json:"run_id"`
+	Generation         uint64     `json:"generation"`
+	ContentFingerprint string     `json:"content_fingerprint,omitempty"`
+	OnlyMode           string     `json:"only_mode,omitempty"`
+	SelectionApplied   bool       `json:"selection_applied,omitempty"`
+	SelectedIDs        []string   `json:"selected_ids,omitempty"`
+	Files              []FilePlan `json:"files"`
 }
 
 // FilePlan is one serial file-level scheduling unit.
@@ -27,6 +31,54 @@ type CasePlan struct {
 	MethodName string `json:"method_name"`
 	Line       int    `json:"line"`
 	IsOnly     bool   `json:"is_only,omitempty"`
+}
+
+// DiscoveryManifest is a deterministic, backend-neutral description of all
+// cases registered by one plan. It contains no Godot objects or callables.
+type DiscoveryManifest struct {
+	ProtocolVersion    int              `json:"protocol_version"`
+	Generation         uint64           `json:"generation"`
+	ContentFingerprint string           `json:"content_fingerprint,omitempty"`
+	Files              []DiscoveryFile  `json:"files"`
+	Errors             []DiscoveryError `json:"errors,omitempty"`
+}
+
+// DiscoveryFile describes one root suite in plan order.
+type DiscoveryFile struct {
+	Path  string          `json:"path"`
+	Name  string          `json:"name"`
+	Line  int             `json:"line"`
+	Cases []DiscoveryCase `json:"cases"`
+}
+
+// DiscoveryCase is one dynamically completed or statically parameterized
+// case. Parameters use the backend-neutral wire-value representation.
+type DiscoveryCase struct {
+	ID            string           `json:"id"`
+	Name          string           `json:"name"`
+	File          string           `json:"file"`
+	Line          int              `json:"line"`
+	MethodName    string           `json:"method_name,omitempty"`
+	Parameters    []WireValue      `json:"parameters,omitempty"`
+	ParameterName string           `json:"parameter_name,omitempty"`
+	IsOnly        bool             `json:"is_only,omitempty"`
+	Suites        []DiscoverySuite `json:"suites,omitempty"`
+}
+
+// DiscoverySuite is immutable nested-suite metadata.
+type DiscoverySuite struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	File   string `json:"file"`
+	Line   int    `json:"line"`
+	IsOnly bool   `json:"is_only,omitempty"`
+}
+
+// DiscoveryError is a source-located non-executable manifest finding.
+type DiscoveryError struct {
+	Code     string    `json:"code"`
+	Message  string    `json:"message"`
+	Location *Location `json:"location,omitempty"`
 }
 
 // EventType identifies one immutable execution event.

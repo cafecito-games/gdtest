@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -29,6 +30,15 @@ type RunRequest struct {
 	WorkerMaxRuns int            `json:"worker_max_runs,omitempty"`
 }
 
+// DiscoverRequest contains the path-specific lease data and path-neutral plan
+// used to complete engine-dependent discovery in a persistent worker.
+type DiscoverRequest struct {
+	SessionID string         `json:"session_id"`
+	Project   string         `json:"project"`
+	Godot     string         `json:"godot"`
+	Plan      model.TestPlan `json:"plan"`
+}
+
 // WarmRequest prepares one worker for a project generation.
 type WarmRequest struct {
 	SessionID  string `json:"session_id"`
@@ -39,6 +49,7 @@ type WarmRequest struct {
 
 type managedWorker interface {
 	Run(context.Context, model.TestPlan, executor.EventSink) error
+	Discover(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
 	Ping(context.Context) error
 	Reset(context.Context) error
 	Reload(context.Context, uint64) error
@@ -145,6 +156,25 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, func(runCtx context.Context) (any, error) {
 			return s.run(runCtx, value, emit)
 		})
+	case "session.discover":
+		var value DiscoverRequest
+		if err := decodeStrict(request.Payload, &value); err != nil {
+			return nil, err
+		}
+		if value.SessionID == "" || value.Project == "" || value.Godot == "" || value.Plan.RunID == "" {
+			return nil, errors.New("discover needs session_id, project, godot, and plan.run_id")
+		}
+		entry := s.get(value.SessionID, value.Project, value.Godot)
+		result, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile source before discovery: %w", err)
+		}
+		if result.Update.Generation > 0 {
+			value.Plan.Generation = result.Update.Generation
+		}
+		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, func(runCtx context.Context) (any, error) {
+			return s.discover(runCtx, value)
+		})
 	case "session.warm":
 		var value WarmRequest
 		if err := decodeStrict(request.Payload, &value); err != nil {
@@ -169,6 +199,35 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 	default:
 		return nil, fmt.Errorf("unsupported daemon method %q", request.Method)
 	}
+}
+
+func (s *SessionService) discover(ctx context.Context, request DiscoverRequest) (any, error) {
+	entry := s.get(request.SessionID, request.Project, request.Godot)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Filesystem)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile source at discovery start: %w", err)
+	}
+	if latest.Update.Generation > 0 {
+		request.Plan.Generation = latest.Update.Generation
+	}
+	process, err := s.ensureWorker(ctx, entry, request.Plan.Generation)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := process.Discover(ctx, request.Plan)
+	if err != nil {
+		s.discardWorker(entry)
+		return nil, err
+	}
+	entry.lastUsed = time.Now().UTC()
+	entry.lifecycle.Touch(entry.lastUsed)
+	if err := process.Reset(ctx); err != nil {
+		s.discardWorker(entry)
+		return nil, fmt.Errorf("reset worker after discovery: %w", err)
+	}
+	return manifest, nil
 }
 
 func (s *SessionService) schedule(
@@ -599,6 +658,13 @@ func decodeStrict(data []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
+		return fmt.Errorf("decode daemon request: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
 		return fmt.Errorf("decode daemon request: %w", err)
 	}
 	return nil

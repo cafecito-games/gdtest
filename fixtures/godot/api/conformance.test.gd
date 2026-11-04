@@ -80,6 +80,18 @@ func test_dynamic_children_run_first() -> void:
 	expect_contains(_events, "after_suite:outer suite")
 
 
+## Verifies discovery never invokes a registered case callback.
+func test_discovery_has_no_case_side_effects(was_executed: bool) -> void:
+	expect_false(was_executed)
+
+
+## Captures case-callback state while providers execute during discovery.
+# Provider suffix is a reserved gdtest public API spelling.
+# gdkit:ignore = function-name
+func test_discovery_has_no_case_side_effects__cases() -> Array[Variant]:
+	return [[_async_case_finished]]
+
+
 ## Exercises every passing assertion and explicit outcome contract.
 func test_assertion_surface() -> void:
 	var shared: Array[int] = [1]

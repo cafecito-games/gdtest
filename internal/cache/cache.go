@@ -227,6 +227,22 @@ func (s *Store) Put(ctx context.Context, key string, data []byte) error {
 	return nil
 }
 
+// Delete removes one application-level cache entry. It is used when an
+// envelope is valid but the owning package rejects the decoded payload schema.
+// Missing entries are already the desired state and do not fail.
+func (s *Store) Delete(ctx context.Context, key string) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.Remove(s.entryPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete cache entry: %w", err)
+	}
+	return nil
+}
+
 // GetOrCompute returns a valid entry or computes and atomically publishes it.
 // Concurrent same-key callers in this process share one computation.
 func (s *Store) GetOrCompute(

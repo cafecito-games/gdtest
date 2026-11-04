@@ -7,9 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +23,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/discovery"
 	"github.com/cafecito-games/gdtest/internal/executor"
 	"github.com/cafecito-games/gdtest/internal/index"
+	"github.com/cafecito-games/gdtest/internal/migrate"
 	"github.com/cafecito-games/gdtest/internal/model"
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/reporter"
@@ -31,6 +32,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/version"
 	sourcewatch "github.com/cafecito-games/gdtest/internal/watch"
 	"github.com/cafecito-games/gdtest/internal/worker"
+	"github.com/spf13/cobra"
 )
 
 // Exit codes are stable CLI behavior.
@@ -50,6 +52,9 @@ type IO struct {
 
 // Run executes one command and returns its process exit code.
 func Run(ctx context.Context, arguments []string, streams IO) int {
+	if streams.In == nil {
+		streams.In = strings.NewReader("")
+	}
 	if streams.Out == nil {
 		streams.Out = io.Discard
 	}
@@ -60,50 +65,300 @@ func Run(ctx context.Context, arguments []string, streams IO) int {
 		usage(streams.Err)
 		return ExitError
 	}
-	var err error
-	switch arguments[0] {
-	case "run":
-		return runTests(ctx, arguments[1:], streams)
-	case "watch":
-		return watchTests(ctx, arguments[1:], streams)
-	case "list":
-		err = listTests(arguments[1:], streams)
-	case "doctor":
-		err = doctor(ctx, arguments[1:], streams)
-	case "version", "--version", "-version":
-		_, err = fmt.Fprintln(streams.Out, versionString())
-	case "help", "--help", "-h":
-		usage(streams.Out)
-		return ExitOK
-	case "init":
-		err = initialize(arguments[1:], streams)
-	case "warm":
-		err = warm(ctx, arguments[1:], streams)
-	case "daemon":
-		err = daemonCommand(ctx, arguments[1:], streams)
-	case "migrate":
-		err = fmt.Errorf("%s is not available in this build milestone", arguments[0])
-	default:
-		err = fmt.Errorf("unknown command %q", arguments[0])
+	exitCode := ExitOK
+	root := newRootCommand(streams, &exitCode)
+	if len(arguments) > 0 && arguments[0] == "-version" {
+		arguments = append([]string{"--version"}, arguments[1:]...)
 	}
+	root.SetArgs(arguments)
+	root.SetIn(streams.In)
+	root.SetOut(streams.Out)
+	root.SetErr(streams.Err)
+	err := root.ExecuteContext(ctx)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
-	return ExitOK
+	return exitCode
 }
 
-func watchTests(ctx context.Context, arguments []string, streams IO) int {
-	flags := flag.NewFlagSet("watch", flag.ContinueOnError)
-	flags.SetOutput(streams.Err)
-	_ = flags.Bool("json", false, "write JSON Lines events")
-	_ = flags.Bool("allow-empty", false, "allow selectors that match no tests")
-	_ = flags.Bool("no-daemon", false, "run orchestration in the foreground")
-	projectFlag := flags.String("project", "", "Godot project root")
-	if err := flags.Parse(arguments); err != nil {
-		return ExitError
+type runOptions struct {
+	project     string
+	json        bool
+	allowEmpty  bool
+	noDaemon    bool
+	name        string
+	onlyMode    string
+	affected    []string
+	affectedSet bool
+	verbose     bool
+	selectors   []string
+}
+
+type listOptions struct {
+	project    string
+	allowEmpty bool
+	name       string
+	onlyMode   string
+	selectors  []string
+}
+
+type migrateOptions struct {
+	project string
+	check   bool
+	write   bool
+	paths   []string
+}
+
+func newRootCommand(streams IO, exitCode *int) *cobra.Command {
+	var showVersion bool
+	root := &cobra.Command{
+		Use:           "gdtest",
+		Short:         "Run isolated GDScript tests",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		Args:          cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if showVersion {
+				_, err := fmt.Fprintln(streams.Out, versionString())
+				return err
+			}
+			return errors.New("a command is required; run gdtest --help for usage")
+		},
 	}
-	root, err := projectRoot(*projectFlag)
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.Flags().BoolVar(&showVersion, "version", false, "print version information")
+	root.AddCommand(
+		newInitCommand(streams),
+		newRunCommand(streams, exitCode),
+		newListCommand(streams),
+		newWatchCommand(streams, exitCode),
+		newWarmCommand(streams),
+		newDoctorCommand(streams),
+		newVersionCommand(streams),
+		newMigrateCommand(streams),
+		newDaemonCommand(streams),
+	)
+	return root
+}
+
+func newInitCommand(streams IO) *cobra.Command {
+	var project string
+	command := &cobra.Command{
+		Use:   "init",
+		Short: "Install the gdtest runtime into a Godot project",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return initialize(project, streams)
+		},
+	}
+	addProjectFlag(command, &project)
+	return command
+}
+
+func newRunCommand(streams IO, exitCode *int) *cobra.Command {
+	options := runOptions{}
+	command := &cobra.Command{
+		Use:   "run [selectors...]",
+		Short: "Run selected tests",
+		Args:  cobra.ArbitraryArgs,
+		Run: func(command *cobra.Command, selectors []string) {
+			options.selectors = selectors
+			options.affectedSet = command.Flags().Changed("affected")
+			*exitCode = runTests(command.Context(), options, streams)
+		},
+	}
+	addRunFlags(command, &options)
+	return command
+}
+
+func newWatchCommand(streams IO, exitCode *int) *cobra.Command {
+	options := runOptions{}
+	command := &cobra.Command{
+		Use:   "watch [selectors...]",
+		Short: "Run tests when project sources change",
+		Args:  cobra.ArbitraryArgs,
+		Run: func(command *cobra.Command, selectors []string) {
+			options.selectors = selectors
+			options.affectedSet = command.Flags().Changed("affected")
+			*exitCode = watchTests(command.Context(), options, streams)
+		},
+	}
+	addRunFlags(command, &options)
+	return command
+}
+
+func newListCommand(streams IO) *cobra.Command {
+	options := listOptions{}
+	command := &cobra.Command{
+		Use:   "list [selectors...]",
+		Short: "List discovered tests",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(command *cobra.Command, selectors []string) error {
+			options.selectors = selectors
+			return listTests(command.Context(), options, streams)
+		},
+	}
+	addProjectFlag(command, &options.project)
+	command.Flags().BoolVar(&options.allowEmpty, "allow-empty", false, "allow selectors that match no tests")
+	command.Flags().StringVar(&options.name, "name", "", "select tests whose name contains this text")
+	command.Flags().StringVar(&options.onlyMode, "only", "", "focus policy: auto, ignore, require, or forbid")
+	return command
+}
+
+func newDoctorCommand(streams IO) *cobra.Command {
+	var project string
+	command := &cobra.Command{
+		Use:   "doctor",
+		Short: "Verify the local gdtest installation",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return doctor(command.Context(), project, streams)
+		},
+	}
+	addProjectFlag(command, &project)
+	return command
+}
+
+func newWarmCommand(streams IO) *cobra.Command {
+	var project string
+	command := &cobra.Command{
+		Use:   "warm",
+		Short: "Start and warm the project worker",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return warm(command.Context(), project, streams)
+		},
+	}
+	addProjectFlag(command, &project)
+	return command
+}
+
+func newVersionCommand(streams IO) *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintln(streams.Out, versionString())
+			return err
+		},
+	}
+}
+
+func newMigrateCommand(streams IO) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "migrate",
+		Short: "Migrate tests from another framework",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return errors.New("migrate requires the source framework name: gdtest migrate vest")
+		},
+	}
+	options := migrateOptions{}
+	vest := &cobra.Command{
+		Use:   "vest [paths...]",
+		Short: "Migrate supported Vest APIs",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(command *cobra.Command, paths []string) error {
+			options.paths = paths
+			return migrateVest(command.Context(), options, streams)
+		},
+	}
+	addProjectFlag(vest, &options.project)
+	vest.Flags().BoolVar(&options.check, "check", false, "report safe rewrites without changing files")
+	vest.Flags().BoolVar(&options.write, "write", false, "apply safe rewrites atomically")
+	vest.MarkFlagsMutuallyExclusive("check", "write")
+	command.AddCommand(vest)
+	return command
+}
+
+func addProjectFlag(command *cobra.Command, project *string) {
+	command.Flags().StringVar(project, "project", "", "Godot project root")
+}
+
+func addRunFlags(command *cobra.Command, options *runOptions) {
+	addProjectFlag(command, &options.project)
+	command.Flags().BoolVar(&options.json, "json", false, "write JSON Lines events")
+	command.Flags().BoolVar(&options.allowEmpty, "allow-empty", false, "allow selectors that match no tests")
+	command.Flags().BoolVar(&options.noDaemon, "no-daemon", false, "run orchestration in the foreground")
+	command.Flags().StringVar(&options.name, "name", "", "select tests whose name contains this text")
+	command.Flags().StringVar(&options.onlyMode, "only", "", "focus policy: auto, ignore, require, or forbid")
+	command.Flags().StringSliceVar(&options.affected, "affected", nil, "select tests affected by project-relative changed paths")
+	command.Flags().BoolVarP(&options.verbose, "verbose", "v", false, "explain affected-test selection")
+}
+
+func migrateVest(ctx context.Context, options migrateOptions, streams IO) error {
+	mode := migrate.Check
+	if options.write {
+		mode = migrate.Write
+	}
+	root, err := projectRoot(options.project)
+	if err != nil {
+		return err
+	}
+	paths := options.paths
+	if len(paths) == 0 {
+		paths, err = migrationPaths(ctx, root)
+		if err != nil {
+			return err
+		}
+	}
+	report, err := migrate.Run(ctx, root, paths, mode)
+	if err != nil {
+		return err
+	}
+	for _, finding := range report.Findings {
+		if _, err := fmt.Fprintf(
+			streams.Out, "%s:%d:%d: %s %s: %s\n",
+			finding.Path, finding.Line, finding.Column, finding.Severity, finding.Code, finding.Message,
+		); err != nil {
+			return err
+		}
+	}
+	action := "would change"
+	if mode == migrate.Write {
+		action = "changed"
+	}
+	_, err = fmt.Fprintf(streams.Out, "%d file(s) %s; %d finding(s)\n", report.Changed, action, len(report.Findings))
+	return err
+}
+
+func migrationPaths(ctx context.Context, root string) ([]string, error) {
+	paths := make([]string, 0)
+	err := filepath.WalkDir(root, func(filename string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, filename)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if entry.IsDir() {
+			switch relative {
+			case ".git", ".godot", ".gdtest", "addons":
+				return fs.SkipDir
+			default:
+				return nil
+			}
+		}
+		if entry.Type().IsRegular() && strings.HasSuffix(strings.ToLower(relative), ".gd") {
+			paths = append(paths, relative)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate GDScript migration inputs: %w", err)
+	}
+	return paths, nil
+}
+
+func watchTests(ctx context.Context, options runOptions, streams IO) int {
+	root, err := projectRoot(options.project)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
@@ -115,7 +370,7 @@ func watchTests(ctx context.Context, arguments []string, streams IO) int {
 		return ExitError
 	}
 	for {
-		exitCode := runTests(ctx, arguments, streams)
+		exitCode := runTests(ctx, options, streams)
 		if exitCode == ExitError || exitCode == ExitCanceled {
 			return exitCode
 		}
@@ -144,14 +399,8 @@ func watchTests(ctx context.Context, arguments []string, streams IO) int {
 	}
 }
 
-func initialize(arguments []string, streams IO) error {
-	flags := flag.NewFlagSet("init", flag.ContinueOnError)
-	flags.SetOutput(streams.Err)
-	projectFlag := flags.String("project", "", "Godot project root")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-	root, err := projectRoot(*projectFlag)
+func initialize(project string, streams IO) error {
+	root, err := projectRoot(project)
 	if err != nil {
 		return err
 	}
@@ -162,17 +411,8 @@ func initialize(arguments []string, streams IO) error {
 	return err
 }
 
-func runTests(ctx context.Context, arguments []string, streams IO) int {
-	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(streams.Err)
-	jsonOutput := flags.Bool("json", false, "write JSON Lines events")
-	allowEmpty := flags.Bool("allow-empty", false, "allow selectors that match no tests")
-	noDaemon := flags.Bool("no-daemon", false, "run orchestration in the foreground")
-	projectFlag := flags.String("project", "", "Godot project root")
-	if err := flags.Parse(arguments); err != nil {
-		return ExitError
-	}
-	root, err := projectRoot(*projectFlag)
+func runTests(ctx context.Context, options runOptions, streams IO) int {
+	root, err := projectRoot(options.project)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
@@ -182,7 +422,14 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
-	manifest, err := index.Discover(ctx, root, discovery.Options{
+	if options.onlyMode != "" {
+		projectConfig.OnlyMode = options.onlyMode
+	}
+	if err := validateOnlyMode(projectConfig.OnlyMode); err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	staticManifest, err := index.Discover(ctx, root, discovery.Options{
 		Patterns: projectConfig.Tests,
 		Exclude:  projectConfig.Exclude,
 	})
@@ -190,34 +437,82 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
-	manifest, err = discovery.Select(manifest, flags.Args(), *allowEmpty)
+	discoveryManifest, err := discoveryCandidates(staticManifest, options.selectors, options.allowEmpty)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
-	if len(manifest.Files) == 0 {
-		if *jsonOutput {
-			_, _ = fmt.Fprintln(streams.Out, `{"type":"summary","passed":0,"message":"no tests selected"}`)
-		} else {
-			_, _ = fmt.Fprintln(streams.Out, "No tests selected.")
+	if options.affectedSet {
+		affectedResult, affectedErr := affectedCandidates(discoveryManifest, root, options.affected)
+		if affectedErr != nil {
+			writeDiagnostic(streams.Err, "gdtest:", affectedErr)
+			return ExitError
 		}
-		return ExitOK
-	}
-	plan := model.TestPlan{
-		ProtocolVersion: model.ProtocolVersion,
-		RunID:           newID(),
-		Generation:      1,
-		Files:           manifest.Files,
+		if options.verbose {
+			for _, reason := range affectedResult.Reasons {
+				_, _ = fmt.Fprintf(streams.Err, "gdtest: affected: %s\n", reason.Message)
+			}
+		}
+		discoveryManifest = affectedResult.Manifest
+		if len(discoveryManifest.Files) == 0 {
+			if options.json {
+				_, _ = fmt.Fprintln(streams.Out, `{"type":"summary","passed":0,"message":"no tests were affected"}`)
+			} else {
+				_, _ = fmt.Fprintln(streams.Out, "no tests were affected")
+			}
+			return ExitOK
+		}
 	}
 	sessionID, err := resolveSessionID(ctx, root, projectConfig)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	completedManifest, err := completeManifest(
+		ctx, root, projectConfig, discoveryManifest, sessionID, options.noDaemon, streams,
+	)
+	if err != nil {
+		var findings *manifestErrors
+		if errors.As(err, &findings) {
+			if writeErr := findings.writeTo(streams.Out); writeErr != nil {
+				writeDiagnostic(streams.Err, "gdtest: report:", writeErr)
+			}
+			return ExitError
+		}
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	selected, err := selectCompletedManifest(
+		completedManifest, staticManifest, root, options.selectors, options.name,
+		options.allowEmpty, options.affectedSet, options.affected,
+	)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	if len(selected.ids) == 0 {
+		message := selected.message
+		if message == "" {
+			message = "No tests selected."
+		}
+		if options.json {
+			encoded, _ := json.Marshal(map[string]any{"type": "summary", "passed": 0, "message": message})
+			_, _ = fmt.Fprintln(streams.Out, string(encoded))
+		} else {
+			_, _ = fmt.Fprintln(streams.Out, message)
+		}
+		return ExitOK
+	}
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: newID(),
+		Generation: completedManifest.Generation, ContentFingerprint: staticManifest.ContentFingerprint,
+		OnlyMode: projectConfig.OnlyMode, SelectionApplied: true,
+		SelectedIDs: append([]string(nil), selected.ids...), Files: discoveryManifest.Files,
+	}
 	collector := results.NewCollector()
 	var eventReporter executor.EventSink
 	var finish func(results.Summary) error
-	if *jsonOutput {
+	if options.json {
 		machine := reporter.NewJSONL(streams.Out)
 		eventReporter = machine
 		finish = machine.Summary
@@ -234,7 +529,7 @@ func runTests(ctx context.Context, arguments []string, streams IO) int {
 	})
 	if err := executePlan(
 		ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
-		plan, sink, *noDaemon, streams,
+		plan, sink, options.noDaemon, streams,
 	); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return ExitCanceled
@@ -291,15 +586,8 @@ func executePlan(
 	return err
 }
 
-func listTests(arguments []string, streams IO) error {
-	flags := flag.NewFlagSet("list", flag.ContinueOnError)
-	flags.SetOutput(streams.Err)
-	projectFlag := flags.String("project", "", "Godot project root")
-	allowEmpty := flags.Bool("allow-empty", false, "allow selectors that match no tests")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-	root, err := projectRoot(*projectFlag)
+func listTests(ctx context.Context, options listOptions, streams IO) error {
+	root, err := projectRoot(options.project)
 	if err != nil {
 		return err
 	}
@@ -307,15 +595,35 @@ func listTests(arguments []string, streams IO) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := index.Discover(context.Background(), root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
+	if options.onlyMode != "" {
+		projectConfig.OnlyMode = options.onlyMode
+	}
+	if err := validateOnlyMode(projectConfig.OnlyMode); err != nil {
+		return err
+	}
+	staticManifest, err := index.Discover(ctx, root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
 	if err != nil {
 		return err
 	}
-	manifest, err = discovery.Select(manifest, flags.Args(), *allowEmpty)
+	discoveryManifest, err := discoveryCandidates(staticManifest, options.selectors, options.allowEmpty)
 	if err != nil {
 		return err
 	}
-	for _, file := range manifest.Files {
+	sessionID, err := resolveSessionID(ctx, root, projectConfig)
+	if err != nil {
+		return err
+	}
+	manifest, err := completeManifest(ctx, root, projectConfig, discoveryManifest, sessionID, false, streams)
+	if err != nil {
+		return err
+	}
+	selected, err := selectCompletedManifest(
+		manifest, staticManifest, root, options.selectors, options.name, options.allowEmpty, false, nil,
+	)
+	if err != nil {
+		return err
+	}
+	for _, file := range selected.manifest.Files {
 		for _, testCase := range file.Cases {
 			if _, err := fmt.Fprintln(streams.Out, testCase.ID); err != nil {
 				return err
@@ -325,14 +633,8 @@ func listTests(arguments []string, streams IO) error {
 	return nil
 }
 
-func doctor(ctx context.Context, arguments []string, streams IO) error {
-	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	flags.SetOutput(streams.Err)
-	projectFlag := flags.String("project", "", "Godot project root")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-	root, err := projectRoot(*projectFlag)
+func doctor(ctx context.Context, project string, streams IO) error {
+	root, err := projectRoot(project)
 	if err != nil {
 		return err
 	}
@@ -377,14 +679,8 @@ func doctor(ctx context.Context, arguments []string, streams IO) error {
 	return err
 }
 
-func warm(ctx context.Context, arguments []string, streams IO) error {
-	flags := flag.NewFlagSet("warm", flag.ContinueOnError)
-	flags.SetOutput(streams.Err)
-	projectFlag := flags.String("project", "", "Godot project root")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-	root, err := projectRoot(*projectFlag)
+func warm(ctx context.Context, project string, streams IO) error {
+	root, err := projectRoot(project)
 	if err != nil {
 		return err
 	}
@@ -409,59 +705,99 @@ func warm(ctx context.Context, arguments []string, streams IO) error {
 	return printJSON(streams.Out, response)
 }
 
-func daemonCommand(ctx context.Context, arguments []string, streams IO) error {
-	if len(arguments) == 0 {
-		return errors.New("daemon requires status, sessions, stop, logs, or serve")
+func newDaemonCommand(streams IO) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "daemon",
+		Short: "Manage the user-level gdtest daemon",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return errors.New("daemon requires status, sessions, stop, logs, or serve")
+		},
 	}
-	switch arguments[0] {
-	case "serve":
-		return serveDaemon(ctx, arguments[1:], streams)
-	case "logs":
-		namespace, err := daemon.DefaultNamespace()
-		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(namespace.LogPath)
-		if err != nil {
-			return fmt.Errorf("read daemon log: %w", err)
-		}
-		_, err = streams.Out.Write(data)
-		return err
-	case "status", "sessions", "stop":
-		daemonClient, err := compatibleClient(false)
-		if err != nil {
-			return err
-		}
-		if arguments[0] == "stop" {
-			if err := daemonClient.Stop(ctx); err != nil {
+	var namespace string
+	serve := &cobra.Command{
+		Use:   "serve",
+		Short: "Serve the daemon protocol",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return serveDaemon(command.Context(), namespace, streams)
+		},
+	}
+	serve.Flags().StringVar(&namespace, "namespace", "", "exact daemon namespace")
+	command.AddCommand(
+		serve,
+		newDaemonRPCCommand("status", "Report daemon status", streams),
+		newDaemonRPCCommand("sessions", "List daemon sessions", streams),
+		newDaemonStopCommand(streams),
+		newDaemonLogsCommand(streams),
+	)
+	return command
+}
+
+func newDaemonRPCCommand(name string, description string, streams IO) *cobra.Command {
+	return &cobra.Command{
+		Use:   name,
+		Short: description,
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			daemonClient, err := compatibleClient(false)
+			if err != nil {
 				return err
 			}
-			_, err := fmt.Fprintln(streams.Out, "daemon stopping")
-			return err
-		}
-		method := "daemon." + arguments[0]
-		response, err := daemonClient.Call(ctx, method, struct{}{}, nil)
-		if err != nil {
-			return err
-		}
-		return printJSON(streams.Out, response)
-	default:
-		return fmt.Errorf("unknown daemon command %q", arguments[0])
+			response, err := daemonClient.Call(command.Context(), "daemon."+name, struct{}{}, nil)
+			if err != nil {
+				return err
+			}
+			return printJSON(streams.Out, response)
+		},
 	}
 }
 
-func serveDaemon(ctx context.Context, arguments []string, streams IO) error {
-	flags := flag.NewFlagSet("daemon serve", flag.ContinueOnError)
-	flags.SetOutput(streams.Err)
-	namespaceFlag := flags.String("namespace", "", "exact daemon namespace")
-	if err := flags.Parse(arguments); err != nil {
-		return err
+func newDaemonStopCommand(streams IO) *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the daemon",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			daemonClient, err := compatibleClient(false)
+			if err != nil {
+				return err
+			}
+			if err := daemonClient.Stop(command.Context()); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(streams.Out, "daemon stopping")
+			return err
+		},
 	}
+}
+
+func newDaemonLogsCommand(streams IO) *cobra.Command {
+	return &cobra.Command{
+		Use:   "logs",
+		Short: "Print the daemon log",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			namespace, err := daemon.DefaultNamespace()
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(namespace.LogPath)
+			if err != nil {
+				return fmt.Errorf("read daemon log: %w", err)
+			}
+			_, err = streams.Out.Write(data)
+			return err
+		},
+	}
+}
+
+func serveDaemon(ctx context.Context, requestedNamespace string, streams IO) error {
 	namespace, err := daemon.DefaultNamespace()
 	if err != nil {
 		return err
 	}
-	if *namespaceFlag != "" && filepath.Clean(*namespaceFlag) != filepath.Clean(namespace.Root) {
+	if requestedNamespace != "" && filepath.Clean(requestedNamespace) != filepath.Clean(namespace.Root) {
 		return errors.New("requested daemon namespace does not match this executable build")
 	}
 	if err := namespace.Prepare(); err != nil {

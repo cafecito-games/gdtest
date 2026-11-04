@@ -148,3 +148,21 @@ func TestLimitsAndKeys(t *testing.T) {
 	key := Key("tool", "parser", nil, nil)
 	require.ErrorIs(t, store.Put(context.Background(), key, []byte("four")), ErrEntryTooLarge)
 }
+
+func TestDeleteRemovesApplicationRejectedEntry(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir(), 1024)
+	require.NoError(t, err)
+	key := Key("tool", "schema", nil, []byte("source"))
+	require.NoError(t, store.Put(context.Background(), key, []byte("valid envelope, invalid schema")))
+	require.NoError(t, store.Delete(context.Background(), key))
+	_, hit, err := store.Get(context.Background(), key)
+	require.NoError(t, err)
+	assert.False(t, hit)
+	require.NoError(t, store.Delete(context.Background(), key), "deleting a miss is idempotent")
+	require.ErrorIs(t, store.Delete(context.Background(), "invalid"), ErrInvalidKey)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, store.Delete(canceled, key), context.Canceled)
+}

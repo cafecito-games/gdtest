@@ -66,7 +66,15 @@ func _start() -> void:
 					"generation": _generation,
 					"project_path": ProjectSettings.globalize_path("res://").trim_suffix("/"),
 					"godot_version": Engine.get_version_info(),
-					"capabilities": ["run", "ping", "cancel", "reload", "reset", "shutdown"],
+					"capabilities": [
+						"run",
+						"discover",
+						"ping",
+						"cancel",
+						"reload",
+						"reset",
+						"shutdown",
+					],
 				},
 			}
 	)
@@ -165,6 +173,11 @@ func _dispatch(message: Dictionary[String, Variant]) -> void:
 				_send_worker_error("worker.busy", "worker already has an active run")
 			else:
 				_run_command(message)
+		"discover":
+			if _running:
+				_send_worker_error("worker.busy", "worker already has an active operation")
+			else:
+				_discover_command(message)
 		"cancel":
 			if str(payload.get("run_id", "")) == _run_id:
 				_cancel_requested = true
@@ -224,7 +237,6 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		_finish_run_state()
 		return
 	var prepared_files: Array[Dictionary] = []
-	var has_focus: bool = false
 	for file_value: Variant in files_value:
 		if _cancel_requested:
 			break
@@ -235,14 +247,26 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 				_string_dictionary(file_value)
 		)
 		prepared_files.append(prepared)
+	_apply_selected_ids(prepared_files, plan)
+	var has_focus: bool = false
+	for prepared_value: Variant in prepared_files:
+		var prepared: Dictionary[String, Variant] = _string_dictionary(prepared_value)
 		for case_value: Variant in prepared.get("cases", []):
 			if case_value is Dictionary and bool(case_value.get("is_only", false)):
 				has_focus = true
+	var only_mode: String = str(plan.get("only_mode", "auto"))
+	var policy_error: String = Protocol.only_policy_error(only_mode, has_focus)
+	if not policy_error.is_empty():
+		_send_discovery_error({ "message": policy_error }, "")
+		totals["error"] += 1
 	for prepared_value: Variant in prepared_files:
 		var prepared: Dictionary[String, Variant] = _string_dictionary(prepared_value)
 		if _cancel_requested:
 			break
-		var file_totals: Dictionary[String, int] = await _run_prepared_file(prepared, has_focus)
+		if not policy_error.is_empty():
+			break
+		var focus_only: bool = has_focus and only_mode != "ignore"
+		var file_totals: Dictionary[String, int] = await _run_prepared_file(prepared, focus_only)
 		for status: String in totals:
 			totals[status] += file_totals.get(status, 0)
 	if _cancel_requested:
@@ -258,12 +282,75 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 	_finish_run_state()
 
 
-func _prepare_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String, Variant]:
+func _discover_command(command: Dictionary[String, Variant]) -> void:
+	_running = true
+	_cancel_requested = false
+	_sequence = 0
+	_request_id = str(command.get("request_id", ""))
+	var payload: Dictionary[String, Variant] = _string_dictionary(command.get("payload", {}))
+	var requested_generation: int = int(payload.get("generation", -1))
+	if requested_generation != _generation:
+		_send_worker_error(
+				"worker.stale_generation",
+				"worker generation %d cannot discover generation %d" % [
+					_generation,
+					requested_generation,
+				]
+		)
+		_finish_run_state()
+		return
+	var plan_value: Variant = payload.get("plan", {})
+	if not plan_value is Dictionary:
+		_send_worker_error("protocol.invalid_plan", "discovery plan must be an object")
+		_finish_run_state()
+		return
+	var plan: Dictionary[String, Variant] = _string_dictionary(plan_value)
+	var files_value: Variant = plan.get("files", [])
+	if not files_value is Array:
+		_send_worker_error("protocol.invalid_plan", "plan.files must be an array")
+		_finish_run_state()
+		return
+	var prepared_files: Array[Dictionary] = []
+	for file_value: Variant in files_value:
+		if not file_value is Dictionary:
+			prepared_files.append(
+					{
+						"path": "",
+						"instance": null,
+						"cases": [],
+						"root_info": null,
+						"errors": [{ "message": "each plan file must be an object" }],
+						"discovery_error_count": 1,
+					}
+			)
+			continue
+		prepared_files.append(await _prepare_file(_string_dictionary(file_value), false))
+	var manifest: Dictionary[String, Variant] = Protocol.discovery_manifest(
+			prepared_files,
+			_generation,
+			str(plan.get("content_fingerprint", ""))
+	)
+	_send(
+			{
+				"version": Version.WORKER_PROTOCOL_VERSION,
+				"type": "discover_finished",
+				"request_id": _request_id,
+				"payload": manifest,
+			}
+	)
+	_finish_run_state()
+
+
+func _prepare_file(
+		file_plan: Dictionary[String, Variant],
+		emit_errors: bool = true
+) -> Dictionary[String, Variant]:
 	var prepared: Dictionary[String, Variant] = {
 		"path": "",
 		"instance": null,
 		"cases": [],
 		"root_info": null,
+		"errors": [],
 		"discovery_error_count": 0,
 	}
 	var path: String = str(file_plan.get("file", file_plan.get("path", "")))
@@ -272,12 +359,26 @@ func _prepare_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String,
 	prepared["path"] = path
 	var resource: Resource = ResourceLoader.load(path, "Script", ResourceLoader.CACHE_MODE_REPLACE)
 	if not resource is Script:
-		_send_worker_error("worker.script_load", "unable to load test script " + path)
+		var load_error: Dictionary[String, Variant] = {
+			"code": "worker.script_load",
+			"message": "unable to load test script " + path,
+			"location": { "file": path, "line": -1 },
+		}
+		prepared["errors"] = [load_error]
+		if emit_errors:
+			_send_worker_error("worker.script_load", str(load_error["message"]))
 		prepared["discovery_error_count"] = 1
 		return prepared
 	var instance_value: Variant = resource.new()
 	if not instance_value is GDTest:
-		_send_worker_error("worker.invalid_test", path + " does not extend GDTest")
+		var type_error: Dictionary[String, Variant] = {
+			"code": "worker.invalid_test",
+			"message": path + " does not extend GDTest",
+			"location": { "file": path, "line": -1 },
+		}
+		prepared["errors"] = [type_error]
+		if emit_errors:
+			_send_worker_error("worker.invalid_test", str(type_error["message"]))
 		prepared["discovery_error_count"] = 1
 		return prepared
 	var instance: GDTest = instance_value
@@ -295,10 +396,18 @@ func _prepare_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String,
 	if instance.has_method("after_case") and instance.has_method("after_each"):
 		discovery_errors.append({ "message": "after_case and after_each cannot both be defined" })
 	var suite_name: String = await _suite_name(instance, resource, path, discovery_errors)
-	for discovery_error: Variant in discovery_errors:
-		_send_discovery_error(discovery_error, path)
+	for index: int in range(discovery_errors.size()):
+		var discovery_error: Variant = discovery_errors[index]
+		var normalized: Dictionary[String, Variant] = Protocol.discovery_error(
+				discovery_error,
+				path
+		)
+		discovery_errors[index] = normalized
+		if emit_errors:
+			_send_discovery_error(normalized, path)
 	prepared["instance"] = instance
 	prepared["cases"] = cases
+	prepared["errors"] = discovery_errors
 	prepared["root_info"] = GDTestSuiteInfo.new(
 			path.trim_prefix("res://"),
 			suite_name,
@@ -309,6 +418,27 @@ func _prepare_file(file_plan: Dictionary[String, Variant]) -> Dictionary[String,
 	prepared["discovery_error_count"] = discovery_errors.size()
 	_active_test = null
 	return prepared
+
+
+func _apply_selected_ids(
+		prepared_files: Array[Dictionary],
+		plan: Dictionary[String, Variant]
+) -> void:
+	if not bool(plan.get("selection_applied", false)):
+		return
+	var selected: Dictionary[String, bool] = {}
+	var selected_value: Variant = plan.get("selected_ids", [])
+	if selected_value is Array:
+		for id_value: Variant in selected_value:
+			selected[str(id_value)] = true
+	for prepared_index: int in range(prepared_files.size()):
+		var prepared: Dictionary[String, Variant] = prepared_files[prepared_index]
+		var filtered: Array[Variant] = []
+		for case_value: Variant in prepared.get("cases", []):
+			if case_value is Dictionary and selected.has(str(case_value.get("id", ""))):
+				filtered.append(case_value)
+		prepared["cases"] = filtered
+		prepared_files[prepared_index] = prepared
 
 
 func _run_prepared_file(
@@ -812,20 +942,16 @@ func _send_worker_error(code: String, text: String) -> void:
 
 
 func _send_discovery_error(value: Variant, default_file: String) -> void:
-	var diagnostic: Dictionary[String, Variant] = _string_dictionary(value)
-	var location: Dictionary[String, Variant] = _string_dictionary(diagnostic.get("location", {}))
-	if str(location.get("file", "")).is_empty():
-		location["file"] = default_file
-	if not location.has("line"):
-		location["line"] = -1
+	var diagnostic: Dictionary[String, Variant] = Protocol.discovery_error(value, default_file)
+	var location: Dictionary[String, Variant] = _string_dictionary(diagnostic["location"])
 	_send_event(
 			"worker_error",
 			{
-				"name": "worker.discovery",
-				"message": str(diagnostic.get("message", value)),
+				"name": str(diagnostic["code"]),
+				"message": str(diagnostic["message"]),
 				"test_id": _active_case_id,
 				"location": location,
-				"metadata": { "code": "worker.discovery" },
+				"metadata": { "code": diagnostic["code"] },
 			}
 	)
 

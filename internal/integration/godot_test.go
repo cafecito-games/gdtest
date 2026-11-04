@@ -64,8 +64,9 @@ func TestForegroundGodotPassingAndFailingFixtures(t *testing.T) {
 		}, app.IO{Out: &output, Err: &diagnostics})
 		assert.Equal(t, app.ExitError, code, "output:\n%s\n%s", output.String(), diagnostics.String())
 		assert.Contains(t, output.String(), "duplicate row")
+		assert.Contains(t, output.String(), "only valid while a case is executing")
 		assert.Contains(t, output.String(), "get_suite_name")
-		assert.Contains(t, output.String(), "2 errors")
+		assert.Contains(t, output.String(), "3 errors")
 	})
 }
 
@@ -214,7 +215,7 @@ func TestPersistentGodotWorkerReusesProcess(t *testing.T) {
 		return nil
 	}))
 	require.NoError(t, err)
-	assert.Equal(t, 2, diagnostics)
+	assert.Equal(t, 3, diagnostics)
 	require.NoError(t, process.Reset(ctx))
 	require.NoError(t, process.Ping(ctx))
 }
