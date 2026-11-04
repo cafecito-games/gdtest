@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cafecito-games/gdtest/internal/daemon"
+	"github.com/cafecito-games/gdtest/internal/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -147,6 +150,50 @@ func TestCallRejectsOversizedRequestBeforeStartingDaemon(t *testing.T) {
 
 	require.ErrorContains(t, err, "exceeds the 128-byte protocol limit")
 	assert.Zero(t, starts.Load())
+}
+
+func TestCallReconnectsWhenDaemonDisappearsAfterReadinessCheck(t *testing.T) {
+	t.Parallel()
+
+	namespace, err := daemon.NewNamespace(shortTempDir(t), daemon.ProtocolVersion, "reconnect-build")
+	require.NoError(t, err)
+	var attempts atomic.Int32
+	client := Client{
+		Namespace: namespace,
+		dialContext: func(context.Context, string, string) (net.Conn, error) {
+			switch attempts.Add(1) {
+			case 1, 3:
+				connection, peer := net.Pipe()
+				require.NoError(t, peer.Close())
+				return connection, nil
+			case 2:
+				return nil, errors.New("daemon exited after readiness")
+			case 4:
+				connection, peer := net.Pipe()
+				go func() {
+					defer func() { _ = peer.Close() }()
+					var request daemon.Message
+					if decodeErr := protocol.NewDecoder(peer, protocol.DefaultMaxMessageSize).Decode(&request); decodeErr != nil {
+						return
+					}
+					payload, _ := json.Marshal(map[string]bool{"reconnected": true})
+					_ = protocol.NewEncoder(peer).Encode(daemon.Message{
+						Version: daemon.ProtocolVersion, Type: daemon.MessageResponse,
+						RequestID: request.RequestID, Method: request.Method, Payload: payload, Terminal: true,
+					})
+				}()
+				return connection, nil
+			default:
+				return nil, errors.New("unexpected dial")
+			}
+		},
+	}
+
+	response, err := client.Call(context.Background(), "test.reconnect", struct{}{}, nil)
+
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"reconnected":true}`, string(response))
+	assert.Equal(t, int32(4), attempts.Load())
 }
 
 func shortTempDir(t *testing.T) string {

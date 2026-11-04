@@ -15,3 +15,7 @@ else
 fi
 
 go test -run '^$' -bench . -benchmem -count 5 ./internal/performance
+
+GDTEST_RUN_PERFORMANCE=1 \
+	GDTEST_PERFORMANCE_SAMPLES="${GDTEST_PERFORMANCE_SAMPLES:-5}" \
+	go test -v -count 1 -timeout 10m -run '^TestGodotPerformanceCorpora$' ./internal/performance

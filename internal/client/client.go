@@ -26,6 +26,7 @@ type Client struct {
 	Starter      Starter
 	StartTimeout time.Duration
 	MaxSize      int
+	dialContext  func(context.Context, string, string) (net.Conn, error)
 }
 
 // Call streams events and returns the exactly one terminal response payload.
@@ -56,9 +57,18 @@ func (c Client) Call(ctx context.Context, method string, payload any, onEvent fu
 	if err := c.Ensure(ctx); err != nil {
 		return nil, err
 	}
-	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.Namespace.SocketPath)
-	if err != nil {
-		return nil, fmt.Errorf("connect to daemon: %w", err)
+	var connection net.Conn
+	for attempt := range 2 {
+		connection, err = c.dial(ctx)
+		if err == nil {
+			break
+		}
+		if attempt == 1 {
+			return nil, fmt.Errorf("connect to daemon after readiness check: %w", err)
+		}
+		if ensureErr := c.Ensure(ctx); ensureErr != nil {
+			return nil, fmt.Errorf("reconnect to daemon: %w", ensureErr)
+		}
 	}
 	defer func() { _ = connection.Close() }()
 	stopCancellation := context.AfterFunc(ctx, func() { _ = connection.Close() })
@@ -116,7 +126,7 @@ func (c Client) Call(ctx context.Context, method string, payload any, onEvent fu
 
 // Ensure connects to an existing daemon or starts exactly this build and waits for readiness.
 func (c Client) Ensure(ctx context.Context) error {
-	if connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.Namespace.SocketPath); err == nil {
+	if connection, err := c.dial(ctx); err == nil {
 		_ = connection.Close()
 		return nil
 	}
@@ -136,7 +146,7 @@ func (c Client) Ensure(ctx context.Context) error {
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		connection, err := (&net.Dialer{}).DialContext(ctx, "unix", c.Namespace.SocketPath)
+		connection, err := c.dial(ctx)
 		if err == nil {
 			_ = connection.Close()
 			metadata, metadataErr := c.Namespace.ReadMetadata()
@@ -156,6 +166,13 @@ func (c Client) Ensure(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (c Client) dial(ctx context.Context) (net.Conn, error) {
+	if c.dialContext != nil {
+		return c.dialContext(ctx, "unix", c.Namespace.SocketPath)
+	}
+	return (&net.Dialer{}).DialContext(ctx, "unix", c.Namespace.SocketPath)
 }
 
 // ExecutableStarter starts the current binary's internal daemon command.

@@ -103,6 +103,69 @@ func TestSessionServiceReusesWorker(t *testing.T) {
 	assert.Equal(t, uint64(2), sessions[0].Runs)
 }
 
+func TestSessionServiceEmitsStructuredLifecycleLogs(t *testing.T) {
+	t.Parallel()
+
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		return &fakeWorker{pid: 73, generation: options.Generation}, nil
+	})
+	service.sourceFactory = nil
+	var logMu sync.Mutex
+	var records []map[string]any
+	service.log = func(record map[string]any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		records = append(records, record)
+	}
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "logged", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "logged-run",
+			Generation:      1,
+		},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "logged-request", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+	require.NoError(t, err)
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	byEvent := make(map[string]map[string]any, len(records))
+	for _, record := range records {
+		byEvent[record["event"].(string)] = record
+	}
+	for _, event := range []string{"worker_started", "run_started", "run_finished"} {
+		record, exists := byEvent[event]
+		require.True(t, exists, "missing %s lifecycle log", event)
+		assert.Equal(t, "logged", record["session_id"])
+		assert.Equal(t, "pid:73", record["worker_id"])
+		assert.Equal(t, uint64(1), record["generation"])
+	}
+	assert.Equal(t, "logged-run", byEvent["run_started"]["run_id"])
+	assert.Equal(t, "logged-run", byEvent["run_finished"]["run_id"])
+}
+
+func TestMergeWorkerTimingsSeparatesExecutionAndSerializationPhases(t *testing.T) {
+	t.Parallel()
+
+	timings := map[string]int64{}
+	mergeWorkerTimings(timings, map[string]any{
+		"timings_usec": map[string]any{
+			"script_load_dynamic_definition": float64(11),
+			"hooks_cases":                    int64(22),
+			"result_serialization":           33,
+		},
+	})
+
+	assert.Equal(t, int64(11*time.Microsecond), timings["script_load_dynamic_definition"])
+	assert.Equal(t, int64(22*time.Microsecond), timings["hooks_cases"])
+	assert.Equal(t, int64(33*time.Microsecond), timings["result_serialization"])
+}
+
 func TestSessionServiceRecyclesWorkerAtConfiguredAge(t *testing.T) {
 	t.Parallel()
 
@@ -188,6 +251,88 @@ func TestSessionServiceRecyclesWhenMemoryCannotBeMeasured(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Eventually(t, process.closed.Load, time.Second, time.Millisecond)
+}
+
+func TestSessionServiceManyClientsStayWithinWorkerAndMemoryBounds(t *testing.T) {
+	t.Parallel()
+
+	const (
+		clients       = 24
+		maxWorkers    = 8
+		workerBytes   = 24 * 1024 * 1024
+		memoryBudget  = 96
+		retainedLimit = memoryBudget * 1024 * 1024
+	)
+	var nextPID atomic.Int32
+	started := make(chan struct{}, maxWorkers)
+	release := make(chan struct{})
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: int(nextPID.Add(1)) + 1000, generation: options.Generation}
+		process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return sink.Emit(model.Event{
+				ProtocolVersion: model.ProtocolVersion,
+				Type:            model.EventRunFinished,
+				RunID:           plan.RunID,
+				Status:          "pass",
+			})
+		}
+		return process, nil
+	}, maxWorkers)
+	service.sourceFactory = nil
+	service.memoryBudgetMB = memoryBudget
+	service.memoryUsage = func(pid int) (uint64, error) {
+		assert.Greater(t, pid, 1000)
+		return workerBytes, nil
+	}
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	errorsByClient := make(chan error, clients)
+	for index := range clients {
+		go func() {
+			payload, err := json.Marshal(RunRequest{
+				SessionID: fmt.Sprintf("memory-client-%02d", index),
+				Project:   fmt.Sprintf("/worktree-%02d", index),
+				Godot:     "godot",
+				Plan: model.TestPlan{
+					ProtocolVersion: model.ProtocolVersion,
+					RunID:           fmt.Sprintf("memory-run-%02d", index),
+					Generation:      1,
+				},
+			})
+			if err != nil {
+				errorsByClient <- err
+				return
+			}
+			_, err = service.Handle(context.Background(), daemon.Request{
+				ID: fmt.Sprintf("memory-request-%02d", index), Method: "session.run", Payload: payload,
+			}, func(any) error { return nil })
+			errorsByClient <- err
+		}()
+	}
+	for range maxWorkers {
+		waitServiceSignal(t, started)
+	}
+	assert.Equal(t, maxWorkers, service.WorkerCount())
+	close(release)
+	for range clients {
+		require.NoError(t, <-errorsByClient)
+	}
+
+	require.Eventually(t, func() bool {
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		return service.liveWorkers <= memoryBudget/(workerBytes/(1024*1024)) &&
+			service.totalWorkerBytes <= retainedLimit
+	}, 2*time.Second, time.Millisecond)
+	service.mu.Lock()
+	assert.LessOrEqual(t, service.totalWorkerBytes, uint64(retainedLimit))
+	assert.LessOrEqual(t, service.liveWorkers, memoryBudget/(workerBytes/(1024*1024)))
+	service.mu.Unlock()
 }
 
 func TestSessionServiceRejectsSessionIdentityRebinding(t *testing.T) {
@@ -654,7 +799,7 @@ func TestSessionServiceRunLimitCountsPerWorker(t *testing.T) {
 
 	require.Len(t, processes, 2)
 	assert.Equal(t, 2, processes[0].runs)
-	assert.True(t, processes[0].closed.Load())
+	assert.Eventually(t, processes[0].closed.Load, time.Second, time.Millisecond)
 	assert.Equal(t, 1, processes[1].runs)
 	assert.False(t, processes[1].closed.Load())
 }

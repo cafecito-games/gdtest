@@ -262,6 +262,164 @@ func TestGodotOutcomeMessagesCrossTheProtocolBoundary(t *testing.T) {
 	assert.Equal(t, "outcomes", outputEvents[0].RunID)
 }
 
+func TestGodotRuntimeErrorsAreSourceLocatedCaseErrors(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot runtime-error test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	file := parseFixture(t, root, "fixtures/godot/api/runtime_errors.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "runtime-errors", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "runtime-errors", Generation: 1,
+		ContentFingerprint: "runtime-errors-content", Files: []model.FilePlan{file},
+		SelectionApplied: true,
+		SelectedIDs: []string{
+			"fixtures/godot/api/runtime_errors.test.gd::test_builtin_assert_error",
+			"fixtures/godot/api/runtime_errors.test.gd::test_runtime_error",
+			"fixtures/godot/api/runtime_errors.test.gd::test_worker_continues_after_error",
+		},
+	}
+	finished := make(map[string]model.Event)
+	var runFinished model.Event
+	err = process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		if event.Type == model.EventCaseFinished {
+			finished[event.TestID] = event
+		}
+		if event.Type == model.EventRunFinished {
+			runFinished = event
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+
+	builtIn := finished[plan.SelectedIDs[0]]
+	assert.Equal(t, "error", builtIn.Status)
+	assert.Contains(t, builtIn.Message, "gdtest built-in assertion marker")
+	require.NotNil(t, builtIn.Location)
+	assert.Equal(t, "fixtures/godot/api/runtime_errors.test.gd", builtIn.Location.File)
+	assert.Equal(t, 6, builtIn.Location.Line)
+	runtimeError := finished[plan.SelectedIDs[1]]
+	assert.Equal(t, "error", runtimeError.Status)
+	assert.Contains(t, runtimeError.Message, "Out of bounds")
+	require.NotNil(t, runtimeError.Location)
+	assert.Equal(t, "fixtures/godot/api/runtime_errors.test.gd", runtimeError.Location.File)
+	assert.Equal(t, 12, runtimeError.Location.Line)
+	assert.Equal(t, "pass", finished[plan.SelectedIDs[2]].Status)
+	assert.Equal(t, "error", runFinished.Status)
+	require.NoError(t, process.Reset(ctx), "ordinary script errors must not poison the worker")
+}
+
+func TestGodotCaseTimeoutIsAnErrorAndTaintsTheWorker(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot case-timeout test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	file := parseFixture(t, root, "fixtures/godot/api/runtime_errors.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "case-timeout", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	timeoutID := "fixtures/godot/api/runtime_errors.test.gd::test_case_timeout"
+	continuationID := "fixtures/godot/api/runtime_errors.test.gd::test_worker_continues_after_error"
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "case-timeout", Generation: 1,
+		ContentFingerprint: "case-timeout-content", Files: []model.FilePlan{file},
+		CaseTimeout: 100 * time.Millisecond, SelectionApplied: true,
+		SelectedIDs: []string{timeoutID, continuationID},
+	}
+	var timeoutCase model.Event
+	var runFinished model.Event
+	var tainted model.Event
+	started := make([]string, 0, 2)
+	startedAt := time.Now()
+	err = process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		switch event.Type {
+		case model.EventCaseStarted:
+			started = append(started, event.TestID)
+		case model.EventCaseFinished:
+			if event.TestID == timeoutID {
+				timeoutCase = event
+			}
+		case model.EventWorkerTainted:
+			tainted = event
+		case model.EventRunFinished:
+			runFinished = event
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	assert.Less(t, time.Since(startedAt), 2*time.Second)
+	assert.Equal(t, []string{timeoutID}, started)
+	assert.Equal(t, "error", timeoutCase.Status)
+	assert.Contains(t, timeoutCase.Message, "timed out")
+	require.NotNil(t, timeoutCase.Location)
+	assert.Equal(t, "fixtures/godot/api/runtime_errors.test.gd", timeoutCase.Location.File)
+	assert.Equal(t, 16, timeoutCase.Location.Line)
+	assert.Equal(t, "error", runFinished.Status)
+	assert.Equal(t, timeoutID, tainted.TestID)
+	assert.Equal(t, "case_timeout", tainted.Metadata["reason"])
+}
+
+func TestGodotBusyLoopTimeoutKillsOnlyItsWorkerAndReturnsCaseError(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot busy-loop timeout test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	file := parseFixture(t, root, "fixtures/godot/api/runtime_errors.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "busy-loop-timeout", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	timeoutID := "fixtures/godot/api/runtime_errors.test.gd::test_busy_loop_timeout"
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "busy-loop-timeout", Generation: 1,
+		ContentFingerprint: "busy-loop-content", Files: []model.FilePlan{file},
+		CaseTimeout: 100 * time.Millisecond, SelectionApplied: true,
+		SelectedIDs: []string{timeoutID},
+	}
+	var timeoutCase model.Event
+	var runFinished model.Event
+	var tainted model.Event
+	startedAt := time.Now()
+	err = process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		switch event.Type {
+		case model.EventCaseFinished:
+			timeoutCase = event
+		case model.EventWorkerTainted:
+			tainted = event
+		case model.EventRunFinished:
+			runFinished = event
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	assert.Less(t, time.Since(startedAt), 2*time.Second)
+	assert.Equal(t, timeoutID, timeoutCase.TestID)
+	assert.Equal(t, "error", timeoutCase.Status)
+	assert.Contains(t, timeoutCase.Message, "timed out")
+	require.NotNil(t, timeoutCase.Location)
+	assert.Equal(t, "fixtures/godot/api/runtime_errors.test.gd", timeoutCase.Location.File)
+	assert.Equal(t, 21, timeoutCase.Location.Line)
+	assert.Equal(t, timeoutID, tainted.TestID)
+	assert.Equal(t, "case_timeout", tainted.Metadata["reason"])
+	assert.Equal(t, "error", runFinished.Status)
+}
+
 func TestGodotDiscoveryReportsNonInstantiableScriptAtItsSource(t *testing.T) {
 	if _, err := exec.LookPath("godot"); err != nil {
 		t.Skip("Godot script-load test skipped: godot is not on PATH")

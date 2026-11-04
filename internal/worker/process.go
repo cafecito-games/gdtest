@@ -10,6 +10,7 @@ import (
 	"net"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,9 @@ type Process struct {
 	capturedOutput []model.Event
 	capturedBytes  int
 	outputDropped  bool
+	stderrCase     string
+	caseCaptureEnd map[string]chan struct{}
+	runtimeErrors  map[string][]runtimeDiagnostic
 
 	messages    chan processMessage
 	processDone chan struct{}
@@ -69,6 +73,15 @@ type processMessage struct {
 	envelope protocol.Envelope
 	err      error
 }
+
+type runtimeDiagnostic struct {
+	message  string
+	location *model.Location
+}
+
+const caseCaptureMarker = "@@GDTEST_CASE_CAPTURE "
+
+var runtimeLocationPattern = regexp.MustCompile(`\(res://(.+):(\d+)\)$`)
 
 // WorkerCrashError reports an unexpected process or transport exit and the
 // last case whose start event was observed. It is never treated as a test failure.
@@ -89,6 +102,11 @@ func (e *WorkerCrashError) Error() string {
 func (e *WorkerCrashError) Unwrap() error { return e.Err }
 
 const startupOutputLimit = 64 << 10
+
+const (
+	defaultCaseTimeout = 30 * time.Second
+	caseWatchdogGrace  = 250 * time.Millisecond
+)
 
 // StartupError identifies the worker startup stage and retains bounded Godot
 // output so fresh-checkout and runtime mismatches remain actionable.
@@ -213,6 +231,7 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		options: options, project: project, workerID: workerID, cmd: command,
 		generation: options.Generation,
 		messages:   make(chan processMessage, 256), processDone: make(chan struct{}),
+		caseCaptureEnd: make(map[string]chan struct{}), runtimeErrors: make(map[string][]runtimeDiagnostic),
 	}
 	var outputMu sync.Mutex
 	stdoutTail := &tailBuffer{limit: startupOutputLimit}
@@ -234,8 +253,8 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		writer: &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stderrDestination, stderrTail)},
 	}
 	p.outputWait.Add(2)
-	go drainOutput(&p.outputWait, stdout, stdoutPipe)
-	go drainOutput(&p.outputWait, stderr, stderrPipe)
+	go drainProcessOutput(&p.outputWait, stdout, stdoutPipe)
+	go drainProcessOutput(&p.outputWait, stderr, stderrPipe)
 	go func() {
 		err := command.Wait()
 		p.stateMu.Lock()
@@ -470,16 +489,51 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 	}
 	receiveContext := ctx
 	canceled := false
+	runtimeCaseError := false
 	var cancelWait context.CancelFunc
+	var caseDeadline time.Time
+	var activeCase model.Event
+	var activeCaseStarted time.Time
 	defer func() {
 		if cancelWait != nil {
 			cancelWait()
 		}
 	}()
+	caseTimeout := plan.CaseTimeout
+	if caseTimeout <= 0 {
+		caseTimeout = defaultCaseTimeout
+	}
 	for {
-		message, err := p.receive(receiveContext)
+		message, err := p.receiveBefore(receiveContext, caseDeadline)
 		if err != nil {
+			if !caseDeadline.IsZero() && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				p.killAndWait()
+				if outputErr := p.emitCapturedOutputFor(sink, activeCase.TestID); outputErr != nil {
+					return outputErr
+				}
+				message := fmt.Sprintf("case timed out after %s", caseTimeout)
+				if emitErr := sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion, Type: model.EventCaseFinished,
+					RunID: plan.RunID, TestID: activeCase.TestID, Name: activeCase.Name,
+					Status: "error", Message: message, Location: activeCase.Location,
+					Duration: time.Since(activeCaseStarted),
+				}); emitErr != nil {
+					return emitErr
+				}
+				if emitErr := sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion, Type: model.EventWorkerTainted,
+					RunID: plan.RunID, TestID: activeCase.TestID, Message: "case timeout",
+					Metadata: map[string]any{"reason": "case_timeout"},
+				}); emitErr != nil {
+					return emitErr
+				}
+				return sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished,
+					RunID: plan.RunID, Status: "error", Generation: plan.Generation,
+				})
+			}
 			if !canceled && ctx.Err() != nil {
+				caseDeadline = time.Time{}
 				canceled = true
 				_ = p.Cancel(context.Background(), plan.RunID)
 				var cancel context.CancelFunc
@@ -507,8 +561,34 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 			p.stateMu.Lock()
 			p.lastCase = event.TestID
 			p.stateMu.Unlock()
+			p.beginCaseCapture(event.TestID)
+			activeCase = event
+			activeCaseStarted = time.Now()
+			caseDeadline = activeCaseStarted.Add(caseTimeout + caseWatchdogGrace)
 		}
-		if event.Type == model.EventRunFinished {
+		if event.Type == model.EventCaseFinished {
+			caseDeadline = time.Time{}
+			if !canceled {
+				receiveContext = ctx
+			}
+			p.waitForCaseCapture(ctx, event.TestID)
+			if diagnostic, ok := p.takeRuntimeDiagnostic(event.TestID); ok {
+				event.Status = "error"
+				event.Message = diagnostic.message
+				event.Location = diagnostic.location
+				runtimeCaseError = true
+			}
+		}
+		if event.Type == model.EventRunFinished && runtimeCaseError {
+			event.Status = "error"
+		}
+		switch event.Type {
+		case model.EventCaseFinished:
+			if err := p.emitCapturedOutputFor(sink, event.TestID); err != nil {
+				p.killAndWait()
+				return err
+			}
+		case model.EventRunFinished:
 			if err := p.emitCapturedOutput(sink); err != nil {
 				p.killAndWait()
 				return err
@@ -518,8 +598,8 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 			p.killAndWait()
 			return err
 		}
-		if event.Type != model.EventRunFinished {
-			if err := p.emitCapturedOutput(sink); err != nil {
+		if event.Type == model.EventCaseStarted {
+			if err := p.emitCapturedOutputFor(sink, event.TestID); err != nil {
 				p.killAndWait()
 				return err
 			}
@@ -536,6 +616,15 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 			return nil
 		}
 	}
+}
+
+func (p *Process) receiveBefore(ctx context.Context, deadline time.Time) (protocol.Envelope, error) {
+	if deadline.IsZero() {
+		return p.receive(ctx)
+	}
+	receiveContext, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	return p.receive(receiveContext)
 }
 
 func recoverableRunDiagnostic(event model.Event) bool {
@@ -908,6 +997,21 @@ func (p *Process) decodeEvent(message protocol.Envelope) (model.Event, error) {
 	event.ProtocolVersion = model.ProtocolVersion
 	event.Type = wireEvent.Kind
 	event.RunID = wireEvent.RunID
+	if event.Location != nil {
+		location := *event.Location
+		location.File = strings.TrimPrefix(location.File, "res://")
+		if location.File == "" {
+			event.Location = nil
+			return event, nil
+		}
+		if !validManifestPath(location.File) {
+			return model.Event{}, fmt.Errorf(
+				"worker event contains invalid diagnostic path %q",
+				event.Location.File,
+			)
+		}
+		event.Location = &location
+	}
 	return event, nil
 }
 
@@ -921,6 +1025,9 @@ func validateWorkerPlan(plan model.TestPlan) error {
 	}
 	if plan.RunID == "" || plan.Generation == 0 {
 		return errors.New("test plan needs a run ID and positive generation")
+	}
+	if plan.CaseTimeout < 0 {
+		return errors.New("test plan case timeout cannot be negative")
 	}
 	for _, file := range plan.Files {
 		if !validManifestPath(file.Path) {
@@ -936,17 +1043,48 @@ type processOutputWriter struct {
 	process *Process
 	stream  string
 	writer  io.Writer
+	pending []byte
 }
 
 func (w *processOutputWriter) Write(data []byte) (int, error) {
-	written, err := w.writer.Write(data)
-	if written > 0 {
-		w.process.captureOutput(w.stream, data[:written])
+	if w.stream != "stderr" {
+		written, err := w.writer.Write(data)
+		if written > 0 {
+			w.process.captureOutput(w.stream, data[:written], "")
+		}
+		return written, err
 	}
-	return written, err
+	w.pending = append(w.pending, data...)
+	for {
+		newline := bytes.IndexByte(w.pending, '\n')
+		if newline < 0 {
+			break
+		}
+		line := append([]byte(nil), w.pending[:newline+1]...)
+		w.pending = w.pending[newline+1:]
+		if err := w.process.captureStderrLine(line, w.writer); err != nil {
+			return 0, err
+		}
+	}
+	return len(data), nil
 }
 
-func (p *Process) captureOutput(stream string, data []byte) {
+func (w *processOutputWriter) flush() {
+	if len(w.pending) == 0 {
+		return
+	}
+	line := append([]byte(nil), w.pending...)
+	w.pending = nil
+	_ = w.process.captureStderrLine(line, w.writer)
+}
+
+func drainProcessOutput(wait *sync.WaitGroup, destination *processOutputWriter, source io.Reader) {
+	defer wait.Done()
+	_, _ = io.Copy(destination, source)
+	destination.flush()
+}
+
+func (p *Process) captureOutput(stream string, data []byte, testID string) {
 	p.stateMu.Lock()
 	runID := p.runID
 	p.stateMu.Unlock()
@@ -969,10 +1107,113 @@ func (p *Process) captureOutput(stream string, data []byte) {
 		ProtocolVersion: model.ProtocolVersion,
 		Type:            model.EventOutput,
 		RunID:           runID,
+		TestID:          testID,
 		Message:         text,
 		Metadata:        map[string]any{"stream": stream},
 	})
 	p.capturedBytes += len(data)
+}
+
+func (p *Process) captureStderrLine(line []byte, destination io.Writer) error {
+	text := strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+	if strings.HasPrefix(text, caseCaptureMarker) {
+		parts := strings.SplitN(strings.TrimPrefix(text, caseCaptureMarker), " ", 2)
+		if len(parts) == 2 {
+			var caseID string
+			if json.Unmarshal([]byte(parts[1]), &caseID) == nil {
+				p.captureMarker(parts[0], caseID)
+				return nil
+			}
+		}
+	}
+	if _, err := destination.Write(line); err != nil {
+		return err
+	}
+	p.outputMu.Lock()
+	caseID := p.stderrCase
+	if caseID != "" && strings.HasPrefix(text, "SCRIPT ERROR:") {
+		message := strings.TrimSpace(strings.TrimPrefix(text, "SCRIPT ERROR:"))
+		p.runtimeErrors[caseID] = append(p.runtimeErrors[caseID], runtimeDiagnostic{message: message})
+	} else if caseID != "" && strings.Contains(text, "at:") {
+		matches := runtimeLocationPattern.FindStringSubmatch(strings.TrimSpace(text))
+		diagnostics := p.runtimeErrors[caseID]
+		if len(matches) == 3 && len(diagnostics) > 0 && diagnostics[len(diagnostics)-1].location == nil {
+			lineNumber, err := strconv.Atoi(matches[2])
+			if err == nil {
+				diagnostics[len(diagnostics)-1].location = &model.Location{File: matches[1], Line: lineNumber}
+				p.runtimeErrors[caseID] = diagnostics
+			}
+		}
+	}
+	p.outputMu.Unlock()
+	p.captureOutput("stderr", line, caseID)
+	return nil
+}
+
+func (p *Process) captureMarker(phase, caseID string) {
+	p.outputMu.Lock()
+	defer p.outputMu.Unlock()
+	switch phase {
+	case "start":
+		p.stderrCase = caseID
+		if _, exists := p.caseCaptureEnd[caseID]; !exists {
+			p.caseCaptureEnd[caseID] = make(chan struct{})
+		}
+	case "end":
+		if p.stderrCase == caseID {
+			p.stderrCase = ""
+		}
+		waiter, exists := p.caseCaptureEnd[caseID]
+		if !exists {
+			waiter = make(chan struct{})
+			p.caseCaptureEnd[caseID] = waiter
+		}
+		select {
+		case <-waiter:
+		default:
+			close(waiter)
+		}
+	}
+}
+
+func (p *Process) beginCaseCapture(caseID string) {
+	p.outputMu.Lock()
+	if _, exists := p.caseCaptureEnd[caseID]; !exists {
+		p.caseCaptureEnd[caseID] = make(chan struct{})
+	}
+	p.outputMu.Unlock()
+}
+
+func (p *Process) waitForCaseCapture(ctx context.Context, caseID string) {
+	p.outputMu.Lock()
+	waiter := p.caseCaptureEnd[caseID]
+	p.outputMu.Unlock()
+	if waiter == nil {
+		return
+	}
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-waiter:
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+func (p *Process) takeRuntimeDiagnostic(caseID string) (runtimeDiagnostic, bool) {
+	p.outputMu.Lock()
+	defer p.outputMu.Unlock()
+	diagnostics := p.runtimeErrors[caseID]
+	delete(p.runtimeErrors, caseID)
+	delete(p.caseCaptureEnd, caseID)
+	if len(diagnostics) == 0 {
+		return runtimeDiagnostic{}, false
+	}
+	messages := make([]string, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		messages = append(messages, diagnostic.message)
+	}
+	return runtimeDiagnostic{message: strings.Join(messages, "; "), location: diagnostics[0].location}, true
 }
 
 func (p *Process) clearCapturedOutput() {
@@ -1007,6 +1248,27 @@ func (p *Process) emitCapturedOutput(sink executor.EventSink) error {
 			Message:         "gdtest truncated worker output after 1048576 bytes",
 			Metadata:        map[string]any{"truncated": true},
 		})
+	}
+	return nil
+}
+
+func (p *Process) emitCapturedOutputFor(sink executor.EventSink, testID string) error {
+	p.outputMu.Lock()
+	selected := make([]model.Event, 0)
+	retained := make([]model.Event, 0, len(p.capturedOutput))
+	for _, event := range p.capturedOutput {
+		if event.TestID == testID {
+			selected = append(selected, event)
+		} else {
+			retained = append(retained, event)
+		}
+	}
+	p.capturedOutput = retained
+	p.outputMu.Unlock()
+	for _, event := range selected {
+		if err := sink.Emit(event); err != nil {
+			return err
+		}
 	}
 	return nil
 }

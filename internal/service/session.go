@@ -110,6 +110,7 @@ type SessionService struct {
 	reapers          sync.WaitGroup
 	scheduler        *scheduler.Scheduler
 	sourceFactory    func(string) *sourcewatch.Reconciler
+	log              func(map[string]any)
 }
 
 // ServiceOptions controls user-scoped process resource limits.
@@ -117,6 +118,7 @@ type ServiceOptions struct {
 	MaxWorkers     int
 	MaxWorkerAge   time.Duration
 	MemoryBudgetMB int
+	Log            func(map[string]any)
 }
 
 // NewSessionService creates an empty service using real Godot workers.
@@ -138,6 +140,7 @@ func NewSessionServiceWithOptions(options ServiceOptions) *SessionService {
 	result.maxWorkerAge = options.MaxWorkerAge
 	result.memoryBudgetMB = options.MemoryBudgetMB
 	result.memoryUsage = worker.ResidentMemoryBytes
+	result.log = options.Log
 	return result
 }
 
@@ -441,9 +444,11 @@ func (s *SessionService) discover(ctx context.Context, entry *session, request D
 	}
 	manifest, err := process.Discover(ctx, request.Plan)
 	if err != nil {
+		s.logLifecycle("discovery_failed", entry, process, request.Plan.RunID, map[string]any{"error": err.Error()})
 		s.discardWorker(entry)
 		return nil, err
 	}
+	s.logLifecycle("discovery_finished", entry, process, request.Plan.RunID, nil)
 	entry.lastUsed = time.Now().UTC()
 	entry.lifecycle.Touch(entry.lastUsed)
 	if err := process.Reset(ctx); err != nil {
@@ -518,11 +523,13 @@ func (s *SessionService) run(
 		return nil, err
 	}
 	tainted := false
+	s.logLifecycle("run_started", entry, process, request.Plan.RunID, nil)
 	sink := executor.EventSinkFunc(func(event model.Event) error {
 		if event.Type == model.EventWorkerTainted {
 			tainted = true
 		}
 		if event.Type == model.EventRunFinished {
+			mergeWorkerTimings(timings, event.Metadata)
 			if _, reconcileErr := s.reconcileSource(ctx, entry, sourcewatch.Filesystem); reconcileErr != nil {
 				return fmt.Errorf("reconcile source after run: %w", reconcileErr)
 			}
@@ -542,6 +549,7 @@ func (s *SessionService) run(
 	})
 	executionStarted := time.Now()
 	if err := process.Run(ctx, request.Plan, sink); err != nil {
+		s.logLifecycle("run_failed", entry, process, request.Plan.RunID, map[string]any{"error": err.Error()})
 		s.discardWorker(entry)
 		return nil, err
 	}
@@ -565,7 +573,50 @@ func (s *SessionService) run(
 		(s.memoryBudgetMB > 0 && (memoryErr != nil || memoryExceeded)) {
 		s.recycleWorker(entry)
 	}
+	s.logLifecycle("run_finished", entry, process, request.Plan.RunID, map[string]any{"tainted": tainted})
 	return map[string]any{"worker_pid": pid, "reused": reused, "timings_ns": timings}, nil
+}
+
+func mergeWorkerTimings(timings map[string]int64, metadata map[string]any) {
+	value, ok := metadata["timings_usec"]
+	if !ok {
+		return
+	}
+	workerTimings, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	for _, name := range []string{
+		"script_load_dynamic_definition",
+		"hooks_cases",
+		"result_serialization",
+	} {
+		raw, exists := workerTimings[name]
+		if !exists {
+			continue
+		}
+		var microseconds int64
+		valid := true
+		switch timing := raw.(type) {
+		case float64:
+			microseconds = int64(timing)
+		case int:
+			microseconds = int64(timing)
+		case int64:
+			microseconds = timing
+		case uint64:
+			if timing <= uint64(^uint64(0)>>1) {
+				microseconds = int64(timing)
+			} else {
+				valid = false
+			}
+		default:
+			valid = false
+		}
+		if valid && microseconds >= 0 {
+			timings[name] = microseconds * int64(time.Microsecond)
+		}
+	}
 }
 
 func (s *SessionService) warm(ctx context.Context, entry *session, request WarmRequest) (any, error) {
@@ -643,6 +694,7 @@ func (s *SessionService) ensureWorker(ctx context.Context, entry *session, gener
 		s.discardWorker(entry)
 	}
 	if entry.worker != nil && entry.worker.Generation() == generation {
+		s.logLifecycle("worker_reused", entry, entry.worker, "", nil)
 		return entry.worker, nil
 	}
 	hasSlot := entry.worker != nil
@@ -679,6 +731,7 @@ func (s *SessionService) ensureWorker(ctx context.Context, entry *session, gener
 	entry.workerRuns = 0
 	entry.lastUsed = time.Now().UTC()
 	entry.lifecycle.Touch(entry.lastUsed)
+	s.logLifecycle("worker_started", entry, process, "", nil)
 	return process, nil
 }
 
@@ -700,6 +753,13 @@ func (s *SessionService) reconcileSource(
 	if s.scheduler != nil {
 		s.scheduler.AdvanceGeneration(entry.id, result.Update.Generation)
 	}
+	s.logLifecycle(
+		"source_generation_advanced",
+		entry,
+		entry.worker,
+		"",
+		map[string]any{"generation": result.Update.Generation, "changes": len(result.Update.Changes)},
+	)
 	return result, nil
 }
 
@@ -761,6 +821,7 @@ func (s *SessionService) discardWorker(entry *session) {
 	if entry.worker == nil {
 		return
 	}
+	s.logLifecycle("worker_discarded", entry, entry.worker, "", nil)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = entry.worker.Shutdown(shutdownCtx)
 	cancel()
@@ -780,6 +841,7 @@ func (s *SessionService) recycleWorker(entry *session) {
 		return
 	}
 	process := entry.worker
+	s.logLifecycle("worker_recycled", entry, process, "", nil)
 	entry.worker = nil
 	entry.workerBorn = time.Time{}
 	s.forgetWorkerMemory(entry)
@@ -792,6 +854,34 @@ func (s *SessionService) recycleWorker(entry *session) {
 		cancel()
 		s.releaseWorkerSlot()
 	}()
+}
+
+func (s *SessionService) logLifecycle(
+	event string,
+	entry *session,
+	process managedWorker,
+	runID string,
+	fields map[string]any,
+) {
+	if s.log == nil {
+		return
+	}
+	record := make(map[string]any, len(fields)+5)
+	for key, value := range fields {
+		record[key] = value
+	}
+	record["event"] = event
+	if entry != nil {
+		record["session_id"] = entry.id
+	}
+	if process != nil {
+		record["worker_id"] = fmt.Sprintf("pid:%d", process.PID())
+		record["generation"] = process.Generation()
+	}
+	if runID != "" {
+		record["run_id"] = runID
+	}
+	s.log(record)
 }
 
 func (s *SessionService) recordWorkerMemory(entry *session) (bool, error) {

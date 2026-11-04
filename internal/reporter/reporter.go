@@ -94,7 +94,7 @@ func (r *Terminal) Emit(event model.Event) error {
 
 // Summary prints counts in deterministic order.
 func (r *Terminal) Summary(summary results.Summary) error {
-	_, err := fmt.Fprintf(
+	if _, err := fmt.Fprintf(
 		r.writer,
 		"%d passed, %d failed, %d errors, %d skipped, %d todo, %d void, %d canceled\n",
 		summary.Passed,
@@ -104,7 +104,17 @@ func (r *Terminal) Summary(summary results.Summary) error {
 		summary.Todo,
 		summary.Void,
 		summary.Canceled,
-	)
+	); err != nil {
+		return err
+	}
+	if len(summary.PolicyFailures) == 0 {
+		return nil
+	}
+	violations := make([]string, 0, len(summary.PolicyFailures))
+	for _, failure := range summary.PolicyFailures {
+		violations = append(violations, fmt.Sprintf("%d %s", failure.Count, failure.Status))
+	}
+	_, err := fmt.Fprintf(r.writer, "strict policy failed: %s\n", strings.Join(violations, ", "))
 	return err
 }
 

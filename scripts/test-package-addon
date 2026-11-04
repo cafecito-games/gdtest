@@ -16,7 +16,7 @@ if [ -z "$version" ] || [ $# -ne 1 ]; then
     echo "usage: scripts/test-package-addon VERSION" >&2
     exit 2
 fi
-for tool in gpm python3 unzip git; do
+for tool in gpm python3 unzip git diff; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
 done
 
@@ -90,14 +90,36 @@ new_project "$host_project"
 gpm install --host-only --dir "$host_project" >/dev/null
 [ -f "$host_project/addons.lock" ] || fail "host-only install wrote no lockfile"
 [ -f "$host_project/addons/gdtest/version.gd" ] || fail "host-only install omitted core"
+[ -f "$host_project/addons/gdtest/bin/.gdignore" ] \
+    || fail "host-only install omitted the binary import guard"
 
 case "$(uname -s):$(uname -m)" in
-    Darwin:arm64) host_binary="bin/macos-arm64/gdtest" ;;
-    Darwin:x86_64) host_binary="bin/macos-x86_64/gdtest" ;;
-    Linux:aarch64 | Linux:arm64) host_binary="bin/linux-arm64/gdtest" ;;
-    Linux:x86_64 | Linux:amd64) host_binary="bin/linux-x86_64/gdtest" ;;
+    Darwin:arm64) host_binary="bin/macos-arm64/gdtest"; host_slice="macos.arm64" ;;
+    Darwin:x86_64) host_binary="bin/macos-x86_64/gdtest"; host_slice="macos.x86_64" ;;
+    Linux:aarch64 | Linux:arm64) host_binary="bin/linux-arm64/gdtest"; host_slice="linux.arm64" ;;
+    Linux:x86_64 | Linux:amd64) host_binary="bin/linux-x86_64/gdtest"; host_slice="linux.x86_64" ;;
     *) fail "unsupported packaging-test host $(uname -s)/$(uname -m)" ;;
 esac
+
+assert_exact_tree() {
+    local project="$1"
+    shift
+    local expected="$work/expected-$(basename "$project").txt"
+    local actual="$work/actual-$(basename "$project").txt"
+    : > "$expected"
+    for archive in "$@"; do
+        unzip -Z1 "$dist/$archive" | sed '/\/$/d' >> "$expected"
+    done
+    sort -u -o "$expected" "$expected"
+    find "$project/addons/gdtest" -type f -print \
+        | sed "s#^$project/addons/gdtest/##" \
+        | sort -u > "$actual"
+    diff -u "$expected" "$actual" \
+        || fail "installed gdtest tree is not the exact union of selected package slices"
+}
+
+assert_exact_tree "$host_project" \
+    "gdtest-${version}-core.zip" "gdtest-${version}-${host_slice}.zip"
 
 # The addon-level empty platform override must win over this project's iOS/web
 # export targets while gpm still adds the implicit current-host slice.
@@ -106,12 +128,14 @@ new_project "$default_project"
 gpm install --dir "$default_project" >/dev/null
 [ -f "$default_project/addons/gdtest/$host_binary" ] \
     || fail "default install with platforms = [] omitted $host_binary"
-default_bin_count=$(find "$default_project/addons/gdtest/bin" -type f | wc -l | tr -d ' ')
+default_bin_count=$(find "$default_project/addons/gdtest/bin" -type f ! -name .gdignore | wc -l | tr -d ' ')
 [ "$default_bin_count" -eq 1 ] \
     || fail "platforms = [] installed $default_bin_count binaries instead of only the host binary"
+assert_exact_tree "$default_project" \
+    "gdtest-${version}-core.zip" "gdtest-${version}-${host_slice}.zip"
 
 [ -x "$host_project/addons/gdtest/$host_binary" ] || fail "host-only install omitted executable $host_binary"
-host_bin_count=$(find "$host_project/addons/gdtest/bin" -type f | wc -l | tr -d ' ')
+host_bin_count=$(find "$host_project/addons/gdtest/bin" -type f ! -name .gdignore | wc -l | tr -d ' ')
 [ "$host_bin_count" -eq 1 ] || fail "host-only install materialized $host_bin_count host binaries, expected 1"
 grep -qF "const PRODUCT_VERSION: String = \"${version}\"" "$host_project/addons/gdtest/version.gd" \
     || fail "installed runtime does not carry version $version"
@@ -130,7 +154,11 @@ extends GDTest
 func test_packaged_handshake() -> void:
 	expect_true(true)
 EOF
-    godot --headless --editor --path "$host_project" --quit >/dev/null
+	import_output=$(godot --headless --editor --path "$host_project" --quit 2>&1) \
+		|| fail "Godot could not import the packaged addon:$'\n'$import_output"
+	if grep -qE 'Unicode parsing error|Unexpected NUL character' <<< "$import_output"; then
+		fail "Godot attempted to import a packaged host executable as text:$'\n'$import_output"
+	fi
     package_output=$("$host_project/addons/gdtest/gdtest" run --no-daemon \
         --project "$host_project" tests/package.test.gd 2>&1) \
         || fail "gpm-installed executable/runtime handshake failed:$'\n'$package_output"
@@ -178,6 +206,12 @@ for path in \
 do
     [ -f "$all_project/addons/gdtest/$path" ] || fail "all-platform install omitted $path"
 done
+assert_exact_tree "$all_project" \
+    "gdtest-${version}-core.zip" \
+    "gdtest-${version}-macos.arm64.zip" \
+    "gdtest-${version}-macos.x86_64.zip" \
+    "gdtest-${version}-linux.arm64.zip" \
+    "gdtest-${version}-linux.x86_64.zip"
 cmp -s "$host_project/addons.lock" "$all_project/addons.lock" \
     || fail "lockfile differs between host-only and all-platform installs"
 cmp -s "$host_project/addons.lock" "$default_project/addons.lock" \

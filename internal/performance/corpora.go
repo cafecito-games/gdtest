@@ -51,7 +51,15 @@ func ThousandFiles() map[string][]byte {
 
 // TenThousandCases returns an immutable engine-completed manifest.
 func TenThousandCases() model.DiscoveryManifest {
-	cases := make([]model.DiscoveryCase, LargeCount)
+	return CaseManifest(LargeCount)
+}
+
+// CaseManifest returns an immutable engine-completed manifest of the requested size.
+func CaseManifest(count int) model.DiscoveryManifest {
+	if count < 0 {
+		count = 0
+	}
+	cases := make([]model.DiscoveryCase, count)
 	for index := range cases {
 		name := fmt.Sprintf("case %d", index)
 		cases[index] = model.DiscoveryCase{
@@ -61,7 +69,7 @@ func TenThousandCases() model.DiscoveryManifest {
 	}
 	return model.DiscoveryManifest{
 		ProtocolVersion: model.ProtocolVersion, Generation: 1,
-		ContentFingerprint: "ten-thousand-cases",
+		ContentFingerprint: fmt.Sprintf("case-corpus-%d", count),
 		Files:              []model.DiscoveryFile{{Path: "tests/cases.test.gd", Cases: cases}},
 	}
 }

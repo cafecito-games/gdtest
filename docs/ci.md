@@ -15,7 +15,7 @@ advertise Windows executable slices in the meantime.
 
 `--host-only` materializes mandatory core and the implicit current-host executable. It does not alter the byte-identical lockfile. A normal install is also valid because the gdtest addon entry carries `platforms = []`.
 
-Use `--only forbid` to reject focused tests in CI. Exit 1 means user test failures; exit 2 means configuration, discovery, protocol, worker, or reporting failure; exit 130 means cancellation. Always retain daemon logs and the JSONL artifact for an infrastructure failure.
+Use `--only forbid` to reject focused tests in CI. Add `--fail-on-skip`, `--fail-on-todo`, or `--fail-on-void` when those otherwise non-failing outcomes should fail the job. Strict-policy violations retain their original summary counts, are listed in the final summary, and exit 1. Exit 2 means configuration, discovery, protocol, worker, or reporting failure; exit 130 means cancellation. Always retain daemon logs and the JSONL artifact for an infrastructure failure.
 
 For changed-file jobs, pass project-relative paths to `--affected` as a comma-separated or repeated flag. The analysis is deliberately conservative: project configuration, autoloads, runtime/native inputs, unresolved dynamic loads, and unknown runtime resources can select all tests. A provably empty selection exits successfully.
 

@@ -1,27 +1,44 @@
 // Package model defines backend-neutral test plans and immutable result events.
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ProtocolVersion is the serialized plan and event schema version.
 const ProtocolVersion = 1
 
 // TestPlan is independent of absolute worktree paths and concrete executors.
 type TestPlan struct {
-	ProtocolVersion    int        `json:"protocol_version"`
-	RunID              string     `json:"run_id"`
-	Generation         uint64     `json:"generation"`
-	ContentFingerprint string     `json:"content_fingerprint,omitempty"`
-	OnlyMode           string     `json:"only_mode,omitempty"`
-	SelectionApplied   bool       `json:"selection_applied,omitempty"`
-	SelectedIDs        []string   `json:"selected_ids,omitempty"`
-	Files              []FilePlan `json:"files"`
+	ProtocolVersion    int           `json:"protocol_version"`
+	RunID              string        `json:"run_id"`
+	Generation         uint64        `json:"generation"`
+	CaseTimeout        time.Duration `json:"case_timeout_ns,omitempty"`
+	ContentFingerprint string        `json:"content_fingerprint,omitempty"`
+	OnlyMode           string        `json:"only_mode,omitempty"`
+	SelectionApplied   bool          `json:"selection_applied,omitempty"`
+	SelectedIDs        []string      `json:"selected_ids,omitempty"`
+	Files              []FilePlan    `json:"files"`
 }
 
 // FilePlan is one serial file-level scheduling unit.
 type FilePlan struct {
 	Path  string     `json:"path"`
-	Cases []CasePlan `json:"cases,omitempty"`
+	Cases []CasePlan `json:"cases"`
+}
+
+// MarshalJSON preserves an explicit empty static-case list so a backend can
+// distinguish a dynamic-only file from a legacy plan that omitted discovery.
+func (f FilePlan) MarshalJSON() ([]byte, error) {
+	cases := f.Cases
+	if cases == nil {
+		cases = []CasePlan{}
+	}
+	return json.Marshal(struct {
+		Path  string     `json:"path"`
+		Cases []CasePlan `json:"cases"`
+	}{Path: f.Path, Cases: cases})
 }
 
 // CasePlan identifies a statically discovered method test.
@@ -136,6 +153,7 @@ type Event struct {
 	RunID           string         `json:"run_id,omitempty"`
 	TestID          string         `json:"test_id,omitempty"`
 	Name            string         `json:"name,omitempty"`
+	Assertion       string         `json:"assertion,omitempty"`
 	Status          string         `json:"status,omitempty"`
 	Message         string         `json:"message,omitempty"`
 	Location        *Location      `json:"location,omitempty"`

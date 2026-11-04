@@ -25,16 +25,30 @@ type CaseResult struct {
 
 // Summary is a deterministic folded run result.
 type Summary struct {
-	Cases          []CaseResult  `json:"cases"`
-	Infrastructure []model.Event `json:"infrastructure,omitempty"`
-	Passed         int           `json:"passed"`
-	Failed         int           `json:"failed"`
-	Skipped        int           `json:"skipped"`
-	Todo           int           `json:"todo"`
-	Void           int           `json:"void"`
-	Errored        int           `json:"errored"`
-	Canceled       int           `json:"canceled"`
-	Stale          bool          `json:"stale,omitempty"`
+	Cases          []CaseResult    `json:"cases"`
+	Infrastructure []model.Event   `json:"infrastructure,omitempty"`
+	Passed         int             `json:"passed"`
+	Failed         int             `json:"failed"`
+	Skipped        int             `json:"skipped"`
+	Todo           int             `json:"todo"`
+	Void           int             `json:"void"`
+	Errored        int             `json:"errored"`
+	Canceled       int             `json:"canceled"`
+	Stale          bool            `json:"stale,omitempty"`
+	PolicyFailures []PolicyFailure `json:"policy_failures,omitempty"`
+}
+
+// OutcomePolicy controls which otherwise non-failing terminal outcomes fail a run.
+type OutcomePolicy struct {
+	FailOnSkip bool
+	FailOnTodo bool
+	FailOnVoid bool
+}
+
+// PolicyFailure records one enabled strict outcome and its observed count.
+type PolicyFailure struct {
+	Status string `json:"status"`
+	Count  int    `json:"count"`
 }
 
 // Collector safely folds an event stream without reserializing accumulated state.
@@ -176,8 +190,26 @@ func (c *Collector) Summary() Summary {
 	return summary
 }
 
-// HasFailures reports whether the run has a failing or infrastructure status.
-func (s Summary) HasFailures() bool { return s.Failed+s.Errored > 0 }
+// ApplyOutcomePolicy records enabled strict outcomes without changing their
+// underlying case statuses or double-counting them as assertion failures.
+func (s *Summary) ApplyOutcomePolicy(policy OutcomePolicy) {
+	s.PolicyFailures = s.PolicyFailures[:0]
+	if policy.FailOnSkip && s.Skipped > 0 {
+		s.PolicyFailures = append(s.PolicyFailures, PolicyFailure{Status: "skip", Count: s.Skipped})
+	}
+	if policy.FailOnTodo && s.Todo > 0 {
+		s.PolicyFailures = append(s.PolicyFailures, PolicyFailure{Status: "todo", Count: s.Todo})
+	}
+	if policy.FailOnVoid && s.Void > 0 {
+		s.PolicyFailures = append(s.PolicyFailures, PolicyFailure{Status: "void", Count: s.Void})
+	}
+}
+
+// HasFailures reports whether the run has a failing case or enabled
+// strict-policy status. Infrastructure failures are reported separately.
+func (s Summary) HasFailures() bool {
+	return s.Failed+s.Errored > 0 || len(s.PolicyFailures) > 0
+}
 
 // HasInfrastructureFailure reports whether discovery, protocol, or worker
 // diagnostics made the run non-authoritative independently of case failures.

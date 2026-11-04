@@ -99,6 +99,9 @@ type runOptions struct {
 	jobs        int
 	jobsSet     bool
 	staleRetry  int
+	failOnSkip  bool
+	failOnTodo  bool
+	failOnVoid  bool
 	selectors   []string
 }
 
@@ -309,6 +312,9 @@ func addRunFlags(command *cobra.Command, options *runOptions) {
 		"worker isolation: reuse, recycle, fresh, or exclusive",
 	)
 	command.Flags().IntVar(&options.jobs, "jobs", 0, "maximum concurrent test files (0 uses automatic concurrency)")
+	command.Flags().BoolVar(&options.failOnSkip, "fail-on-skip", false, "fail the run when any case is skipped")
+	command.Flags().BoolVar(&options.failOnTodo, "fail-on-todo", false, "fail the run when any case is marked todo")
+	command.Flags().BoolVar(&options.failOnVoid, "fail-on-void", false, "fail the run when any case has no assertion or explicit outcome")
 }
 
 func migrateVest(ctx context.Context, options migrateOptions, streams IO) error {
@@ -607,6 +613,11 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		}
 	}
 	summary := collector.Summary()
+	summary.ApplyOutcomePolicy(results.OutcomePolicy{
+		FailOnSkip: options.failOnSkip,
+		FailOnTodo: options.failOnTodo,
+		FailOnVoid: options.failOnVoid,
+	})
 	reportingStarted := time.Now()
 	if err := finish(summary); err != nil {
 		writeDiagnostic(streams.Err, "gdtest: report:", err)
@@ -624,6 +635,10 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", executionErr)
 		return ExitError
 	}
+	return summaryExitCode(summary)
+}
+
+func summaryExitCode(summary results.Summary) int {
 	if summary.HasInfrastructureFailure() {
 		return ExitError
 	}
@@ -984,6 +999,10 @@ func serveDaemon(ctx context.Context, requestedNamespace string, streams IO) err
 	sessions := service.NewSessionServiceWithOptions(service.ServiceOptions{
 		MaxWorkers: userConfig.MaxWorkers, MaxWorkerAge: time.Duration(userConfig.WorkerMaxAge),
 		MemoryBudgetMB: userConfig.MemoryBudgetMB,
+		Log: func(fields map[string]any) {
+			fields["build_id"] = namespace.BuildID
+			_ = logger.Write(fields)
+		},
 	})
 	janitorCtx, stopJanitor := context.WithCancel(ctx)
 	janitorDone := make(chan struct{})

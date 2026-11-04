@@ -51,3 +51,47 @@ func TestTerminalVerbosePrintsPassingMessagesAndCanceledSummary(t *testing.T) {
 	assert.Contains(t, output.String(), "MESSAGE case: detail")
 	assert.Contains(t, output.String(), "1 passed, 0 failed, 0 errors, 0 skipped, 0 todo, 0 void, 2 canceled")
 }
+
+func TestTerminalSummaryReportsStrictOutcomePolicyFailures(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewTerminal(&output)
+	require.NoError(t, reporter.Summary(results.Summary{
+		Skipped: 2,
+		Todo:    1,
+		PolicyFailures: []results.PolicyFailure{
+			{Status: "skip", Count: 2},
+			{Status: "todo", Count: 1},
+		},
+	}))
+
+	assert.Contains(t, output.String(), "0 passed, 0 failed, 0 errors, 2 skipped, 1 todo, 0 void, 0 canceled")
+	assert.Contains(t, output.String(), "strict policy failed: 2 skip, 1 todo")
+}
+
+func TestJSONLSummaryIncludesStrictOutcomePolicyFailures(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewJSONL(&output)
+	require.NoError(t, reporter.Summary(results.Summary{
+		Void:           2,
+		PolicyFailures: []results.PolicyFailure{{Status: "void", Count: 2}},
+	}))
+
+	assert.JSONEq(t, `{
+		"type": "summary",
+		"summary": {
+			"cases": null,
+			"passed": 0,
+			"failed": 0,
+			"skipped": 0,
+			"todo": 0,
+			"void": 2,
+			"errored": 0,
+			"canceled": 0,
+			"policy_failures": [{"status": "void", "count": 2}]
+		}
+	}`, output.String())
+}

@@ -4,8 +4,12 @@ extends SceneTree
 const Protocol: GDScript = preload("res://addons/gdtest/protocol.gd")
 ## Internal runtime version declaration.
 const Version: GDScript = preload("res://addons/gdtest/version.gd")
+## Internal asynchronous case task.
+const CaseTask: GDScript = preload("res://addons/gdtest/worker_case_task.gd")
 ## Hard upper bound for one JSONL protocol message.
 const MAX_MESSAGE_BYTES: int = 16777216
+## Default external deadline for one case including its hooks.
+const DEFAULT_CASE_TIMEOUT_USEC: int = 30000000
 var _peer: StreamPeerTCP
 var _incoming: String = ""
 var _host: String = "127.0.0.1"
@@ -23,6 +27,8 @@ var _running: bool = false
 var _cancel_requested: bool = false
 var _shutdown_requested: bool = false
 var _serialization_usec: int = 0
+var _case_timeout_usec: int = DEFAULT_CASE_TIMEOUT_USEC
+var _abort_run_requested: bool = false
 
 
 func _initialize() -> void:
@@ -195,6 +201,7 @@ func _dispatch(message: Dictionary[String, Variant]) -> void:
 func _run_command(command: Dictionary[String, Variant]) -> void:
 	_running = true
 	_cancel_requested = false
+	_abort_run_requested = false
 	_sequence = 0
 	var payload: Dictionary[String, Variant] = _dict(command.get("payload", {}))
 	_run_id = str(payload.get("run_id", ""))
@@ -232,6 +239,11 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		_finish_run_state()
 		return
 	var plan: Dictionary[String, Variant] = _dict(plan_value)
+	var case_timeout_ns: int = int(plan.get("case_timeout_ns", 0))
+	if case_timeout_ns <= 0:
+		_case_timeout_usec = DEFAULT_CASE_TIMEOUT_USEC
+	else:
+		_case_timeout_usec = maxi(1, case_timeout_ns / 1000)
 	var files_value: Variant = plan.get("files", [])
 	if not files_value is Array:
 		_send_worker_error("protocol.invalid_plan", "plan.files must be an array")
@@ -271,6 +283,8 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		var file_totals: Dictionary[String, int] = await _run_prepared_file(prepared, focus_only)
 		for status: String in totals:
 			totals[status] += file_totals.get(status, 0)
+		if _abort_run_requested:
+			break
 	if _cancel_requested:
 		totals["canceled"] += 1
 	var execution_usec: int = Time.get_ticks_usec() - execution_started_usec
@@ -489,7 +503,7 @@ func _run_prepared_file(
 		await _call_optional(instance, &"before_suite", [root_info])
 	var open_suites: Array[GDTestSuiteInfo] = []
 	for case_value: Variant in cases:
-		if _cancel_requested:
+		if _cancel_requested or _abort_run_requested:
 			break
 		var case_plan: Dictionary[String, Variant] = _dict(case_value)
 		var desired_suites: Array[GDTestSuiteInfo] = _suite_infos(case_plan.get("suite_infos", []))
@@ -527,7 +541,7 @@ func _planned_cases(
 		if dynamic_case is Dictionary:
 			planned.append(_dict(dynamic_case))
 	var provided: Variant = file_plan.get("cases", [])
-	if provided is Array and not provided.is_empty():
+	if provided is Array:
 		for value: Variant in provided:
 			if value is Dictionary:
 				_expand_method_case(planned, _dict(value), instance, discovery_errors)
@@ -612,7 +626,7 @@ func _expand_method_case(
 					method,
 					named_rows[parameter_name],
 					parameter_name,
-					_encode_component(parameter_name),
+					Protocol.encode_component(parameter_name),
 					discovery_errors
 			)
 		return
@@ -758,23 +772,6 @@ func _utf8_less(left: String, right: String) -> bool:
 	return left_bytes.size() < right_bytes.size()
 
 
-func _encode_component(value: Variant) -> String:
-	var bytes: PackedByteArray = str(value).to_utf8_buffer()
-	var result: String = ""
-	for byte: int in bytes:
-		var character: String = String.chr(byte)
-		if (
-				byte >= 65 and byte <= 90
-				or byte >= 97 and byte <= 122
-				or byte >= 48 and byte <= 57
-				or character in ["-", ".", "_", "~"]
-		):
-			result += character
-		else:
-			result += "%%%02X" % byte
-	return result
-
-
 func _suite_infos(value: Variant) -> Array[GDTestSuiteInfo]:
 	var result: Array[GDTestSuiteInfo] = []
 	if not value is Array:
@@ -815,41 +812,52 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	_active_case_id = case_id
 	_send_event(
 			"case_started",
-			{ "test_id": case_id, "name": case_name, "file": path, "line": info.line }
+			{
+				"test_id": case_id,
+				"name": case_name,
+				"location": { "file": path, "line": info.line },
+			}
 	)
 	instance._gdtest_begin_case()
 	var started_usec: int = Time.get_ticks_usec()
-	if instance.has_method("before_case"):
-		await _call(instance, &"before_case", [info])
-	else:
-		await _call_optional(instance, &"before_each", [info])
-	if not _cancel_requested:
-		var callback: Variant = case_plan.get("callback")
-		if callback is Callable:
-			await _call_callable(callback, parameters)
-		elif not method_name.is_empty() and instance.has_method(method_name):
-			await _call(instance, method_name, parameters)
-		else:
-			instance._gdtest_record_error("case callback is unavailable")
-	if instance.has_method("after_case"):
-		await _call(instance, &"after_case", [info])
-	else:
-		await _call_optional(instance, &"after_each", [info])
+	var task: RefCounted = CaseTask.new()
+	task.start(instance, info, case_plan, method_name, parameters)
+	var deadline_usec: int = started_usec + _case_timeout_usec
+	while not task.finished and not _cancel_requested and Time.get_ticks_usec() < deadline_usec:
+		_poll_messages()
+		await process_frame
+	var timed_out: bool = not task.finished and not _cancel_requested
+	if timed_out:
+		instance._gdtest_record_error_at(
+				"case timed out after %.3f seconds" % (float(_case_timeout_usec) / 1000000.0),
+				path,
+				info.line
+		)
+	if not task.finished:
+		task.finish_capture()
+		_abort_run_requested = true
+		_shutdown_requested = true
+		_send_event(
+				"worker_tainted",
+				{
+					"test_id": case_id,
+					"message": "case timeout" if timed_out else "case cancellation",
+					"metadata": { "reason": "case_timeout" if timed_out else "canceled" },
+				}
+		)
 	var result: Dictionary[String, Variant] = instance._gdtest_end_case()
 	var status: String = "canceled" if _cancel_requested else str(result.get("status", "error"))
 	_send_event(
 			"case_finished",
-			{
-				"test_id": case_id,
-				"name": case_name,
-				"file": path,
-				"line": info.line,
-				"status": status,
-				"assertions": int(result.get("assertions", 0)),
-				"messages": result.get("messages", []),
-				"outcomes": Protocol.wire_outcomes(result.get("outcomes", [])),
-				"duration_ns": (Time.get_ticks_usec() - started_usec) * 1000,
-			}
+			Protocol.case_finished(
+					case_id,
+					case_name,
+					path,
+					info.line,
+					status,
+					result,
+					Time.get_ticks_usec() - started_usec
+			)
 	)
 	_active_case_id = ""
 	return status
@@ -862,10 +870,6 @@ func _call_optional(instance: Object, method: StringName, arguments: Array[Varia
 
 func _call(instance: Object, method: StringName, arguments: Array[Variant]) -> void:
 	await instance.callv(method, arguments)
-
-
-func _call_callable(callback: Callable, arguments: Array[Variant]) -> void:
-	await callback.callv(arguments)
 
 
 func _on_assertion_failed(diagnostic: Dictionary[String, Variant]) -> void:

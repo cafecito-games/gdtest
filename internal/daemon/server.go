@@ -244,6 +244,9 @@ func (s *Server) cleanup() {
 
 func (s *Server) log(fields map[string]any) {
 	if s.Logger != nil {
+		if _, exists := fields["build_id"]; !exists {
+			fields["build_id"] = s.Namespace.BuildID
+		}
 		_ = s.Logger.Write(fields)
 	}
 }

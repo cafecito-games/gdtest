@@ -39,6 +39,7 @@ var _gdtest_suite_stack: Array[GDTestSuiteInfo] = []
 var _gdtest_definition_roots: Array[Variant] = []
 var _gdtest_active_definition: Dictionary[String, Variant] = {}
 var _gdtest_suite_ordinals: Dictionary[String, int] = {}
+var _gdtest_case_ordinals: Dictionary[int, int] = {}
 var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
 
@@ -57,7 +58,7 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 			_gdtest_suite_stack.back().id if not _gdtest_suite_stack.is_empty()
 			else ""
 	)
-	var sibling_key: String = parent_id + "\u0000" + name
+	var sibling_key: String = str(parent_id.length()) + ":" + parent_id + name
 	var sibling_ordinal: int = _gdtest_suite_ordinals.get(sibling_key, 0)
 	_gdtest_suite_ordinals[sibling_key] = sibling_ordinal + 1
 	var suite_id: String = parent_id + (
@@ -464,6 +465,7 @@ func _gdtest_begin_registration() -> void:
 	_gdtest_definition_roots.clear()
 	_gdtest_active_definition.clear()
 	_gdtest_suite_ordinals.clear()
+	_gdtest_case_ordinals.clear()
 	_gdtest_discovery_errors.clear()
 
 
@@ -521,11 +523,20 @@ func _gdtest_end_case() -> Dictionary[String, Variant]:
 
 
 func _gdtest_record_error(text: String) -> void:
+	var location: Dictionary[String, Variant] = _user_location()
+	_gdtest_record_error_at(
+			text,
+			str(location.get("file", _gdtest_file)),
+			int(location.get("line", -1))
+	)
+
+
+func _gdtest_record_error_at(text: String, file: String, line: int) -> void:
 	_promote_status("error")
 	var diagnostic: Dictionary[String, Variant] = {
 		"assertion": "framework",
 		"message": text,
-		"location": _user_location(),
+		"location": { "file": file, "line": line },
 	}
 	_gdtest_failures.append(diagnostic)
 	_emit_failure(diagnostic)
@@ -576,11 +587,8 @@ func _register_dynamic_case(
 		suite_path.append(suite.name)
 		inherited_only = inherited_only or suite.is_only
 	var line: int = int(location.get("line", -1))
-	var ordinal: int = 0
-	for existing_value: Variant in _gdtest_dynamic_cases:
-		var existing: Dictionary[String, Variant] = _string_dictionary(existing_value)
-		if int(existing["line"]) == line:
-			ordinal += 1
+	var ordinal: int = _gdtest_case_ordinals.get(line, 0)
+	_gdtest_case_ordinals[line] = ordinal + 1
 	var full_name: Array[String] = suite_path.duplicate()
 	full_name.append(description)
 	var encoded_name: String = "/".join(full_name.map(_encode_component))

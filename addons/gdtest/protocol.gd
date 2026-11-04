@@ -275,6 +275,38 @@ static func run_finished(
 	}
 
 
+## Serializes one terminal case event and retains framework-error diagnostics.
+static func case_finished(
+		case_id: String,
+		case_name: String,
+		path: String,
+		line: int,
+		status: String,
+		result: Dictionary[String, Variant],
+		duration_usec: int
+) -> Dictionary[String, Variant]:
+	var payload: Dictionary[String, Variant] = {
+		"test_id": case_id,
+		"name": case_name,
+		"location": { "file": path.trim_prefix("res://"), "line": line },
+		"status": status,
+		"assertions": int(result.get("assertions", 0)),
+		"messages": result.get("messages", []),
+		"outcomes": wire_outcomes(result.get("outcomes", [])),
+		"duration_ns": duration_usec * 1000,
+	}
+	var failures: Variant = result.get("failures", [])
+	if status == "error" and failures is Array and not failures.is_empty():
+		var diagnostic: Dictionary[String, Variant] = string_dictionary(failures[0])
+		payload["message"] = str(diagnostic.get("message", "case error"))
+		var location: Dictionary[String, Variant] = string_dictionary(
+				diagnostic.get("location", {})
+		)
+		location["file"] = str(location.get("file", path)).trim_prefix("res://")
+		payload["location"] = location
+	return payload
+
+
 ## Folds case totals into the terminal run status.
 static func aggregate_status(totals: Dictionary[String, int]) -> String:
 	if totals.get("error", 0) > 0:
@@ -284,6 +316,24 @@ static func aggregate_status(totals: Dictionary[String, int]) -> String:
 	if totals.get("canceled", 0) > 0:
 		return "canceled"
 	return "pass"
+
+
+## Percent-encodes one stable identifier component using RFC 3986 unreserved bytes.
+static func encode_component(value: Variant) -> String:
+	var bytes: PackedByteArray = str(value).to_utf8_buffer()
+	var result: String = ""
+	for byte: int in bytes:
+		var character: String = String.chr(byte)
+		if (
+				byte >= 65 and byte <= 90
+				or byte >= 97 and byte <= 122
+				or byte >= 48 and byte <= 57
+				or character in ["-", ".", "_", "~"]
+		):
+			result += character
+		else:
+			result += "%%%02X" % byte
+	return result
 
 
 static func _discovery_case(

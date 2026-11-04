@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cafecito-games/gdtest/internal/model"
+	"github.com/cafecito-games/gdtest/internal/results"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,6 +76,9 @@ func TestRunHelpDocumentsIsolationPolicies(t *testing.T) {
 	assert.Contains(t, stdout.String(), "reuse, recycle, fresh, or exclusive")
 	assert.Contains(t, stdout.String(), "--jobs")
 	assert.Contains(t, stdout.String(), "0 uses automatic concurrency")
+	assert.Contains(t, stdout.String(), "--fail-on-skip")
+	assert.Contains(t, stdout.String(), "--fail-on-todo")
+	assert.Contains(t, stdout.String(), "--fail-on-void")
 }
 
 func TestListHelpDocumentsForegroundDiscovery(t *testing.T) {
@@ -114,6 +119,40 @@ func TestRunRejectsUnknownIsolationBeforeProjectAccess(t *testing.T) {
 	require.Equal(t, ExitError, exitCode)
 	assert.Empty(t, stdout.String())
 	assert.Contains(t, stderr.String(), `isolation "shared" must be reuse, recycle, fresh, or exclusive`)
+}
+
+func TestSummaryExitCodeDistinguishesStrictPolicyFromInfrastructure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		summary results.Summary
+		want    int
+	}{
+		{name: "clean", summary: results.Summary{Passed: 1}, want: ExitOK},
+		{
+			name: "strict outcome",
+			summary: results.Summary{
+				Skipped:        1,
+				PolicyFailures: []results.PolicyFailure{{Status: "skip", Count: 1}},
+			},
+			want: ExitFailures,
+		},
+		{
+			name: "infrastructure takes precedence",
+			summary: results.Summary{
+				PolicyFailures: []results.PolicyFailure{{Status: "void", Count: 1}},
+				Infrastructure: []model.Event{{Type: model.EventWorkerError}},
+			},
+			want: ExitError,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, test.want, summaryExitCode(test.summary))
+		})
+	}
 }
 
 func TestDaemonHelpDescribesNestedCommands(t *testing.T) {

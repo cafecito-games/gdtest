@@ -74,3 +74,33 @@ func TestCollectorCountsRunErrorWithoutDiagnostic(t *testing.T) {
 	assert.Equal(t, 1, summary.Errored)
 	assert.False(t, summary.HasInfrastructureFailure())
 }
+
+func TestOutcomePolicyFailsOnlyEnabledObservedStatuses(t *testing.T) {
+	t.Parallel()
+
+	summary := Summary{Skipped: 2, Todo: 1, Void: 3}
+	assert.False(t, summary.HasFailures())
+
+	summary.ApplyOutcomePolicy(OutcomePolicy{FailOnSkip: true, FailOnVoid: true})
+	assert.True(t, summary.HasFailures())
+	assert.Equal(t, []PolicyFailure{
+		{Status: "skip", Count: 2},
+		{Status: "void", Count: 3},
+	}, summary.PolicyFailures)
+	assert.Equal(t, 2, summary.Skipped, "strict policy must preserve case outcome counts")
+	assert.Equal(t, 1, summary.Todo)
+	assert.Equal(t, 3, summary.Void)
+
+	summary.ApplyOutcomePolicy(OutcomePolicy{FailOnTodo: true})
+	assert.Equal(t, []PolicyFailure{{Status: "todo", Count: 1}}, summary.PolicyFailures)
+}
+
+func TestOutcomePolicyIgnoresEnabledStatusesWithZeroCases(t *testing.T) {
+	t.Parallel()
+
+	summary := Summary{}
+	summary.ApplyOutcomePolicy(OutcomePolicy{FailOnSkip: true, FailOnTodo: true, FailOnVoid: true})
+
+	assert.Empty(t, summary.PolicyFailures)
+	assert.False(t, summary.HasFailures())
+}
