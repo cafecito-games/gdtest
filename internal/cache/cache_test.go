@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const cacheProcessHelperEnvironment = "GO_WANT_GDTEST_CACHE_HELPER"
 
 func TestKeyIncludesEverySemanticInput(t *testing.T) {
 	t.Parallel()
@@ -165,4 +168,46 @@ func TestDeleteRemovesApplicationRejectedEntry(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	require.ErrorIs(t, store.Delete(canceled, key), context.Canceled)
+}
+
+func TestStorePublishesAtomicallyAcrossProcesses(t *testing.T) {
+	root := t.TempDir()
+	key := Key("tool", "parser", []byte("config"), []byte("content"))
+	commands := make([]*exec.Cmd, 12)
+	for index := range commands {
+		command := exec.Command(os.Args[0], "-test.run", "^TestCacheProcessHelper$")
+		command.Env = append(os.Environ(),
+			cacheProcessHelperEnvironment+"=1",
+			"GDTEST_CACHE_HELPER_ROOT="+root,
+			"GDTEST_CACHE_HELPER_KEY="+key,
+		)
+		require.NoError(t, command.Start())
+		commands[index] = command
+	}
+	for _, command := range commands {
+		require.NoError(t, command.Wait())
+	}
+
+	store, err := Open(root, 1024)
+	require.NoError(t, err)
+	data, hit, err := store.Get(context.Background(), key)
+	require.NoError(t, err)
+	assert.True(t, hit)
+	assert.Equal(t, []byte("shared-payload"), data)
+	matches, err := filepath.Glob(filepath.Join(root, key[:2], ".publish-*"))
+	require.NoError(t, err)
+	assert.Empty(t, matches)
+}
+
+func TestCacheProcessHelper(t *testing.T) {
+	if os.Getenv(cacheProcessHelperEnvironment) != "1" {
+		t.Skip("cache subprocess helper")
+	}
+	store, err := Open(os.Getenv("GDTEST_CACHE_HELPER_ROOT"), 1024)
+	require.NoError(t, err)
+	require.NoError(t, store.Put(
+		context.Background(),
+		os.Getenv("GDTEST_CACHE_HELPER_KEY"),
+		[]byte("shared-payload"),
+	))
 }

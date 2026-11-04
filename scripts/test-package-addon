@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Exercise the complete gpm producer/consumer contract against scratch projects.
+#
+# Usage: scripts/test-package-addon VERSION
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+version="${1:-}"
+if [ -z "$version" ] || [ $# -ne 1 ]; then
+    echo "usage: scripts/test-package-addon VERSION" >&2
+    exit 2
+fi
+for tool in gpm python3 unzip git; do
+    command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
+done
+
+work=$(mktemp -d)
+server_pid=""
+cleanup() {
+    if [ -n "$server_pid" ]; then
+        kill "$server_pid" >/dev/null 2>&1 || true
+        wait "$server_pid" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$work"
+}
+trap cleanup EXIT
+
+dist="$work/dist"
+"$repo_root/scripts/package-addon" "$version" --out "$dist" >/dev/null
+
+# Serve the index and sibling component archives over HTTP, matching how an
+# archive or GitHub release source resolves sliced package assets.
+port_file="$work/http-port"
+python3 - "$dist" "$port_file" >"$work/http.log" 2>&1 <<'PY' &
+import functools
+import http.server
+import pathlib
+import sys
+
+directory, port_file = sys.argv[1:]
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=directory)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+pathlib.Path(port_file).write_text(str(server.server_port), encoding="utf-8")
+server.serve_forever()
+PY
+server_pid=$!
+for _ in $(seq 1 100); do
+    [ -s "$port_file" ] && break
+    sleep 0.05
+done
+[ -s "$port_file" ] || fail "local package server did not start"
+port=$(cat "$port_file")
+base="http://127.0.0.1:${port}"
+
+new_project() {
+    local root="$1"
+    mkdir -p "$root"
+    cat > "$root/project.godot" <<'EOF'
+config_version=5
+
+[application]
+config/name="gdtest packaged install"
+EOF
+    cat > "$root/addons.toml" <<EOF
+[project]
+platforms = ["ios.arm64", "web.wasm32"]
+
+[addons]
+[addons.gdtest]
+source = "archive"
+url = "${base}/gdtest-${version}-core.zip"
+index = "${base}/gpm-index.toml"
+version = "${version}"
+platforms = []
+EOF
+    cat > "$root/.gitignore" <<'EOF'
+.godot/
+.gpm-state.toml
+EOF
+}
+
+host_project="$work/host-project"
+new_project "$host_project"
+gpm install --host-only --dir "$host_project" >/dev/null
+[ -f "$host_project/addons.lock" ] || fail "host-only install wrote no lockfile"
+[ -f "$host_project/addons/gdtest/version.gd" ] || fail "host-only install omitted core"
+
+case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) host_binary="bin/macos-arm64/gdtest" ;;
+    Darwin:x86_64) host_binary="bin/macos-x86_64/gdtest" ;;
+    Linux:aarch64 | Linux:arm64) host_binary="bin/linux-arm64/gdtest" ;;
+    Linux:x86_64 | Linux:amd64) host_binary="bin/linux-x86_64/gdtest" ;;
+    *) fail "unsupported packaging-test host $(uname -s)/$(uname -m)" ;;
+esac
+
+# The addon-level empty platform override must win over this project's iOS/web
+# export targets while gpm still adds the implicit current-host slice.
+default_project="$work/default-project"
+new_project "$default_project"
+gpm install --dir "$default_project" >/dev/null
+[ -f "$default_project/addons/gdtest/$host_binary" ] \
+    || fail "default install with platforms = [] omitted $host_binary"
+default_bin_count=$(find "$default_project/addons/gdtest/bin" -type f | wc -l | tr -d ' ')
+[ "$default_bin_count" -eq 1 ] \
+    || fail "platforms = [] installed $default_bin_count binaries instead of only the host binary"
+
+[ -x "$host_project/addons/gdtest/$host_binary" ] || fail "host-only install omitted executable $host_binary"
+host_bin_count=$(find "$host_project/addons/gdtest/bin" -type f | wc -l | tr -d ' ')
+[ "$host_bin_count" -eq 1 ] || fail "host-only install materialized $host_bin_count host binaries, expected 1"
+grep -qF "const PRODUCT_VERSION: String = \"${version}\"" "$host_project/addons/gdtest/version.gd" \
+    || fail "installed runtime does not carry version $version"
+binary_version=$("$host_project/addons/gdtest/$host_binary" version)
+grep -qF "$version" <<< "$binary_version" || fail "installed executable does not carry version $version"
+
+# The project-local launcher must be sufficient to authenticate a same-version
+# runtime worker; no globally installed gdtest executable participates.
+if command -v godot >/dev/null 2>&1; then
+    mkdir -p "$host_project/tests"
+    cat > "$host_project/tests/package.test.gd" <<'EOF'
+extends GDTest
+
+
+## Verifies the gpm-installed runtime and host executable handshake.
+func test_packaged_handshake() -> void:
+	expect_true(true)
+EOF
+    godot --headless --editor --path "$host_project" --quit >/dev/null
+    package_output=$("$host_project/addons/gdtest/gdtest" run --no-daemon \
+        --project "$host_project" tests/package.test.gd 2>&1) \
+        || fail "gpm-installed executable/runtime handshake failed:$'\n'$package_output"
+    grep -qF "1 passed" <<< "$package_output" || fail "packaged handshake did not execute the passing test"
+
+	cat > "$host_project/tests/package_failure.test.gd" <<'EOF'
+extends GDTest
+
+
+## Verifies failure exit status and source diagnostics from the packaged tool.
+func test_packaged_failure() -> void:
+	expect_equal(1, 2, "packaged failure diagnostic")
+EOF
+	set +e
+	failure_output=$("$host_project/addons/gdtest/gdtest" run --no-daemon \
+		--project "$host_project" tests/package_failure.test.gd 2>&1)
+	failure_status=$?
+	set -e
+	[ "$failure_status" -eq 1 ] || fail "packaged failing test exited $failure_status instead of 1"
+	grep -qF "packaged failure diagnostic" <<< "$failure_output" \
+		|| fail "packaged failing test omitted its diagnostic"
+	grep -qF "package_failure.test.gd:6" <<< "$failure_output" \
+		|| fail "packaged failing test omitted its source location"
+else
+    echo "SKIP: godot is not on PATH; packaged runtime handshake was not executed" >&2
+fi
+
+git -C "$host_project" init -q -b main
+git -C "$host_project" add .
+git -C "$host_project" -c user.name=gdtest -c user.email=gdtest@example.invalid commit -qm installed
+lock_before=$(git -C "$host_project" hash-object addons.lock)
+gpm install --host-only --dir "$host_project" >/dev/null
+lock_after=$(git -C "$host_project" hash-object addons.lock)
+[ "$lock_before" = "$lock_after" ] || fail "repeat host-only install changed addons.lock"
+[ -z "$(git -C "$host_project" status --porcelain)" ] || fail "repeat host-only install dirtied the scratch project"
+
+all_project="$work/all-project"
+new_project "$all_project"
+gpm install --all-platforms --dir "$all_project" >/dev/null
+for path in \
+    bin/macos-arm64/gdtest \
+    bin/macos-x86_64/gdtest \
+    bin/linux-arm64/gdtest \
+    bin/linux-x86_64/gdtest \
+    bin/windows-arm64/gdtest.exe \
+    bin/windows-x86_64/gdtest.exe
+do
+    [ -f "$all_project/addons/gdtest/$path" ] || fail "all-platform install omitted $path"
+done
+cmp -s "$host_project/addons.lock" "$all_project/addons.lock" \
+    || fail "lockfile differs between host-only and all-platform installs"
+cmp -s "$host_project/addons.lock" "$default_project/addons.lock" \
+    || fail "lockfile differs between default platforms=[] and host-only installs"
+
+echo "gpm host-only/all-platform packaging tests passed for gdtest ${version}"

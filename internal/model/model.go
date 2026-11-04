@@ -108,11 +108,12 @@ type Location struct {
 
 // WireValue preserves diagnostic values without binding Go to Godot Variant.
 type WireValue struct {
-	Type    string               `json:"type"`
-	Value   any                  `json:"value,omitempty"`
-	Display string               `json:"display,omitempty"`
-	Items   []WireValue          `json:"items,omitempty"`
-	Entries []WireDictionaryItem `json:"entries,omitempty"`
+	Type      string               `json:"type"`
+	Value     any                  `json:"value,omitempty"`
+	Display   string               `json:"display,omitempty"`
+	Items     []WireValue          `json:"items,omitempty"`
+	Entries   []WireDictionaryItem `json:"entries,omitempty"`
+	Truncated bool                 `json:"truncated,omitempty"`
 }
 
 // WireDictionaryItem represents one dictionary entry without stringifying keys.

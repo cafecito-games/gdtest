@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -89,6 +90,79 @@ func TestPersistentProcessCrashNamesLastCase(t *testing.T) {
 	var crash *WorkerCrashError
 	require.ErrorAs(t, err, &crash)
 	assert.Equal(t, "case-crash", crash.LastCase)
+}
+
+func TestStartBootstrapsOnceThenRetriesBeforeReturningWorker(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workerAttempts := 0
+	bootstrapAttempts := 0
+	process, err := Start(context.Background(), ProcessOptions{
+		Project: root, SessionID: "bootstrap-retry", Generation: 1,
+		StartupTimeout: 2 * time.Second,
+		commandFactory: func(arguments []string) *exec.Cmd {
+			if containsArgument(arguments, "--editor") {
+				bootstrapAttempts++
+				return startupTestCommand("bootstrap-success", arguments)
+			}
+			workerAttempts++
+			if workerAttempts == 1 {
+				return startupTestCommand("startup-failure", arguments)
+			}
+			return startupTestCommand("worker-success", arguments)
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, workerAttempts)
+	assert.Equal(t, 1, bootstrapAttempts)
+	require.NoError(t, process.Ping(context.Background()))
+	shutdownProcess(t, process)
+}
+
+func TestStartFailureRetainsOnlyBoundedOutputTail(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workerAttempts := 0
+	process, err := Start(context.Background(), ProcessOptions{
+		Project: root, SessionID: "startup-output", Generation: 1,
+		StartupTimeout: 2 * time.Second,
+		commandFactory: func(arguments []string) *exec.Cmd {
+			if containsArgument(arguments, "--editor") {
+				return startupTestCommand("bootstrap-success", arguments)
+			}
+			workerAttempts++
+			return startupTestCommand("startup-failure", arguments)
+		},
+	})
+	require.Error(t, err)
+	assert.Nil(t, process)
+	assert.Equal(t, 2, workerAttempts)
+	assert.Contains(t, err.Error(), "Godot stderr tail")
+	assert.Contains(t, err.Error(), "ACTIONABLE-STARTUP-MARKER")
+	assert.NotContains(t, err.Error(), "DISCARDED-PREFIX")
+	assert.Less(t, len(err.Error()), startupOutputLimit+2048)
+}
+
+func TestStartCancellationStopsBootstrapAndDoesNotRetryWorker(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workerAttempts := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	process, err := Start(ctx, ProcessOptions{
+		Project: root, SessionID: "bootstrap-cancel", Generation: 1,
+		StartupTimeout: 2 * time.Second,
+		commandFactory: func(arguments []string) *exec.Cmd {
+			if containsArgument(arguments, "--editor") {
+				return startupTestCommand("bootstrap-block", arguments)
+			}
+			workerAttempts++
+			return startupTestCommand("startup-failure", arguments)
+		},
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Nil(t, process)
+	assert.Equal(t, 1, workerAttempts)
 }
 
 func startHelperProcess(t *testing.T, generation uint64) *Process {
@@ -224,6 +298,46 @@ func TestGDTestWorkerHelper(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestGDTestStartupHelper is a subprocess fixture for startup/bootstrap tests.
+func TestGDTestStartupHelper(t *testing.T) {
+	mode := os.Getenv("GO_WANT_GDTEST_STARTUP_HELPER")
+	if mode == "" {
+		return
+	}
+	switch mode {
+	case "startup-failure":
+		_, _ = fmt.Fprint(os.Stderr, "DISCARDED-PREFIX", strings.Repeat("x", startupOutputLimit+1024), "ACTIONABLE-STARTUP-MARKER\n")
+		os.Exit(24)
+	case "bootstrap-success":
+		os.Exit(0)
+	case "bootstrap-block":
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	default:
+		os.Exit(25)
+	}
+}
+
+func startupTestCommand(mode string, arguments []string) *exec.Cmd {
+	if mode == "worker-success" {
+		command := exec.Command(os.Args[0], append([]string{"-test.run=TestGDTestWorkerHelper", "--"}, arguments...)...)
+		command.Env = append(os.Environ(), "GO_WANT_GDTEST_WORKER_HELPER=1")
+		return command
+	}
+	command := exec.Command(os.Args[0], append([]string{"-test.run=TestGDTestStartupHelper", "--"}, arguments...)...)
+	command.Env = append(os.Environ(), "GO_WANT_GDTEST_STARTUP_HELPER="+mode)
+	return command
+}
+
+func containsArgument(arguments []string, expected string) bool {
+	for _, argument := range arguments {
+		if argument == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func helperArguments(arguments []string) map[string]string {

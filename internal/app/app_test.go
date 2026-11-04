@@ -243,6 +243,18 @@ func TestRunAffectedEmptySelectionUsesStableSuccessfulMessage(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
+func TestWriteTimingsIsDeterministicForTerminalAndMachineOutput(t *testing.T) {
+	t.Parallel()
+	timings := map[string]time.Duration{"worker": 2 * time.Millisecond, "client": time.Millisecond}
+	var terminal bytes.Buffer
+	require.NoError(t, writeTimings(IO{Err: &terminal}, timings, false))
+	assert.Equal(t, "gdtest: timing client=1ms\ngdtest: timing worker=2ms\n", terminal.String())
+
+	var machine bytes.Buffer
+	require.NoError(t, writeTimings(IO{Out: &machine}, timings, true))
+	assert.JSONEq(t, `{"type":"timings","timings_ns":{"client":1000000,"worker":2000000}}`, machine.String())
+}
+
 func newTestProject(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

@@ -18,7 +18,7 @@
     {"from_layers": ["launcher"], "to_layers": ["api", "launcher"], "to_features": ["same"]}
   ],
   "runtime_boundaries": [],
-  "test_patterns": ["fixtures/**/*.gd"],
+  "test_patterns": ["fixtures/**/*.gd", "examples/**/*.gd"],
   "allowlist": ".gdkit/allowlist.json",
   "unclassified": "error"
 }

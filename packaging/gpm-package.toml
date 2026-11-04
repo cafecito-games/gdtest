@@ -1,0 +1,16 @@
+# Release packaging is deliberately staged by scripts/package-addon. Keeping
+# this manifest outside the repository root makes a bare `gpm package` fail
+# instead of accidentally publishing Go sources, fixtures, or build outputs.
+
+[package]
+name = "gdtest"
+addon_path = "addons/gdtest"
+version = "0.0.0"
+
+[package.slices]
+"macos.arm64" = ["bin/macos-arm64/gdtest"]
+"macos.x86_64" = ["bin/macos-x86_64/gdtest"]
+"linux.arm64" = ["bin/linux-arm64/gdtest"]
+"linux.x86_64" = ["bin/linux-x86_64/gdtest"]
+"windows.arm64" = ["bin/windows-arm64/gdtest.exe"]
+"windows.x86_64" = ["bin/windows-x86_64/gdtest.exe"]

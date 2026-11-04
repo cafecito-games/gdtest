@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "source_roots": ["addons/gdtest", "fixtures"],
+  "source_roots": ["addons/gdtest", "fixtures", "examples"],
   "exclude": [".git/**", ".godot/**", ".gdkit/**", "fixtures/**/invalid/**"],
   "godot_version": "4.7",
   "enable_new_rules": true,

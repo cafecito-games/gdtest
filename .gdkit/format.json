@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "source_roots": ["addons/gdtest", "fixtures"],
+  "source_roots": ["addons/gdtest", "fixtures", "examples"],
   "exclude": [".git/**", ".godot/**", ".gdkit/**", "fixtures/**/invalid/**"],
   "line_width": 100,
   "tab_width": 4,

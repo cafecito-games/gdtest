@@ -81,11 +81,17 @@ func TestSessionServiceReusesWorker(t *testing.T) {
 		payload, err := json.Marshal(request)
 		require.NoError(t, err)
 		events := 0
-		_, err = service.Handle(context.Background(), daemon.Request{
+		response, handleErr := service.Handle(context.Background(), daemon.Request{
 			ID: "request", Method: "session.run", Payload: payload,
 		}, func(any) error { events++; return nil })
-		require.NoError(t, err)
+		require.NoError(t, handleErr)
 		assert.Equal(t, 1, events)
+		result, ok := response.(map[string]any)
+		require.True(t, ok)
+		timings, ok := result["timings_ns"].(map[string]int64)
+		require.True(t, ok)
+		assert.Contains(t, timings, "queue_wait")
+		assert.Contains(t, timings, "worker_execution_serialization")
 	}
 	assert.Equal(t, 1, created)
 	assert.Equal(t, 2, process.runs)

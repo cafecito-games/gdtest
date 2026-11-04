@@ -153,8 +153,9 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if result.Update.Generation > 0 {
 			value.Plan.Generation = result.Update.Generation
 		}
+		submitted := time.Now()
 		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, func(runCtx context.Context) (any, error) {
-			return s.run(runCtx, value, emit)
+			return s.run(runCtx, value, emit, time.Since(submitted))
 		})
 	case "session.discover":
 		var value DiscoverRequest
@@ -259,18 +260,29 @@ func (s *SessionService) schedule(
 	return value, result.Err
 }
 
-func (s *SessionService) run(ctx context.Context, request RunRequest, emit daemon.EmitFunc) (any, error) {
+func (s *SessionService) run(
+	ctx context.Context,
+	request RunRequest,
+	emit daemon.EmitFunc,
+	queueWait time.Duration,
+) (any, error) {
+	started := time.Now()
+	timings := map[string]int64{"queue_wait": queueWait.Nanoseconds()}
 	entry := s.get(request.SessionID, request.Project, request.Godot)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
+	reconcileStarted := time.Now()
 	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Filesystem)
+	timings["generation_reconcile"] = time.Since(reconcileStarted).Nanoseconds()
 	if err != nil {
 		return nil, fmt.Errorf("reconcile source at run start: %w", err)
 	}
 	if latest.Update.Generation > 0 {
 		request.Plan.Generation = latest.Update.Generation
 	}
+	workerStarted := time.Now()
 	process, err := s.ensureWorker(ctx, entry, request.Plan.Generation)
+	timings["worker_acquisition_startup"] = time.Since(workerStarted).Nanoseconds()
 	if err != nil {
 		return nil, err
 	}
@@ -293,23 +305,28 @@ func (s *SessionService) run(ctx context.Context, request RunRequest, emit daemo
 		}
 		return emit(event)
 	})
+	executionStarted := time.Now()
 	if err := process.Run(ctx, request.Plan, sink); err != nil {
 		s.discardWorker(entry)
 		return nil, err
 	}
+	timings["worker_execution_serialization"] = time.Since(executionStarted).Nanoseconds()
 	entry.runs++
 	entry.lastUsed = time.Now().UTC()
 	entry.lifecycle.Touch(entry.lastUsed)
+	resetStarted := time.Now()
 	if err := process.Reset(ctx); err != nil {
 		s.discardWorker(entry)
 		return nil, fmt.Errorf("reset worker after run: %w", err)
 	}
+	timings["worker_reset"] = time.Since(resetStarted).Nanoseconds()
+	timings["daemon_total"] = time.Since(started).Nanoseconds()
 	pid := process.PID()
 	reused := entry.runs > 1
 	if request.WorkerMaxRuns > 0 && entry.runs >= uint64(request.WorkerMaxRuns) {
 		s.discardWorker(entry)
 	}
-	return map[string]any{"worker_pid": pid, "reused": reused}, nil
+	return map[string]any{"worker_pid": pid, "reused": reused, "timings_ns": timings}, nil
 }
 
 func (s *SessionService) warm(ctx context.Context, request WarmRequest) (any, error) {

@@ -1,0 +1,10 @@
+{
+  "tests": ["**/*.test.gd"],
+  "exclude": [".godot/**"],
+  "godot": "godot",
+  "jobs": 0,
+  "warm_workers": 1,
+  "worker_idle_timeout": "2m",
+  "worker_max_runs": 100,
+  "only_mode": "auto"
+}

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+echo "gdtest benchmark environment"
+date -u '+utc=%Y-%m-%dT%H:%M:%SZ'
+uname -a
+go version
+go env GOOS GOARCH GOMAXPROCS
+if command -v godot >/dev/null 2>&1; then
+	godot --version
+else
+	echo "godot=unavailable"
+fi
+
+go test -run '^$' -bench . -benchmem -count 5 ./internal/performance

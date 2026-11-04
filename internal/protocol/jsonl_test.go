@@ -29,3 +29,20 @@ func TestDecoderRejectsOversizedLine(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds")
 }
+
+func TestDecoderRejectsExcessiveNestingButIgnoresDelimitersInStrings(t *testing.T) {
+	t.Parallel()
+
+	deep := strings.Repeat(`[`, DefaultMaxNesting+1) + strings.Repeat(`]`, DefaultMaxNesting+1) + "\n"
+	var value any
+	err := NewDecoder(strings.NewReader(deep), DefaultMaxMessageSize).Decode(&value)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nesting")
+
+	var envelope Envelope
+	require.NoError(t, NewDecoder(
+		strings.NewReader("{\"version\":1,\"type\":\"[{escaped}\\\"\"}\n"),
+		DefaultMaxMessageSize,
+	).Decode(&envelope))
+	assert.Equal(t, "[{escaped}\"", envelope.Type)
+}

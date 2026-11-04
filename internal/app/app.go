@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -412,6 +413,8 @@ func initialize(project string, streams IO) error {
 }
 
 func runTests(ctx context.Context, options runOptions, streams IO) int {
+	commandStarted := time.Now()
+	timings := make(map[string]time.Duration)
 	root, err := projectRoot(options.project)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
@@ -429,6 +432,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	staticStarted := time.Now()
 	staticManifest, err := index.Discover(ctx, root, discovery.Options{
 		Patterns: projectConfig.Tests,
 		Exclude:  projectConfig.Exclude,
@@ -437,6 +441,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	timings["static_discovery"] = time.Since(staticStarted)
 	discoveryManifest, err := discoveryCandidates(staticManifest, options.selectors, options.allowEmpty)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
@@ -468,6 +473,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	dynamicStarted := time.Now()
 	completedManifest, err := completeManifest(
 		ctx, root, projectConfig, discoveryManifest, sessionID, options.noDaemon, streams,
 	)
@@ -482,6 +488,8 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	timings["dynamic_discovery"] = time.Since(dynamicStarted)
+	selectionStarted := time.Now()
 	selected, err := selectCompletedManifest(
 		completedManifest, staticManifest, root, options.selectors, options.name,
 		options.allowEmpty, options.affectedSet, options.affected,
@@ -490,6 +498,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	timings["selection"] = time.Since(selectionStarted)
 	if len(selected.ids) == 0 {
 		message := selected.message
 		if message == "" {
@@ -527,20 +536,33 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		}
 		return eventReporter.Emit(event)
 	})
-	if err := executePlan(
+	executionTimings, err := executePlan(
 		ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
 		plan, sink, options.noDaemon, streams,
-	); err != nil {
+	)
+	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return ExitCanceled
 		}
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	for name, duration := range executionTimings {
+		timings[name] = duration
+	}
 	summary := collector.Summary()
+	reportingStarted := time.Now()
 	if err := finish(summary); err != nil {
 		writeDiagnostic(streams.Err, "gdtest: report:", err)
 		return ExitError
+	}
+	timings["reporting"] = time.Since(reportingStarted)
+	timings["client_total"] = time.Since(commandStarted)
+	if options.verbose || options.json {
+		if err := writeTimings(streams, timings, options.json); err != nil {
+			writeDiagnostic(streams.Err, "gdtest: timings:", err)
+			return ExitError
+		}
 	}
 	if summary.HasInfrastructureFailure() {
 		return ExitError
@@ -561,19 +583,28 @@ func executePlan(
 	sink executor.EventSink,
 	noDaemon bool,
 	streams IO,
-) error {
+) (map[string]time.Duration, error) {
+	started := time.Now()
 	if noDaemon {
-		godotExecutor := &worker.GodotExecutor{
+		process, err := worker.Start(ctx, worker.ProcessOptions{
 			Godot: godot, Project: root, SessionID: "foreground-" + newID(),
 			Generation: plan.Generation, Stdout: streams.Err, Stderr: streams.Err,
+		})
+		if err != nil {
+			return nil, err
 		}
-		return godotExecutor.Run(ctx, plan, sink)
+		runErr := process.Run(ctx, plan, sink)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutdownErr := process.Shutdown(shutdownCtx)
+		cancel()
+		return map[string]time.Duration{"foreground_worker_execution": time.Since(started)}, errors.Join(runErr, shutdownErr)
 	}
 	daemonClient, err := compatibleClient(true)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = daemonClient.Call(ctx, "session.run", service.RunRequest{
+	callStarted := time.Now()
+	response, err := daemonClient.Call(ctx, "session.run", service.RunRequest{
 		SessionID: sessionID, Project: root, Godot: godot,
 		Plan: plan, WorkerMaxRuns: workerMaxRuns,
 	}, func(data json.RawMessage) error {
@@ -583,7 +614,41 @@ func executePlan(
 		}
 		return sink.Emit(event)
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	timings := map[string]time.Duration{"client_daemon_round_trip": time.Since(callStarted)}
+	var result struct {
+		Timings map[string]int64 `json:"timings_ns"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil {
+		return nil, fmt.Errorf("decode daemon run response: %w", err)
+	}
+	for name, nanoseconds := range result.Timings {
+		timings[name] = time.Duration(nanoseconds)
+	}
+	return timings, nil
+}
+
+func writeTimings(streams IO, timings map[string]time.Duration, machine bool) error {
+	names := make([]string, 0, len(timings))
+	for name := range timings {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if machine {
+		values := make(map[string]int64, len(timings))
+		for _, name := range names {
+			values[name] = timings[name].Nanoseconds()
+		}
+		return json.NewEncoder(streams.Out).Encode(map[string]any{"type": "timings", "timings_ns": values})
+	}
+	for _, name := range names {
+		if _, err := fmt.Fprintf(streams.Err, "gdtest: timing %s=%s\n", name, timings[name]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func listTests(ctx context.Context, options listOptions, streams IO) error {
@@ -642,10 +707,11 @@ func doctor(ctx context.Context, project string, streams IO) error {
 	if err != nil {
 		return err
 	}
-	executable, err := exec.LookPath(projectConfig.Godot)
+	godot, err := godotIdentity(ctx, projectConfig.Godot)
 	if err != nil {
-		return fmt.Errorf("godot executable %q was not found: %w", projectConfig.Godot, err)
+		return err
 	}
+	godotPath, godotVersion, _ := strings.Cut(godot, "\x00")
 	manifest, err := index.Discover(ctx, root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
 	if err != nil {
 		return err
@@ -653,9 +719,6 @@ func doctor(ctx context.Context, project string, streams IO) error {
 	count := 0
 	for _, file := range manifest.Files {
 		count += len(file.Cases)
-	}
-	if _, err = fmt.Fprintf(streams.Out, "project: %s\ngodot: %s\ntests: %d\n", root, executable, count); err != nil {
-		return err
 	}
 	runtimePath := filepath.Join(root, "addons", "gdtest", "version.gd")
 	if _, err := os.Stat(runtimePath); err != nil {
@@ -669,13 +732,37 @@ func doctor(ctx context.Context, project string, streams IO) error {
 	if err != nil {
 		return err
 	}
+	configuration, err := json.Marshal(projectConfig)
+	if err != nil {
+		return fmt.Errorf("encode project configuration: %w", err)
+	}
 	response, err := daemonClient.Call(ctx, "session.warm", service.WarmRequest{
 		SessionID: sessionID, Project: root, Godot: projectConfig.Godot, Generation: 1,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("headless worker handshake: %w", err)
 	}
-	_, err = fmt.Fprintf(streams.Out, "runtime: %s\ndaemon_worker: %s\n", runtimePath, response)
+	completed, err := completeManifest(ctx, root, projectConfig, manifest, sessionID, false, streams)
+	if err != nil {
+		return fmt.Errorf("engine discovery: %w", err)
+	}
+	dynamicCount := 0
+	for _, file := range completed.Files {
+		dynamicCount += len(file.Cases)
+	}
+	status, err := daemonClient.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("daemon status: %w", err)
+	}
+	_, err = fmt.Fprintf(
+		streams.Out,
+		"project_root: %s\nconfiguration: %s\ngodot_executable: %s\ngodot_version: %s\n"+
+			"runtime_path: %s\nruntime_version: %s\nimport_cache_ready: true\n"+
+			"daemon_namespace: %s\ndaemon_status: %s\ndaemon_worker: %s\n"+
+			"tests_static: %d\ntests_completed: %d\n",
+		root, configuration, godotPath, godotVersion, runtimePath, version.Product,
+		daemonClient.Namespace.Root, status, response, count, dynamicCount,
+	)
 	return err
 }
 

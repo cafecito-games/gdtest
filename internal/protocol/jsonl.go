@@ -15,6 +15,9 @@ const Version = 1
 // DefaultMaxMessageSize bounds untrusted local messages to one mebibyte.
 const DefaultMaxMessageSize = 1 << 20
 
+// DefaultMaxNesting bounds recursive JSON containers before decoding.
+const DefaultMaxNesting = 64
+
 // Envelope is the common protocol framing.
 type Envelope struct {
 	Version   int             `json:"version"`
@@ -66,8 +69,44 @@ func (d *Decoder) Decode(value any) error {
 	if len(line) > d.maxSize {
 		return fmt.Errorf("protocol message exceeds %d bytes", d.maxSize)
 	}
+	if depth := jsonNesting(line); depth > DefaultMaxNesting {
+		return fmt.Errorf("protocol message nesting %d exceeds %d", depth, DefaultMaxNesting)
+	}
 	if decodeErr := json.Unmarshal(line, value); decodeErr != nil {
 		return fmt.Errorf("decode protocol message: %w", decodeErr)
 	}
 	return nil
+}
+
+func jsonNesting(data []byte) int {
+	depth := 0
+	maximum := 0
+	inString := false
+	escaped := false
+	for _, current := range data {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if current == '\\' {
+				escaped = true
+				continue
+			}
+			if current == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch current {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			maximum = max(maximum, depth)
+		case '}', ']':
+			depth--
+		}
+	}
+	return maximum
 }

@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Build and reproducibly package the pure runtime plus one gdtest executable per
+# supported host architecture.
+#
+# Usage: scripts/package-addon VERSION [--out DIR]
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+minimum_gpm="0.5.1"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+version="${1:-}"
+if [ -z "$version" ]; then
+    echo "usage: scripts/package-addon VERSION [--out DIR]" >&2
+    exit 2
+fi
+shift
+out_dir="$repo_root/dist"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out)
+            [ $# -ge 2 ] || { echo "usage: scripts/package-addon VERSION [--out DIR]" >&2; exit 2; }
+            out_dir="$2"
+            shift 2
+            ;;
+        *)
+            echo "usage: scripts/package-addon VERSION [--out DIR]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$version" in
+    *[!0-9A-Za-z.+-]*|"") fail "release version contains unsupported characters: $version" ;;
+esac
+command -v gpm >/dev/null 2>&1 || fail "gpm is not on PATH; install gpm ${minimum_gpm} or newer"
+command -v go >/dev/null 2>&1 || fail "Go is not on PATH"
+command -v unzip >/dev/null 2>&1 || fail "unzip is not on PATH"
+
+gpm_version=$(gpm --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+[ -n "$gpm_version" ] || fail "could not read a semantic version from 'gpm --version'"
+version_at_least() {
+    local actual="$1" required="$2"
+    local actual_major actual_minor actual_patch required_major required_minor required_patch
+    IFS=. read -r actual_major actual_minor actual_patch <<< "$actual"
+    IFS=. read -r required_major required_minor required_patch <<< "$required"
+    [ "$actual_major" -gt "$required_major" ] || {
+        [ "$actual_major" -eq "$required_major" ] &&
+        { [ "$actual_minor" -gt "$required_minor" ] ||
+          { [ "$actual_minor" -eq "$required_minor" ] && [ "$actual_patch" -ge "$required_patch" ]; }; }
+    }
+}
+version_at_least "$gpm_version" "$minimum_gpm" \
+    || fail "gpm ${gpm_version} is too old; ${minimum_gpm} or newer is required"
+
+mkdir -p "$out_dir"
+out_dir=$(cd "$out_dir" && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+stage="$work/stage"
+mkdir -p "$stage/addons"
+cp -R "$repo_root/addons/gdtest" "$stage/addons/gdtest"
+rm -rf "$stage/addons/gdtest/bin"
+mkdir -p "$stage/addons/gdtest/bin"
+cp "$repo_root/packaging/gpm-package.toml" "$stage/gpm-package.toml"
+
+# The runtime and host binary must advertise exactly the same product version.
+awk -v version="$version" '
+    /^const PRODUCT_VERSION: String = / {
+        print "const PRODUCT_VERSION: String = \"" version "\""
+        next
+    }
+    { print }
+' "$repo_root/addons/gdtest/version.gd" > "$stage/addons/gdtest/version.gd.tmp"
+mv "$stage/addons/gdtest/version.gd.tmp" "$stage/addons/gdtest/version.gd"
+grep -qF "const PRODUCT_VERSION: String = \"${version}\"" "$stage/addons/gdtest/version.gd" \
+    || fail "could not inject runtime version into staged version.gd"
+
+build_binary() {
+    local goos="$1" goarch="$2" relative="$3"
+    local target="$stage/addons/gdtest/$relative"
+    mkdir -p "$(dirname "$target")"
+    (
+        cd "$repo_root"
+        CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+            go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X github.com/cafecito-games/gdtest/internal/version.Product=${version}" \
+            -o "$target" ./cmd/gdtest
+    )
+}
+
+build_binary darwin arm64 bin/macos-arm64/gdtest
+build_binary darwin amd64 bin/macos-x86_64/gdtest
+build_binary linux arm64 bin/linux-arm64/gdtest
+build_binary linux amd64 bin/linux-x86_64/gdtest
+build_binary windows arm64 bin/windows-arm64/gdtest.exe
+build_binary windows amd64 bin/windows-x86_64/gdtest.exe
+
+first="$work/package-one"
+second="$work/package-two"
+mkdir -p "$first" "$second"
+gpm package --dir "$stage" --out "$first" --version "$version" >/dev/null
+gpm package --dir "$stage" --out "$second" --version "$version" >/dev/null
+
+expected_slices=(
+    core macos.arm64 macos.x86_64 linux.arm64 linux.x86_64 windows.arm64 windows.x86_64
+)
+for slice in "${expected_slices[@]}"; do
+    archive="gdtest-${version}-${slice}.zip"
+    [ -s "$first/$archive" ] || fail "gpm package did not produce $archive"
+    cmp -s "$first/$archive" "$second/$archive" || fail "$archive is not reproducible"
+done
+cmp -s "$first/gpm-index.toml" "$second/gpm-index.toml" \
+    || fail "gpm-index.toml is not reproducible"
+
+core_listing=$(unzip -Z1 "$first/gdtest-${version}-core.zip")
+if grep -qE '(^|/)bin/|(^|/)(cmd|internal|fixtures|packaging)/|\.go$|(^|/)go\.(mod|sum)$|(^|/)spec\.md$' <<< "$core_listing"; then
+    fail "core contains a host binary or build-time source"
+fi
+for required in gdtest gdtest.cmd gdtest.gd version.gd worker.gd; do
+    grep -qxF "$required" <<< "$core_listing" || fail "core is missing $required"
+done
+
+for slice in macos.arm64 macos.x86_64 linux.arm64 linux.x86_64 windows.arm64 windows.x86_64; do
+    archive="$first/gdtest-${version}-${slice}.zip"
+    listing=$(unzip -Z1 "$archive")
+    case "$slice" in
+        macos.arm64) expected="bin/macos-arm64/gdtest" ;;
+        macos.x86_64) expected="bin/macos-x86_64/gdtest" ;;
+        linux.arm64) expected="bin/linux-arm64/gdtest" ;;
+        linux.x86_64) expected="bin/linux-x86_64/gdtest" ;;
+        windows.arm64) expected="bin/windows-arm64/gdtest.exe" ;;
+        windows.x86_64) expected="bin/windows-x86_64/gdtest.exe" ;;
+    esac
+    [ "$listing" = "$expected" ] || fail "slice $slice must contain exactly $expected; found: $listing"
+done
+
+for artifact in "$first"/*; do
+    cp "$artifact" "$out_dir/$(basename "$artifact")"
+done
+echo "Packaged reproducible gdtest ${version} slices into ${out_dir}"

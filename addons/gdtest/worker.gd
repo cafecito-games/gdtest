@@ -6,7 +6,6 @@ const Protocol: GDScript = preload("res://addons/gdtest/protocol.gd")
 const Version: GDScript = preload("res://addons/gdtest/version.gd")
 ## Hard upper bound for one JSONL protocol message.
 const MAX_MESSAGE_BYTES: int = 1048576
-
 var _peer: StreamPeerTCP
 var _incoming: String = ""
 var _host: String = "127.0.0.1"
@@ -23,6 +22,7 @@ var _active_test: GDTest
 var _running: bool = false
 var _cancel_requested: bool = false
 var _shutdown_requested: bool = false
+var _serialization_usec: int = 0
 
 
 func _initialize() -> void:
@@ -216,6 +216,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		return
 	_send_event("run_started", { "generation": _generation })
 	var started_usec: int = Time.get_ticks_usec()
+	_serialization_usec = 0
 	var totals: Dictionary[String, int] = {
 		"pass": 0,
 		"fail": 0,
@@ -237,6 +238,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		_finish_run_state()
 		return
 	var prepared_files: Array[Dictionary] = []
+	var preparation_started_usec: int = Time.get_ticks_usec()
 	for file_value: Variant in files_value:
 		if _cancel_requested:
 			break
@@ -247,8 +249,10 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 				_string_dictionary(file_value)
 		)
 		prepared_files.append(prepared)
+	var preparation_usec: int = Time.get_ticks_usec() - preparation_started_usec
 	_apply_selected_ids(prepared_files, plan)
 	var has_focus: bool = false
+	var execution_started_usec: int = Time.get_ticks_usec()
 	for prepared_value: Variant in prepared_files:
 		var prepared: Dictionary[String, Variant] = _string_dictionary(prepared_value)
 		for case_value: Variant in prepared.get("cases", []):
@@ -271,13 +275,17 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 			totals[status] += file_totals.get(status, 0)
 	if _cancel_requested:
 		totals["canceled"] += 1
+	var execution_usec: int = Time.get_ticks_usec() - execution_started_usec
 	_send_event(
 			"run_finished",
-			{
-				"status": "canceled" if _cancel_requested else _aggregate_status(totals),
-				"counts": totals,
-				"duration_usec": Time.get_ticks_usec() - started_usec,
-			}
+			Protocol.run_finished(
+					"canceled" if _cancel_requested else Protocol.aggregate_status(totals),
+					totals,
+					Time.get_ticks_usec() - started_usec,
+					preparation_usec,
+					execution_usec,
+					_serialization_usec
+			)
 	)
 	_finish_run_state()
 
@@ -502,7 +510,7 @@ func _run_prepared_file(
 		await _call_optional(instance, &"after_all", [])
 	_send_event(
 			"suite_finished",
-			{ "id": root_info.id, "status": _aggregate_status(totals), "counts": totals }
+			{ "id": root_info.id, "status": Protocol.aggregate_status(totals), "counts": totals }
 	)
 	_active_test = null
 	return totals
@@ -841,7 +849,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 				"assertions": int(result.get("assertions", 0)),
 				"messages": result.get("messages", []),
 				"outcomes": result.get("outcomes", []),
-				"duration_usec": Time.get_ticks_usec() - started_usec,
+				"duration_ns": (Time.get_ticks_usec() - started_usec) * 1000,
 			}
 	)
 	_active_case_id = ""
@@ -862,6 +870,7 @@ func _call_callable(callback: Callable, arguments: Array[Variant]) -> void:
 
 
 func _on_assertion_failed(diagnostic: Dictionary[String, Variant]) -> void:
+	var serialization_started_usec: int = Time.get_ticks_usec()
 	var payload: Dictionary[String, Variant] = {
 		"test_id": _active_case_id,
 		"assertion": diagnostic.get("assertion", ""),
@@ -871,6 +880,7 @@ func _on_assertion_failed(diagnostic: Dictionary[String, Variant]) -> void:
 	}
 	if bool(diagnostic.get("has_expected", false)):
 		payload["expected"] = Protocol.wire_value(diagnostic.get("expected"))
+	_serialization_usec += Time.get_ticks_usec() - serialization_started_usec
 	_send_event("assertion_failed", payload)
 
 
@@ -970,16 +980,6 @@ func _send(message: Dictionary[String, Variant]) -> void:
 		# The protocol connection itself failed, so stderr is the remaining channel.
 		# gdkit:ignore = no-engine-logging
 		printerr("gdtest worker: send failed: " + error_string(send_error))
-
-
-func _aggregate_status(totals: Dictionary[String, int]) -> String:
-	if totals.get("error", 0) > 0:
-		return "error"
-	if totals.get("fail", 0) > 0:
-		return "fail"
-	if totals.get("canceled", 0) > 0:
-		return "canceled"
-	return "pass"
 
 
 func _finish_run_state() -> void:

@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without a v prefix"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Install pinned gpm
+        run: go install github.com/cafecito-games/godot-package-manager/cmd/gpm@v0.5.1
+      - name: Resolve release version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          [[ -n "$version" && "$version" != *[!0-9A-Za-z.+-]* ]]
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Build and verify sliced addon
+        run: |
+          scripts/package-addon "${{ steps.version.outputs.value }}"
+          scripts/test-package-addon "${{ steps.version.outputs.value }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gdtest-${{ steps.version.outputs.value }}-gpm
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish one atomic release asset set
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

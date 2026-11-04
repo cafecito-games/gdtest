@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -80,6 +81,44 @@ func (e *WorkerCrashError) Error() string {
 // Unwrap exposes the process or transport error.
 func (e *WorkerCrashError) Unwrap() error { return e.Err }
 
+const startupOutputLimit = 64 << 10
+
+// StartupError identifies the worker startup stage and retains bounded Godot
+// output so fresh-checkout and runtime mismatches remain actionable.
+type StartupError struct {
+	Stage   string
+	Err     error
+	Project string
+	Command string
+	Stdout  string
+	Stderr  string
+
+	retryable bool
+}
+
+func (e *StartupError) Error() string {
+	message := fmt.Sprintf("Godot worker startup failed during %s: %v", e.Stage, e.Err)
+	if e.Project != "" {
+		message += "\nProject: " + e.Project
+	}
+	if e.Command != "" {
+		message += "\nCommand: " + e.Command
+	}
+	if text := strings.TrimSpace(e.Stdout); text != "" {
+		message += "\nGodot stdout tail:\n" + text
+	}
+	if text := strings.TrimSpace(e.Stderr); text != "" {
+		message += "\nGodot stderr tail:\n" + text
+	}
+	if e.Project != "" {
+		message += "\nSuggested action: run gdtest doctor --project " + e.Project
+	}
+	return message
+}
+
+// Unwrap exposes the underlying process, transport, or handshake error.
+func (e *StartupError) Unwrap() error { return e.Err }
+
 // Start launches and authenticates a persistent worker.
 func Start(ctx context.Context, options ProcessOptions) (*Process, error) {
 	if options.Godot == "" {
@@ -98,9 +137,30 @@ func Start(ctx context.Context, options ProcessOptions) (*Process, error) {
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize project: %w", err)
 	}
+	process, err := startOnce(ctx, options, project)
+	if err == nil {
+		return process, nil
+	}
+	var startup *StartupError
+	if ctx.Err() != nil || !errors.As(err, &startup) || !startup.retryable {
+		return nil, err
+	}
+	if bootstrapErr := bootstrapProject(ctx, options, project); bootstrapErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("godot project bootstrap failed: %w", bootstrapErr))
+	}
+	process, retryErr := startOnce(ctx, options, project)
+	if retryErr != nil {
+		return nil, fmt.Errorf("worker startup still failed after one headless import/bootstrap attempt: %w", retryErr)
+	}
+	return process, nil
+}
+
+func startOnce(ctx context.Context, options ProcessOptions, project string) (*Process, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return nil, fmt.Errorf("open worker listener: %w", err)
+		return nil, &StartupError{
+			Stage: "listener setup", Err: fmt.Errorf("open worker listener: %w", err), Project: project,
+		}
 	}
 	defer func() { _ = listener.Close() }()
 	token, err := randomToken()
@@ -126,14 +186,21 @@ func Start(ctx context.Context, options ProcessOptions) (*Process, error) {
 	}
 	stdoutPipe, err := command.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("capture Godot stdout: %w", err)
+		return nil, &StartupError{
+			Stage: "output capture", Err: fmt.Errorf("capture Godot stdout: %w", err), Project: project,
+		}
 	}
 	stderrPipe, err := command.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("capture Godot stderr: %w", err)
+		return nil, &StartupError{
+			Stage: "output capture", Err: fmt.Errorf("capture Godot stderr: %w", err), Project: project,
+		}
 	}
 	if err := command.Start(); err != nil {
-		return nil, fmt.Errorf("start Godot worker %q in %s: %w", options.Godot, project, err)
+		return nil, &StartupError{
+			Stage: "process launch", Err: fmt.Errorf("start Godot worker %q in %s: %w", options.Godot, project, err),
+			Project: project, Command: options.Godot + " --headless --path " + project,
+		}
 	}
 	p := &Process{
 		options: options, project: project, cmd: command,
@@ -141,14 +208,18 @@ func Start(ctx context.Context, options ProcessOptions) (*Process, error) {
 		messages:   make(chan processMessage, 256), processDone: make(chan struct{}),
 	}
 	var outputMu sync.Mutex
-	stdout := io.Writer(io.Discard)
-	stderr := io.Writer(io.Discard)
+	stdoutTail := &tailBuffer{limit: startupOutputLimit}
+	stderrTail := &tailBuffer{limit: startupOutputLimit}
+	stdoutDestination := io.Writer(io.Discard)
+	stderrDestination := io.Writer(io.Discard)
 	if options.Stdout != nil {
-		stdout = &lockedWriter{mu: &outputMu, writer: options.Stdout}
+		stdoutDestination = options.Stdout
 	}
 	if options.Stderr != nil {
-		stderr = &lockedWriter{mu: &outputMu, writer: options.Stderr}
+		stderrDestination = options.Stderr
 	}
+	stdout := &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stdoutDestination, stdoutTail)}
+	stderr := &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stderrDestination, stderrTail)}
 	p.outputWait.Add(2)
 	go drainOutput(&p.outputWait, stdout, stdoutPipe)
 	go drainOutput(&p.outputWait, stderr, stderrPipe)
@@ -160,20 +231,156 @@ func Start(ctx context.Context, options ProcessOptions) (*Process, error) {
 		close(p.processDone)
 	}()
 
-	connection, err := accept(ctx, listener, options.StartupTimeout)
+	connection, err := acceptProcess(ctx, listener, options.StartupTimeout, p.processDone)
 	if err != nil {
 		p.killAndWait()
-		return nil, fmt.Errorf("worker startup: %w", err)
+		p.stateMu.Lock()
+		waitErr := p.waitErr
+		p.stateMu.Unlock()
+		if waitErr != nil {
+			err = errors.Join(err, fmt.Errorf("godot process exit: %w", waitErr))
+		}
+		return nil, startupFailure("connection", err, stdoutTail, stderrTail, true, options, project)
 	}
 	p.conn = connection
+	if err := connection.SetDeadline(time.Now().Add(options.StartupTimeout)); err != nil {
+		p.killAndWait()
+		return nil, startupFailure(
+			"handshake deadline", fmt.Errorf("set worker handshake deadline: %w", err),
+			stdoutTail, stderrTail, true, options, project,
+		)
+	}
 	decoder := protocol.NewDecoder(connection, protocol.DefaultMaxMessageSize)
 	if err := verifyHandshake(decoder, token, project, options.SessionID, options.Generation); err != nil {
 		p.killAndWait()
-		return nil, err
+		return nil, startupFailure(
+			"authenticated handshake", err, stdoutTail, stderrTail, true, options, project,
+		)
+	}
+	if err := connection.SetDeadline(time.Time{}); err != nil {
+		p.killAndWait()
+		return nil, startupFailure(
+			"handshake completion", fmt.Errorf("clear worker handshake deadline: %w", err),
+			stdoutTail, stderrTail, true, options, project,
+		)
 	}
 	p.encoder = protocol.NewEncoder(connection)
 	go p.readLoop(decoder)
 	return p, nil
+}
+
+func bootstrapProject(ctx context.Context, options ProcessOptions, project string) error {
+	arguments := []string{"--headless", "--editor", "--path", project, "--quit-after", "2"}
+	var command *exec.Cmd
+	if options.commandFactory != nil {
+		command = options.commandFactory(arguments)
+	} else {
+		command = exec.CommandContext(ctx, options.Godot, arguments...)
+	}
+	var output tailBuffer
+	output.limit = startupOutputLimit
+	var outputMu sync.Mutex
+	command.Stdout = &lockedWriter{
+		mu: &outputMu, writer: io.MultiWriter(outputDestination(options.Stdout), &output),
+	}
+	command.Stderr = &lockedWriter{
+		mu: &outputMu, writer: io.MultiWriter(outputDestination(options.Stderr), &output),
+	}
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start %s --headless --editor: %w", options.Godot, err)
+	}
+	stopCancellation := context.AfterFunc(ctx, func() {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+	})
+	defer stopCancellation()
+	if err := command.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("run %s --headless --editor: %w\nGodot output tail:\n%s", options.Godot, err, strings.TrimSpace(output.String()))
+	}
+	return nil
+}
+
+func outputDestination(destination io.Writer) io.Writer {
+	if destination == nil {
+		return io.Discard
+	}
+	return destination
+}
+
+func startupFailure(
+	stage string,
+	err error,
+	stdout *tailBuffer,
+	stderr *tailBuffer,
+	retryable bool,
+	options ProcessOptions,
+	project string,
+) error {
+	return &StartupError{
+		Stage: stage, Err: err, Project: project,
+		Command: fmt.Sprintf("%s --headless --path %s --script res://addons/gdtest/worker.gd", options.Godot, project),
+		Stdout:  stdout.String(), Stderr: stderr.String(), retryable: retryable,
+	}
+}
+
+type tailBuffer struct {
+	limit int
+	data  []byte
+}
+
+func (b *tailBuffer) Write(value []byte) (int, error) {
+	written := len(value)
+	if b.limit <= 0 {
+		return written, nil
+	}
+	if len(value) >= b.limit {
+		b.data = append(b.data[:0], value[len(value)-b.limit:]...)
+		return written, nil
+	}
+	overflow := len(b.data) + len(value) - b.limit
+	if overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+	}
+	b.data = append(b.data, value...)
+	return written, nil
+}
+
+func (b *tailBuffer) String() string { return string(bytes.Clone(b.data)) }
+
+func acceptProcess(
+	ctx context.Context,
+	listener net.Listener,
+	timeout time.Duration,
+	processDone <-chan struct{},
+) (net.Conn, error) {
+	result := make(chan struct {
+		connection net.Conn
+		err        error
+	}, 1)
+	go func() {
+		connection, err := listener.Accept()
+		result <- struct {
+			connection net.Conn
+			err        error
+		}{connection: connection, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-processDone:
+		return nil, errors.New("godot process exited before connecting to the worker listener")
+	case <-timer.C:
+		return nil, fmt.Errorf("worker did not connect within %s", timeout)
+	case accepted := <-result:
+		return accepted.connection, accepted.err
+	}
 }
 
 // PID returns the exact recorded child process ID.

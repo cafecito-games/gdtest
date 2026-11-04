@@ -54,7 +54,7 @@ static func wire_value(value: Variant, depth: int = 0) -> Dictionary[String, Var
 				array_values.append(wire_value(input_array[index], depth + 1))
 			return {
 				"type": "array",
-				"value": array_values,
+				"items": array_values,
 				"truncated": input_array.size() > array_limit,
 			}
 		TYPE_DICTIONARY:
@@ -75,9 +75,68 @@ static func wire_value(value: Variant, depth: int = 0) -> Dictionary[String, Var
 				)
 			return {
 				"type": "dictionary",
-				"value": entries,
+				"entries": entries,
 				"truncated": keys.size() > dictionary_limit,
 			}
+		TYPE_VECTOR2:
+			var vector_2: Vector2 = value
+			return { "type": "vector2", "value": { "x": vector_2.x, "y": vector_2.y } }
+		TYPE_VECTOR2I:
+			var vector_2i: Vector2i = value
+			return { "type": "vector2i", "value": { "x": vector_2i.x, "y": vector_2i.y } }
+		TYPE_VECTOR3:
+			var vector_3: Vector3 = value
+			return {
+				"type": "vector3",
+				"value": { "x": vector_3.x, "y": vector_3.y, "z": vector_3.z },
+			}
+		TYPE_VECTOR3I:
+			var vector_3i: Vector3i = value
+			return {
+				"type": "vector3i",
+				"value": { "x": vector_3i.x, "y": vector_3i.y, "z": vector_3i.z },
+			}
+		TYPE_VECTOR4:
+			var vector_4: Vector4 = value
+			return {
+				"type": "vector4",
+				"value": { "x": vector_4.x, "y": vector_4.y, "z": vector_4.z, "w": vector_4.w },
+			}
+		TYPE_VECTOR4I:
+			var vector_4i: Vector4i = value
+			return {
+				"type": "vector4i",
+				"value": { "x": vector_4i.x, "y": vector_4i.y, "z": vector_4i.z, "w": vector_4i.w },
+			}
+		TYPE_COLOR:
+			var color: Color = value
+			return {
+				"type": "color",
+				"value": { "r": color.r, "g": color.g, "b": color.b, "a": color.a },
+			}
+		TYPE_RECT2:
+			var rectangle: Rect2 = value
+			return {
+				"type": "rect2",
+				"value": {
+					"position": wire_value(rectangle.position, depth + 1),
+					"size": wire_value(rectangle.size, depth + 1),
+				},
+			}
+		TYPE_RECT2I:
+			var rectangle_i: Rect2i = value
+			return {
+				"type": "rect2i",
+				"value": {
+					"position": wire_value(rectangle_i.position, depth + 1),
+					"size": wire_value(rectangle_i.size, depth + 1),
+				},
+			}
+		TYPE_OBJECT:
+			if not is_instance_valid(value):
+				return { "type": "object", "display": "<freed>" }
+			var object: Object = value
+			return { "type": object.get_class().to_snake_case(), "display": str(object) }
 		_:
 			return { "type": type_string(typeof(value)).to_snake_case(), "display": str(value) }
 
@@ -143,6 +202,40 @@ static func only_policy_error(only_mode: String, has_focus: bool) -> String:
 			return "focused tests are forbidden by only mode" if has_focus else ""
 		_:
 			return "unsupported only mode: " + only_mode
+
+
+## Produces terminal run data with phase timings in microseconds.
+static func run_finished(
+		status: String,
+		counts: Dictionary[String, int],
+		duration_usec: int,
+		preparation_usec: int,
+		execution_usec: int,
+		serialization_usec: int
+) -> Dictionary[String, Variant]:
+	return {
+		"status": status,
+		"counts": counts,
+		"duration_ns": duration_usec * 1000,
+		"metadata": {
+			"timings_usec": {
+				"script_load_dynamic_definition": preparation_usec,
+				"hooks_cases": execution_usec,
+				"result_serialization": serialization_usec,
+			},
+		},
+	}
+
+
+## Folds case totals into the terminal run status.
+static func aggregate_status(totals: Dictionary[String, int]) -> String:
+	if totals.get("error", 0) > 0:
+		return "error"
+	if totals.get("fail", 0) > 0:
+		return "fail"
+	if totals.get("canceled", 0) > 0:
+		return "canceled"
+	return "pass"
 
 
 static func _discovery_case(

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Prove each gdkit gate rejects a deliberately malformed copy of shipped runtime.
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+new_fixture() {
+	local name="$1"
+	local root="$work/$name"
+	mkdir -p "$root"
+	cp -R "$repo_root/.gdkit" "$root/.gdkit"
+	cp -R "$repo_root/addons" "$root/addons"
+	cp -R "$repo_root/fixtures" "$root/fixtures"
+	cp -R "$repo_root/examples" "$root/examples"
+	cp "$repo_root/project.godot" "$root/project.godot"
+	echo "$root"
+}
+
+expect_failure() {
+	local name="$1"
+	shift
+	if "$@" >"$work/$name.out" 2>&1; then
+		echo "FAIL: $name accepted its deliberately malformed runtime fixture" >&2
+		exit 1
+	fi
+}
+
+lint_root=$(new_fixture lint)
+printf '\nfunc invalid_untyped(value):\n\tvar result = value\n\treturn result\n' \
+	>>"$lint_root/addons/gdtest/gdtest.gd"
+expect_failure lint gdkit lint check --minimum-version 0.10.0 "$lint_root"
+
+format_root=$(new_fixture format)
+printf '\nfunc badly_formatted( )->void: pass\n' >>"$format_root/addons/gdtest/gdtest.gd"
+expect_failure format gdkit format check --minimum-version 0.10.0 --diff "$format_root"
+
+arch_root=$(new_fixture architecture)
+printf '\nconst InvalidLayerDependency: GDScript = preload("res://addons/gdtest/launcher.gd")\n' \
+	>>"$arch_root/addons/gdtest/gdtest.gd"
+expect_failure architecture gdkit arch check --minimum-version 0.10.0 "$arch_root"
+
+uid_root=$(new_fixture uid)
+rm "$uid_root/addons/gdtest/protocol.gd.uid"
+expect_failure uid gdkit uid check --minimum-version 0.10.0 "$uid_root"
+
+echo "gdkit lint/format/architecture/UID failure fixtures were rejected"
