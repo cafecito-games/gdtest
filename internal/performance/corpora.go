@@ -24,7 +24,7 @@ func PassingAssertionsScript() string {
 	return "extends GDTest\n\n\n## Executes the passing-assertion corpus.\n" +
 		"func test_passing_assertions() -> void:\n" +
 		fmt.Sprintf("\tfor index: int in range(%d):\n", LargeCount) +
-		"\t\tok(index >= 0)\n"
+		"\t\texpect_true(index >= 0)\n"
 }
 
 // DynamicCasesScript returns a valid suite that registers 10,000 no-op cases.

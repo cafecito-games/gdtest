@@ -174,9 +174,7 @@ for path in \
     bin/macos-arm64/gdtest \
     bin/macos-x86_64/gdtest \
     bin/linux-arm64/gdtest \
-    bin/linux-x86_64/gdtest \
-    bin/windows-arm64/gdtest.exe \
-    bin/windows-x86_64/gdtest.exe
+    bin/linux-x86_64/gdtest
 do
     [ -f "$all_project/addons/gdtest/$path" ] || fail "all-platform install omitted $path"
 done

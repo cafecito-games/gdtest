@@ -61,6 +61,49 @@ func TestRootHelpDescribesExactCommandTree(t *testing.T) {
 	assert.NotContains(t, stdout.String(), "-v, --version")
 }
 
+func TestRunHelpDocumentsIsolationPolicies(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"run", "--help"}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitOK, exitCode)
+	assert.Empty(t, stderr.String())
+	assert.Contains(t, stdout.String(), "--isolation")
+	assert.Contains(t, stdout.String(), "reuse, recycle, fresh, or exclusive")
+	assert.Contains(t, stdout.String(), "--jobs")
+	assert.Contains(t, stdout.String(), "0 uses automatic concurrency")
+}
+
+func TestRunRejectsNegativeJobsBeforeProjectAccess(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{
+		"run", "--project", t.TempDir(), "--jobs", "-1",
+	}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitError, exitCode)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "jobs must be non-negative")
+}
+
+func TestRunRejectsUnknownIsolationBeforeProjectAccess(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{
+		"run", "--project", t.TempDir(), "--isolation", "shared",
+	}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitError, exitCode)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), `isolation "shared" must be reuse, recycle, fresh, or exclusive`)
+}
+
 func TestDaemonHelpDescribesNestedCommands(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer

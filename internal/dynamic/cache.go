@@ -27,6 +27,7 @@ type Identity struct {
 	GodotIdentity      string
 	Configuration      []byte
 	ContentFingerprint string
+	InputFingerprint   string
 	Generation         uint64
 }
 
@@ -34,7 +35,7 @@ type Identity struct {
 func Key(identity Identity) (string, error) {
 	if identity.ToolVersion == "" || identity.RuntimeVersion == "" ||
 		identity.GodotIdentity == "" || identity.ContentFingerprint == "" ||
-		identity.Generation == 0 {
+		identity.InputFingerprint == "" || identity.Generation == 0 {
 		return "", errors.New("dynamic cache identity is incomplete")
 	}
 	engine := strings.Join([]string{
@@ -44,7 +45,7 @@ func Key(identity Identity) (string, error) {
 		identity.ToolVersion,
 		engine,
 		identity.Configuration,
-		[]byte(identity.ContentFingerprint),
+		[]byte(identity.ContentFingerprint+"\x00"+identity.InputFingerprint),
 	), nil
 }
 

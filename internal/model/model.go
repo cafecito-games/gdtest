@@ -122,6 +122,13 @@ type WireDictionaryItem struct {
 	Value WireValue `json:"value"`
 }
 
+// Outcome is structured data attached by ok, fail, skip, or todo.
+type Outcome struct {
+	Kind    string    `json:"kind"`
+	Message string    `json:"message,omitempty"`
+	Data    WireValue `json:"data"`
+}
+
 // Event is the stable, backend-neutral event envelope.
 type Event struct {
 	ProtocolVersion int            `json:"protocol_version"`
@@ -134,6 +141,9 @@ type Event struct {
 	Location        *Location      `json:"location,omitempty"`
 	Actual          *WireValue     `json:"actual,omitempty"`
 	Expected        *WireValue     `json:"expected,omitempty"`
+	Assertions      int            `json:"assertions,omitempty"`
+	Messages        []string       `json:"messages,omitempty"`
+	Outcomes        []Outcome      `json:"outcomes,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
 	Duration        time.Duration  `json:"duration_ns,omitempty"`
 	Generation      uint64         `json:"generation,omitempty"`

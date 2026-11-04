@@ -14,11 +14,13 @@ import (
 	"github.com/cafecito-games/gdtest/internal/config"
 	"github.com/cafecito-games/gdtest/internal/discovery"
 	"github.com/cafecito-games/gdtest/internal/dynamic"
+	"github.com/cafecito-games/gdtest/internal/generation"
 	"github.com/cafecito-games/gdtest/internal/model"
 	"github.com/cafecito-games/gdtest/internal/projectmeta"
 	"github.com/cafecito-games/gdtest/internal/selection"
 	"github.com/cafecito-games/gdtest/internal/service"
 	"github.com/cafecito-games/gdtest/internal/version"
+	sourcewatch "github.com/cafecito-games/gdtest/internal/watch"
 	"github.com/cafecito-games/gdtest/internal/worker"
 )
 
@@ -73,19 +75,35 @@ func completeManifest(
 		if noDaemon {
 			return discoverForeground(computeCtx, root, projectConfig.Godot, plan, streams)
 		}
-		return discoverDaemon(computeCtx, sessionID, root, projectConfig.Godot, plan)
+		return discoverDaemon(
+			computeCtx, sessionID, root, projectConfig.Godot,
+			time.Duration(projectConfig.WorkerIdleTimeout), plan,
+		)
 	}
 	if !noDaemon {
-		generation, generationErr := daemonGeneration(ctx, sessionID, root, projectConfig.Godot)
+		generation, generationErr := daemonGeneration(
+			ctx, sessionID, root, projectConfig.Godot,
+			time.Duration(projectConfig.WorkerIdleTimeout),
+		)
 		if generationErr != nil {
 			return model.DiscoveryManifest{}, generationErr
 		}
 		plan.Generation = generation
 	}
+	relevantPaths, err := sourcewatch.RelevantPaths(ctx, root)
+	if err != nil {
+		return model.DiscoveryManifest{}, fmt.Errorf("enumerate dynamic discovery inputs: %w", err)
+	}
+	inputSnapshot, err := generation.Build(ctx, root, relevantPaths)
+	if err != nil {
+		return model.DiscoveryManifest{}, fmt.Errorf("fingerprint dynamic discovery inputs: %w", err)
+	}
 	cacheIdentity := dynamic.Identity{
 		ToolVersion: version.BuildID(), RuntimeVersion: version.Product,
 		GodotIdentity: identity, Configuration: configuration,
-		ContentFingerprint: static.ContentFingerprint, Generation: plan.Generation,
+		ContentFingerprint: static.ContentFingerprint,
+		InputFingerprint:   inputSnapshot.ContentFingerprint(),
+		Generation:         plan.Generation,
 	}
 	store, err := cache.Default(version.BuildID())
 	if err != nil {
@@ -163,6 +181,7 @@ func discoverDaemon(
 	sessionID string,
 	root string,
 	godot string,
+	workerIdleTimeout time.Duration,
 	plan model.TestPlan,
 ) (model.DiscoveryManifest, error) {
 	daemonClient, err := compatibleClient(true)
@@ -171,6 +190,7 @@ func discoverDaemon(
 	}
 	response, err := daemonClient.Call(ctx, "session.discover", service.DiscoverRequest{
 		SessionID: sessionID, Project: root, Godot: godot, Plan: plan,
+		WorkerIdleNS: workerIdleTimeout.Nanoseconds(),
 	}, nil)
 	if err != nil {
 		return model.DiscoveryManifest{}, err
@@ -182,13 +202,20 @@ func discoverDaemon(
 	return manifest, nil
 }
 
-func daemonGeneration(ctx context.Context, sessionID, root, godot string) (uint64, error) {
+func daemonGeneration(
+	ctx context.Context,
+	sessionID string,
+	root string,
+	godot string,
+	workerIdleTimeout time.Duration,
+) (uint64, error) {
 	daemonClient, err := compatibleClient(true)
 	if err != nil {
 		return 0, err
 	}
 	response, err := daemonClient.Call(ctx, "session.warm", service.WarmRequest{
 		SessionID: sessionID, Project: root, Godot: godot, Generation: 1,
+		WorkerIdleNS: workerIdleTimeout.Nanoseconds(),
 	}, nil)
 	if err != nil {
 		return 0, err

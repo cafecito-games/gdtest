@@ -36,7 +36,9 @@ var _gdtest_outcome_data: Array[Variant] = []
 var _gdtest_dynamic_cases: Array[Variant] = []
 var _gdtest_dynamic_suites: Array[Variant] = []
 var _gdtest_suite_stack: Array[GDTestSuiteInfo] = []
-var _gdtest_pending_registrations: int = 0
+var _gdtest_definition_roots: Array[Variant] = []
+var _gdtest_active_definition: Dictionary[String, Variant] = {}
+var _gdtest_suite_ordinals: Dictionary[String, int] = {}
 var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
 
@@ -55,10 +57,13 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 			_gdtest_suite_stack.back().id if not _gdtest_suite_stack.is_empty()
 			else ""
 	)
+	var sibling_key: String = parent_id + "\u0000" + name
+	var sibling_ordinal: int = _gdtest_suite_ordinals.get(sibling_key, 0)
+	_gdtest_suite_ordinals[sibling_key] = sibling_ordinal + 1
 	var suite_id: String = parent_id + (
 			"/" if not parent_id.is_empty()
 			else ""
-	) + _encode_component(name)
+	) + _encode_component(name) + "@" + str(sibling_ordinal)
 	var info := GDTestSuiteInfo.new(
 			suite_id,
 			name,
@@ -67,9 +72,18 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 			is_only
 	)
 	_gdtest_dynamic_suites.append({ "info": info, "parent_id": parent_id })
-	_gdtest_suite_stack.append(info)
-	_gdtest_pending_registrations += 1
-	_gdtest_run_definition(callback)
+	var definition: Dictionary[String, Variant] = {
+		"callback": callback,
+		"info": info,
+		"ancestors": _gdtest_suite_stack.duplicate(),
+		"children": [],
+	}
+	if _gdtest_active_definition.is_empty():
+		_gdtest_definition_roots.append(definition)
+	else:
+		var children: Variant = _gdtest_active_definition["children"]
+		if children is Array:
+			children.append(definition)
 	return info
 
 
@@ -176,7 +190,7 @@ func expect_false(condition: bool, message: String = "") -> void:
 
 ## Records equality using directional `actual.equals(expected)` when available.
 func expect_equal(actual: Variant, expected: Variant, message: String = "") -> void:
-	var equal: Variant = actual == expected
+	var equal: Variant
 	if actual is Object and is_instance_valid(actual) and actual.has_method("equals"):
 		equal = actual.call("equals", expected)
 		if not equal is bool:
@@ -188,12 +202,14 @@ func expect_equal(actual: Variant, expected: Variant, message: String = "") -> v
 					true
 			)
 			return
+	else:
+		equal = actual == expected
 	_record_assertion(bool(equal), "expect_equal", message, actual, expected, true)
 
 
 ## Records inequality using the inverse of directional equality.
 func expect_not_equal(actual: Variant, expected: Variant, message: String = "") -> void:
-	var equal: Variant = actual == expected
+	var equal: Variant
 	if actual is Object and is_instance_valid(actual) and actual.has_method("equals"):
 		equal = actual.call("equals", expected)
 		if not equal is bool:
@@ -205,6 +221,8 @@ func expect_not_equal(actual: Variant, expected: Variant, message: String = "") 
 					true
 			)
 			return
+	else:
+		equal = actual == expected
 	_record_assertion(not bool(equal), "expect_not_equal", message, actual, expected, true)
 
 
@@ -443,20 +461,35 @@ func _gdtest_begin_registration() -> void:
 	_gdtest_dynamic_cases.clear()
 	_gdtest_dynamic_suites.clear()
 	_gdtest_suite_stack.clear()
-	_gdtest_pending_registrations = 0
+	_gdtest_definition_roots.clear()
+	_gdtest_active_definition.clear()
+	_gdtest_suite_ordinals.clear()
 	_gdtest_discovery_errors.clear()
 
 
 func _gdtest_finish_registration() -> void:
-	while _gdtest_pending_registrations > 0:
-		await _gdtest_tree.process_frame
+	for definition_value: Variant in _gdtest_definition_roots:
+		if definition_value is Dictionary:
+			await _gdtest_run_definition(_string_dictionary(definition_value))
+	_gdtest_suite_stack.clear()
+	_gdtest_active_definition.clear()
 	_gdtest_registration_active = false
 
 
-func _gdtest_run_definition(callback: Callable) -> void:
+func _gdtest_run_definition(definition: Dictionary[String, Variant]) -> void:
+	var previous: Dictionary[String, Variant] = _gdtest_active_definition
+	_gdtest_active_definition = definition
+	_gdtest_suite_stack.assign(definition.get("ancestors", []))
+	var info: GDTestSuiteInfo = definition["info"]
+	_gdtest_suite_stack.append(info)
+	var callback: Callable = definition["callback"]
 	await callback.call()
-	_gdtest_pending_registrations -= 1
-	_gdtest_suite_stack.pop_back()
+	var children: Variant = definition["children"]
+	if children is Array:
+		for child_value: Variant in children:
+			if child_value is Dictionary:
+				await _gdtest_run_definition(_string_dictionary(child_value))
+	_gdtest_active_definition = previous
 
 
 func _gdtest_manifest() -> Dictionary[String, Variant]:

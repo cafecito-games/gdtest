@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,7 +28,7 @@ type fakeWorker struct {
 	runs         int
 	discovers    int
 	resets       int
-	closed       bool
+	closed       atomic.Bool
 	runHook      func(model.TestPlan, executor.EventSink) error
 	discoverHook func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
 	resetErr     error
@@ -56,7 +58,7 @@ func (f *fakeWorker) Reload(_ context.Context, generation uint64) error {
 	f.generation = generation
 	return nil
 }
-func (f *fakeWorker) Shutdown(context.Context) error { f.closed = true; return nil }
+func (f *fakeWorker) Shutdown(context.Context) error { f.closed.Store(true); return nil }
 func (f *fakeWorker) PID() int                       { return f.pid }
 func (f *fakeWorker) Generation() uint64             { return f.generation }
 
@@ -101,6 +103,169 @@ func TestSessionServiceReusesWorker(t *testing.T) {
 	assert.Equal(t, uint64(2), sessions[0].Runs)
 }
 
+func TestSessionServiceRecyclesWorkerAtConfiguredAge(t *testing.T) {
+	t.Parallel()
+
+	var processes []*fakeWorker
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 30 + len(processes), generation: options.Generation}
+		processes = append(processes, process)
+		return process, nil
+	})
+	service.sourceFactory = nil
+	service.maxWorkerAge = time.Minute
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	run := func(id string) {
+		payload, err := json.Marshal(RunRequest{
+			SessionID: "aged", Project: "/project", Godot: "godot",
+			Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: id, Generation: 1},
+		})
+		require.NoError(t, err)
+		_, err = service.Handle(context.Background(), daemon.Request{
+			ID: id, Method: "session.run", Payload: payload,
+		}, func(any) error { return nil })
+		require.NoError(t, err)
+	}
+	run("first")
+	service.sessions["aged"].workerBorn = time.Now().Add(-2 * time.Minute)
+	run("second")
+
+	require.Len(t, processes, 2)
+	assert.True(t, processes[0].closed.Load())
+	assert.False(t, processes[1].closed.Load())
+}
+
+func TestSessionServiceRecyclesWorkerWhenGlobalMemoryBudgetIsExceeded(t *testing.T) {
+	t.Parallel()
+
+	process := &fakeWorker{pid: 130, generation: 1}
+	service := newSessionService(func(_ context.Context, _ worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	service.sourceFactory = nil
+	service.memoryBudgetMB = 64
+	service.memoryUsage = func(pid int) (uint64, error) {
+		assert.Equal(t, 130, pid)
+		return 65 * 1024 * 1024, nil
+	}
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "memory", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "memory-run", Generation: 1},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "memory-run", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+
+	require.NoError(t, err)
+	require.Eventually(t, process.closed.Load, time.Second, time.Millisecond)
+	assert.Zero(t, service.totalWorkerBytes)
+}
+
+func TestSessionServiceRecyclesWhenMemoryCannotBeMeasured(t *testing.T) {
+	t.Parallel()
+
+	process := &fakeWorker{pid: 131, generation: 1}
+	service := newSessionService(func(_ context.Context, _ worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	service.sourceFactory = nil
+	service.memoryBudgetMB = 64
+	service.memoryUsage = func(int) (uint64, error) { return 0, errors.New("unavailable") }
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "memory-error", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "memory-error-run", Generation: 1},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "memory-error-run", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+
+	require.NoError(t, err)
+	require.Eventually(t, process.closed.Load, time.Second, time.Millisecond)
+}
+
+func TestSessionServiceRejectsSessionIdentityRebinding(t *testing.T) {
+	t.Parallel()
+
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		return &fakeWorker{pid: 41, generation: options.Generation}, nil
+	})
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	for index, request := range []WarmRequest{
+		{SessionID: "collision", Project: "/worktree-a", Godot: "godot", Generation: 1},
+		{SessionID: "collision", Project: "/worktree-b", Godot: "godot", Generation: 1},
+	} {
+		payload, err := json.Marshal(request)
+		require.NoError(t, err)
+		_, err = service.Handle(context.Background(), daemon.Request{
+			ID: fmt.Sprintf("request-%d", index), Method: "session.warm", Payload: payload,
+		}, nil)
+		if index == 0 {
+			require.NoError(t, err)
+		} else {
+			require.EqualError(t, err, `session "collision" is already bound to project "/worktree-a" and Godot "godot"`)
+		}
+	}
+}
+
+func TestSessionServiceRejectsUnsafeOrIncompatiblePlans(t *testing.T) {
+	t.Parallel()
+
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		return &fakeWorker{pid: 43, generation: options.Generation}, nil
+	})
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	for _, test := range []struct {
+		name string
+		plan model.TestPlan
+		want string
+	}{
+		{
+			name: "protocol",
+			plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion + 1, RunID: "run", Generation: 1},
+			want: "protocol version 2 does not match 1",
+		},
+		{
+			name: "traversal",
+			plan: model.TestPlan{
+				ProtocolVersion: model.ProtocolVersion, RunID: "run", Generation: 1,
+				Files: []model.FilePlan{{Path: "../outside.test.gd"}},
+			},
+			want: "path must be normalized and remain inside the project",
+		},
+		{
+			name: "resource path",
+			plan: model.TestPlan{
+				ProtocolVersion: model.ProtocolVersion, RunID: "run", Generation: 1,
+				Files: []model.FilePlan{{Path: "res://tests/example.test.gd"}},
+			},
+			want: "path must be normalized",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			payload, err := json.Marshal(RunRequest{
+				SessionID: "invalid-" + test.name, Project: "/project", Godot: "godot", Plan: test.plan,
+			})
+			require.NoError(t, err)
+			_, err = service.Handle(context.Background(), daemon.Request{
+				ID: "request", Method: "session.run", Payload: payload,
+			}, func(any) error { return nil })
+			require.ErrorContains(t, err, test.want)
+		})
+	}
+}
+
 func TestSessionServiceReplacesGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -114,10 +279,6 @@ func TestSessionServiceReplacesGeneration(t *testing.T) {
 		},
 	}
 	for _, generation := range []uint64{1, 2} {
-		if generation == 2 {
-			entry := service.sessions["session-project"]
-			entry.lastStructural = 2
-		}
 		payload, err := json.Marshal(WarmRequest{
 			SessionID: "session-project", Project: "/project", Godot: "godot", Generation: generation,
 		})
@@ -128,8 +289,8 @@ func TestSessionServiceReplacesGeneration(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Len(t, processes, 2)
-	assert.True(t, processes[0].closed)
-	assert.False(t, processes[1].closed)
+	assert.True(t, processes[0].closed.Load())
+	assert.False(t, processes[1].closed.Load())
 }
 
 func TestSessionServiceBoundsRetainedWorkers(t *testing.T) {
@@ -157,12 +318,106 @@ func TestSessionServiceBoundsRetainedWorkers(t *testing.T) {
 	}
 	closed := 0
 	for _, process := range processes {
-		if process.closed {
+		if process.closed.Load() {
 			closed++
 		}
 	}
 	assert.Equal(t, 3, service.WorkerCount())
 	assert.Equal(t, 7, closed)
+}
+
+func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T) {
+	t.Parallel()
+
+	var factoryMu sync.Mutex
+	var processes []*fakeWorker
+	started := make(chan struct{}, 3)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var peak atomic.Int32
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{generation: options.Generation}
+		process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
+			current := active.Add(1)
+			for {
+				previous := peak.Load()
+				if current <= previous || peak.CompareAndSwap(previous, current) {
+					break
+				}
+			}
+			started <- struct{}{}
+			<-release
+			active.Add(-1)
+			id := plan.Files[0].Path + "::test"
+			if err := sink.Emit(model.Event{Type: model.EventCaseStarted, RunID: plan.RunID, TestID: id}); err != nil {
+				return err
+			}
+			if err := sink.Emit(model.Event{Type: model.EventCaseFinished, RunID: plan.RunID, TestID: id, Status: "pass"}); err != nil {
+				return err
+			}
+			return sink.Emit(model.Event{Type: model.EventRunFinished, RunID: plan.RunID, Status: "pass"})
+		}
+		factoryMu.Lock()
+		process.pid = 900 + len(processes)
+		processes = append(processes, process)
+		factoryMu.Unlock()
+		return process, nil
+	}, 3)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	request := RunRequest{
+		SessionID: "files", Project: "/project", Godot: "godot", Jobs: 2,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "multi-file", Generation: 1,
+			Files: []model.FilePlan{{Path: "a.test.gd"}, {Path: "b.test.gd"}, {Path: "c.test.gd"}},
+		},
+	}
+	payload, err := json.Marshal(request)
+	require.NoError(t, err)
+	var eventsMu sync.Mutex
+	var events []model.Event
+	done := make(chan error, 1)
+	go func() {
+		_, handleErr := service.Handle(context.Background(), daemon.Request{
+			ID: "request", Method: "session.run", Payload: payload,
+		}, func(value any) error {
+			event, ok := value.(model.Event)
+			if ok {
+				eventsMu.Lock()
+				events = append(events, event)
+				eventsMu.Unlock()
+			}
+			return nil
+		})
+		done <- handleErr
+	}()
+	waitServiceSignal(t, started)
+	waitServiceSignal(t, started)
+	assert.Equal(t, int32(2), peak.Load())
+	close(release)
+	require.NoError(t, <-done)
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	counts := make(map[model.EventType]int)
+	for _, event := range events {
+		counts[event.Type]++
+	}
+	assert.Equal(t, 1, counts[model.EventRunStarted])
+	assert.Equal(t, 3, counts[model.EventCaseStarted])
+	assert.Equal(t, 3, counts[model.EventCaseFinished])
+	assert.Equal(t, 1, counts[model.EventRunFinished])
+	assert.Len(t, processes, 3)
+}
+
+func waitServiceSignal(t *testing.T, values <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-values:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "timed out waiting for service signal")
+	}
 }
 
 func TestSessionServiceMarksChangedRunStaleAndReloadsBodyOnlyGeneration(t *testing.T) {
@@ -222,10 +477,20 @@ func TestSessionServiceMarksChangedRunStaleAndReloadsBodyOnlyGeneration(t *testi
 	_, err = service.Handle(context.Background(), daemon.Request{
 		ID: "run-2", Method: "session.run", Payload: payload,
 	}, func(any) error { return nil })
+	require.EqualError(t, err, "source generation changed from 1 to 2; rediscover and retry")
+
+	request.Plan.Generation = 2
+	request.Plan.RunID = "rediscovered-run"
+	payload, err = json.Marshal(request)
 	require.NoError(t, err)
-	require.Len(t, processes, 1)
-	assert.Equal(t, uint64(2), processes[0].Generation())
-	assert.False(t, processes[0].closed)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "run-3", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+	require.NoError(t, err)
+	require.Len(t, processes, 2)
+	assert.True(t, processes[0].closed.Load())
+	assert.Equal(t, uint64(2), processes[1].Generation())
+	assert.False(t, processes[1].closed.Load())
 }
 
 func TestSessionServiceReplacesWorkerAfterStructuralChange(t *testing.T) {
@@ -255,7 +520,7 @@ func TestSessionServiceReplacesWorkerAfterStructuralChange(t *testing.T) {
 	require.NoError(t, os.WriteFile(script, []byte("extends GDTest\nsignal changed\nfunc test_value() -> void:\n\tpass\n"), 0o600))
 	warm("changed")
 	require.Len(t, processes, 2)
-	assert.True(t, processes[0].closed)
+	assert.True(t, processes[0].closed.Load())
 	assert.Equal(t, uint64(2), processes[1].Generation())
 }
 
@@ -265,8 +530,10 @@ func TestSessionServicePeriodicReconcileInvalidatesObsoleteWork(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
 	script := filepath.Join(root, "example.test.gd")
 	require.NoError(t, os.WriteFile(script, []byte("extends GDTest\nfunc test_value() -> void:\n\tpass\n"), 0o600))
-	process := &fakeWorker{pid: 450, generation: 1}
-	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+	var processes []*fakeWorker
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 450 + len(processes), generation: options.Generation}
+		processes = append(processes, process)
 		return process, nil
 	})
 	defer func() { require.NoError(t, service.Close(context.Background())) }()
@@ -297,8 +564,10 @@ func TestSessionServicePeriodicReconcileInvalidatesObsoleteWork(t *testing.T) {
 		ID: "warm-current", Method: "session.warm", Payload: payload,
 	}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(2), process.Generation())
-	assert.False(t, process.closed)
+	require.Len(t, processes, 2)
+	assert.True(t, processes[0].closed.Load())
+	assert.Equal(t, uint64(2), processes[1].Generation())
+	assert.False(t, processes[1].closed.Load())
 }
 
 func TestSessionServiceReconcilesDeletedWorktree(t *testing.T) {
@@ -328,7 +597,7 @@ func TestSessionServiceReconcilesDeletedWorktree(t *testing.T) {
 	removed, err = service.Reconcile(now.Add(2*time.Minute), time.Minute, time.Hour)
 	require.NoError(t, err)
 	assert.Equal(t, projectidentity.RemoveMissing, removed["deleted-worktree"])
-	assert.True(t, process.closed)
+	assert.True(t, process.closed.Load())
 	assert.Zero(t, service.WorkerCount())
 }
 
@@ -351,8 +620,132 @@ func TestSessionServiceRecyclesAtRunLimit(t *testing.T) {
 		ID: "run", Method: "session.run", Payload: payload,
 	}, func(any) error { return nil })
 	require.NoError(t, err)
-	assert.True(t, process.closed)
+	assert.Eventually(t, process.closed.Load, time.Second, time.Millisecond)
 	assert.Zero(t, service.WorkerCount())
+}
+
+func TestSessionServiceRunLimitCountsPerWorker(t *testing.T) {
+	t.Parallel()
+
+	var processes []*fakeWorker
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 600 + len(processes), generation: options.Generation}
+		processes = append(processes, process)
+		return process, nil
+	})
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	for index := range 3 {
+		payload, err := json.Marshal(RunRequest{
+			SessionID: "per-worker-limit", Project: "/project", Godot: "godot", WorkerMaxRuns: 2,
+			Plan: model.TestPlan{
+				ProtocolVersion: model.ProtocolVersion,
+				RunID:           fmt.Sprintf("run-%d", index),
+				Generation:      1,
+			},
+		})
+		require.NoError(t, err)
+		_, err = service.Handle(context.Background(), daemon.Request{
+			ID: fmt.Sprintf("request-%d", index), Method: "session.run", Payload: payload,
+		}, func(any) error { return nil })
+		require.NoError(t, err)
+	}
+
+	require.Len(t, processes, 2)
+	assert.Equal(t, 2, processes[0].runs)
+	assert.True(t, processes[0].closed.Load())
+	assert.Equal(t, 1, processes[1].runs)
+	assert.False(t, processes[1].closed.Load())
+}
+
+func TestSessionServiceIsolationLifecycle(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name            string
+		isolation       string
+		wantProcesses   int
+		wantFirstClosed bool
+		wantSecondOpen  bool
+	}{
+		{name: "reuse", isolation: "reuse", wantProcesses: 1},
+		{name: "recycle", isolation: "recycle", wantProcesses: 2, wantFirstClosed: true},
+		{name: "fresh", isolation: "fresh", wantProcesses: 2, wantFirstClosed: true},
+		{name: "exclusive", isolation: "exclusive", wantProcesses: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var processes []*fakeWorker
+			service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+				process := &fakeWorker{pid: 700 + len(processes), generation: options.Generation}
+				processes = append(processes, process)
+				return process, nil
+			})
+			service.sourceFactory = nil
+			t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+			for index := range 2 {
+				payload, err := json.Marshal(RunRequest{
+					SessionID: "isolation-" + test.name, Project: "/project", Godot: "godot",
+					Isolation: test.isolation,
+					Plan: model.TestPlan{
+						ProtocolVersion: model.ProtocolVersion,
+						RunID:           fmt.Sprintf("run-%d", index),
+						Generation:      1,
+					},
+				})
+				require.NoError(t, err)
+				_, err = service.Handle(context.Background(), daemon.Request{
+					ID: fmt.Sprintf("request-%d", index), Method: "session.run", Payload: payload,
+				}, func(any) error { return nil })
+				require.NoError(t, err)
+			}
+
+			require.Len(t, processes, test.wantProcesses)
+			if test.wantFirstClosed {
+				assert.Eventually(t, processes[0].closed.Load, time.Second, time.Millisecond)
+			}
+			if test.wantSecondOpen {
+				assert.False(t, processes[1].closed.Load())
+			}
+		})
+	}
+}
+
+func TestSessionServiceTaintedWorkerIsRecycled(t *testing.T) {
+	t.Parallel()
+
+	process := &fakeWorker{pid: 800, generation: 1}
+	process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
+		if err := sink.Emit(model.Event{
+			ProtocolVersion: model.ProtocolVersion,
+			Type:            model.EventWorkerTainted,
+			RunID:           plan.RunID,
+		}); err != nil {
+			return err
+		}
+		return sink.Emit(model.Event{
+			ProtocolVersion: model.ProtocolVersion,
+			Type:            model.EventRunFinished,
+			RunID:           plan.RunID,
+		})
+	}
+	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "tainted", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "run", Generation: 1},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "request", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+	require.NoError(t, err)
+	assert.Eventually(t, process.closed.Load, time.Second, time.Millisecond)
 }
 
 func TestSessionServiceDiscoversWithReusedWorker(t *testing.T) {
@@ -404,28 +797,30 @@ func TestSessionServiceDiscoversWithReusedWorker(t *testing.T) {
 	assert.Equal(t, 1, created)
 	assert.Equal(t, 2, process.discovers)
 	assert.Equal(t, 2, process.resets)
-	assert.False(t, process.closed)
+	assert.False(t, process.closed.Load())
 	assert.Zero(t, service.List()[0].Runs, "discovery must not count as an executed run")
 }
 
-func TestSessionServiceDiscoveryReconcilesGenerationAndReloads(t *testing.T) {
+func TestSessionServiceDiscoveryRejectsStaleGenerationAndReplacesWorker(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
 	script := filepath.Join(root, "example.test.gd")
 	require.NoError(t, os.WriteFile(script, []byte("extends GDTest\nfunc test_value() -> void:\n\tpass\n"), 0o600))
-	process := &fakeWorker{pid: 502, generation: 1}
-	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+	var processes []*fakeWorker
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 502 + len(processes), generation: options.Generation}
+		processes = append(processes, process)
 		return process, nil
 	})
 	defer func() { require.NoError(t, service.Close(context.Background())) }()
 
-	discover := func(id string) model.DiscoveryManifest {
+	discover := func(id string, generation uint64) (model.DiscoveryManifest, error) {
 		payload, err := json.Marshal(DiscoverRequest{
 			SessionID: "discover-generation", Project: root, Godot: "godot",
 			Plan: model.TestPlan{
-				ProtocolVersion: model.ProtocolVersion, RunID: id, Generation: 1,
+				ProtocolVersion: model.ProtocolVersion, RunID: id, Generation: generation,
 				ContentFingerprint: id,
 			},
 		})
@@ -433,22 +828,32 @@ func TestSessionServiceDiscoveryReconcilesGenerationAndReloads(t *testing.T) {
 		value, err := service.Handle(context.Background(), daemon.Request{
 			ID: id, Method: "session.discover", Payload: payload,
 		}, nil)
-		require.NoError(t, err)
+		if err != nil {
+			return model.DiscoveryManifest{}, err
+		}
 		manifest, ok := value.(model.DiscoveryManifest)
 		require.True(t, ok)
-		return manifest
+		return manifest, nil
 	}
 
-	assert.Equal(t, uint64(1), discover("initial").Generation)
+	manifest, err := discover("initial", 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), manifest.Generation)
 	require.NoError(t, os.WriteFile(
 		script,
 		[]byte("extends GDTest\nfunc test_value() -> void:\n\tvar changed: int = 1\n"),
 		0o600,
 	))
-	assert.Equal(t, uint64(2), discover("changed").Generation)
-	assert.Equal(t, uint64(2), process.Generation())
-	assert.Equal(t, 2, process.discovers)
-	assert.False(t, process.closed)
+	_, err = discover("stale", 1)
+	require.EqualError(t, err, "source generation changed from 1 to 2; rediscover and retry")
+	manifest, err = discover("changed", 2)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), manifest.Generation)
+	require.Len(t, processes, 2)
+	assert.True(t, processes[0].closed.Load())
+	assert.Equal(t, uint64(2), processes[1].Generation())
+	assert.Equal(t, 1, processes[1].discovers)
+	assert.False(t, processes[1].closed.Load())
 }
 
 func TestSessionServiceDiscoveryFailureDiscardsWorker(t *testing.T) {
@@ -482,7 +887,7 @@ func TestSessionServiceDiscoveryFailureDiscardsWorker(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 	require.Eventually(t, func() bool { return service.WorkerCount() == 0 }, time.Second, time.Millisecond)
-	assert.True(t, process.closed)
+	assert.True(t, process.closed.Load())
 }
 
 func TestSessionServiceDiscoveryResetFailureDiscardsWorker(t *testing.T) {
@@ -502,7 +907,7 @@ func TestSessionServiceDiscoveryResetFailureDiscardsWorker(t *testing.T) {
 		ID: "discover", Method: "session.discover", Payload: payload,
 	}, nil)
 	require.EqualError(t, err, "reset worker after discovery: reset failed")
-	assert.True(t, process.closed)
+	assert.True(t, process.closed.Load())
 	assert.Zero(t, service.WorkerCount())
 }
 

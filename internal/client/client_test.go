@@ -77,10 +77,12 @@ func TestCallCancellationClosesConnection(t *testing.T) {
 
 	namespace, err := daemon.NewNamespace(shortTempDir(t), daemon.ProtocolVersion, "cancel-build")
 	require.NoError(t, err)
+	handlerCanceled := make(chan struct{})
 	server := &daemon.Server{
 		Namespace: namespace,
 		Handler: daemon.HandlerFunc(func(ctx context.Context, _ daemon.Request, _ daemon.EmitFunc) (any, error) {
 			<-ctx.Done()
+			close(handlerCanceled)
 			return nil, ctx.Err()
 		}),
 	}
@@ -99,6 +101,11 @@ func TestCallCancellationClosesConnection(t *testing.T) {
 	defer cancel()
 	_, err = client.Call(ctx, "test.wait", struct{}{}, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	select {
+	case <-handlerCanceled:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "client disconnect did not cancel daemon handler")
+	}
 	stopServer()
 	select {
 	case err := <-serverErrors:

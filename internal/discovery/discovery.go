@@ -197,18 +197,29 @@ func Select(manifest Manifest, selectors []string, allowEmpty bool) (Manifest, e
 	known := make([]bool, len(selectors))
 	for _, file := range manifest.Files {
 		out := model.FilePlan{Path: file.Path}
+		fileSelected := false
+		for index, selector := range selectors {
+			pathMatch := selector == file.Path || strings.HasPrefix(file.Path, strings.TrimSuffix(selector, "/")+"/")
+			globMatched, _ := path.Match(selector, file.Path)
+			if pathMatch || globMatched {
+				known[index] = true
+				fileSelected = true
+			}
+		}
 		for _, testCase := range file.Cases {
+			if fileSelected {
+				out.Cases = append(out.Cases, testCase)
+				continue
+			}
 			for index, selector := range selectors {
-				pathMatch := selector == file.Path || strings.HasPrefix(file.Path, strings.TrimSuffix(selector, "/")+"/")
-				globMatch, _ := path.Match(selector, file.Path)
-				if pathMatch || globMatch || selector == testCase.ID {
+				if selector == testCase.ID {
 					known[index] = true
 					out.Cases = append(out.Cases, testCase)
 					break
 				}
 			}
 		}
-		if len(out.Cases) > 0 {
+		if fileSelected || len(out.Cases) > 0 {
 			selected.Files = append(selected.Files, out)
 		}
 	}

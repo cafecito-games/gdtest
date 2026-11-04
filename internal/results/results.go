@@ -11,13 +11,16 @@ import (
 
 // CaseResult is one terminal case result plus its streamed diagnostics.
 type CaseResult struct {
-	ID       string        `json:"id"`
-	Name     string        `json:"name,omitempty"`
-	Status   string        `json:"status"`
-	File     string        `json:"file,omitempty"`
-	Line     int           `json:"line,omitempty"`
-	Failures []model.Event `json:"failures,omitempty"`
-	Output   []model.Event `json:"output,omitempty"`
+	ID         string          `json:"id"`
+	Name       string          `json:"name,omitempty"`
+	Status     string          `json:"status"`
+	File       string          `json:"file,omitempty"`
+	Line       int             `json:"line,omitempty"`
+	Failures   []model.Event   `json:"failures,omitempty"`
+	Output     []model.Event   `json:"output,omitempty"`
+	Assertions int             `json:"assertions,omitempty"`
+	Messages   []string        `json:"messages,omitempty"`
+	Outcomes   []model.Outcome `json:"outcomes,omitempty"`
 }
 
 // Summary is a deterministic folded run result.
@@ -44,10 +47,24 @@ type Collector struct {
 	ended          bool
 	infrastructure []model.Event
 	runStatus      string
+	preferred      map[string]int
 }
 
 // NewCollector creates an empty collector.
 func NewCollector() *Collector { return &Collector{cases: make(map[string]*CaseResult)} }
+
+// NewCollectorWithOrder creates a collector whose final cases follow the
+// selected manifest order even when files execute concurrently.
+func NewCollectorWithOrder(ids []string) *Collector {
+	collector := NewCollector()
+	collector.preferred = make(map[string]int, len(ids))
+	for index, id := range ids {
+		if _, exists := collector.preferred[id]; !exists {
+			collector.preferred[id] = index
+		}
+	}
+	return collector
+}
 
 // Emit folds one event.
 func (c *Collector) Emit(event model.Event) error {
@@ -74,6 +91,9 @@ func (c *Collector) Emit(event model.Event) error {
 	case model.EventCaseFinished:
 		result := c.ensureCase(event.TestID)
 		result.Status = event.Status
+		result.Assertions = event.Assertions
+		result.Messages = append([]string(nil), event.Messages...)
+		result.Outcomes = append([]model.Outcome(nil), event.Outcomes...)
 		if event.Name != "" {
 			result.Name = event.Name
 		}
@@ -100,12 +120,24 @@ func (c *Collector) ensureCase(id string) *CaseResult {
 	return result
 }
 
-// Summary returns cases sorted by stable ID, independent of execution order.
+// Summary returns cases in manifest/execution order.
 func (c *Collector) Summary() Summary {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ids := append([]string(nil), c.order...)
-	sort.Strings(ids)
+	if len(c.preferred) > 0 {
+		sort.SliceStable(ids, func(i, j int) bool {
+			left, leftKnown := c.preferred[ids[i]]
+			right, rightKnown := c.preferred[ids[j]]
+			if leftKnown != rightKnown {
+				return leftKnown
+			}
+			if leftKnown && left != right {
+				return left < right
+			}
+			return ids[i] < ids[j]
+		})
+	}
 	summary := Summary{
 		Cases: make([]CaseResult, 0, len(ids)), Stale: c.stale,
 		Infrastructure: append([]model.Event(nil), c.infrastructure...),
@@ -115,6 +147,8 @@ func (c *Collector) Summary() Summary {
 		result := *c.cases[id]
 		result.Failures = append([]model.Event(nil), result.Failures...)
 		result.Output = append([]model.Event(nil), result.Output...)
+		result.Messages = append([]string(nil), result.Messages...)
+		result.Outcomes = append([]model.Outcome(nil), result.Outcomes...)
 		summary.Cases = append(summary.Cases, result)
 		switch result.Status {
 		case "pass":

@@ -119,6 +119,26 @@ func TestBuildNormalizesAndContainsPaths(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSnapshotContentFingerprintIncludesEveryPathAndContent(t *testing.T) {
+	t.Parallel()
+
+	base := Snapshot{Files: map[string]FileState{
+		"project.godot": {Path: "project.godot", ContentDigest: "project-a"},
+		"tests/a.gd":    {Path: "tests/a.gd", ContentDigest: "script-a"},
+	}}
+	sameDifferentMapOrder := Snapshot{Files: map[string]FileState{
+		"tests/a.gd":    {Path: "tests/a.gd", ContentDigest: "script-a"},
+		"project.godot": {Path: "project.godot", ContentDigest: "project-a"},
+	}}
+	resourceChanged := Snapshot{Files: map[string]FileState{
+		"project.godot": {Path: "project.godot", ContentDigest: "project-b"},
+		"tests/a.gd":    {Path: "tests/a.gd", ContentDigest: "script-a"},
+	}}
+
+	assert.Equal(t, base.ContentFingerprint(), sameDifferentMapOrder.ContentFingerprint())
+	assert.NotEqual(t, base.ContentFingerprint(), resourceChanged.ContentFingerprint())
+}
+
 func snapshot(state FileState) Snapshot {
 	return Snapshot{Files: map[string]FileState{state.Path: state}}
 }

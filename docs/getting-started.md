@@ -27,12 +27,30 @@ Run everything or select one stable provider row:
 
 The default configuration discovers `**/*.test.gd`. Optional strict `gdtest.json` keys are `tests`, `exclude`, `godot`, `jobs`, `warm_workers`, `worker_idle_timeout`, `worker_max_runs`, and `only_mode`. Unknown keys fail. Focus policies are `auto`, `ignore`, `require`, and `forbid`, configurable in the file or per invocation with `--only`.
 
+User-wide resource policy lives in the operating system's user configuration directory as
+`gdtest/config.json` (for example, `~/Library/Application Support/gdtest/config.json` on macOS):
+
+```json
+{
+  "max_workers": 4,
+  "memory_budget_mb": 2048,
+  "worker_max_age": "30m",
+  "log_level": "info",
+  "godot": "godot"
+}
+```
+
+CLI flags take precedence over project and user configuration. `--godot` selects an executable,
+`--jobs 0` uses concurrency bounded by the daemon's global worker limit, and `--isolation` accepts
+`reuse`, `recycle`, `fresh`, or `exclusive`.
+
 Dynamic cases register in `suite()` with `test`, `test_each`, `define`, and their focused variants. Discovery executes registration and parameter providers but never case bodies or lifecycle hooks. Async callbacks and hooks may `await`; workers serialize a file's hooks and cases in source order.
 
 Useful commands:
 
 ```sh
 ./addons/gdtest/gdtest list tests/
+./addons/gdtest/gdtest run --jobs 2 --isolation fresh tests/
 ./addons/gdtest/gdtest watch tests/math.test.gd
 ./addons/gdtest/gdtest warm
 ./addons/gdtest/gdtest doctor

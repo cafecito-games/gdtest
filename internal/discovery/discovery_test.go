@@ -252,6 +252,8 @@ func TestParseValidatesTestAndHookContracts(t *testing.T) {
 		want   string
 	}{
 		{"test return", "func test_value() -> int:\n\treturn 1\n", "must return void"},
+		{"suite arguments", "func suite(value: int) -> void:\n\tpass\n", "suite must take no arguments"},
+		{"suite return", "func suite() -> int:\n\treturn 1\n", "suite must return void"},
 		{"hook arguments", "func before_all(case) -> void:\n\tpass\n", "must take 0 argument"},
 		{"hook return", "func after_case(case) -> bool:\n\treturn true\n", "must return void"},
 		{

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cafecito-games/gdtest/internal/discovery"
@@ -22,7 +23,7 @@ func TestCommonVestFixtureMigratesToGoldenAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, string(want), string(result.Output))
 	assert.Equal(t, []string{
 		"rewrite.base-class",
-		"rewrite.hook-type", "rewrite.utility",
+		"rewrite.hook-type",
 		"rewrite.hook-type", "rewrite.utility",
 		"rewrite.parameter-provider",
 		"rewrite.utility",
@@ -37,6 +38,69 @@ func TestCommonVestFixtureMigratesToGoldenAndIsIdempotent(t *testing.T) {
 	assert.False(t, again.Changed)
 	assert.Equal(t, result.Output, again.Output)
 	assert.Empty(t, again.Findings)
+}
+
+func TestVestMessageIsOnlyRewrittenInActiveCaseContexts(t *testing.T) {
+	t.Parallel()
+
+	source := []byte(`extends VestTest
+
+func suite() -> void:
+	Vest.message("discovery")
+
+func before_suite(_info: VestDefs.Suite) -> void:
+	Vest.message("suite")
+
+func before_case(_info: VestDefs.Case) -> void:
+	Vest.message("case hook")
+
+func test_message() -> void:
+	Vest.message("case")
+`)
+	result, err := Transform("tests/messages.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), `Vest.message("discovery")`)
+	assert.Contains(t, string(result.Output), `Vest.message("suite")`)
+	assert.Contains(t, string(result.Output), `message("case hook")`)
+	assert.Contains(t, string(result.Output), `message("case")`)
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.message-context",
+		"rewrite.hook-type", "unsupported.message-context",
+		"rewrite.hook-type", "rewrite.utility",
+		"rewrite.utility",
+	}, findingCodes(result.Findings))
+}
+
+func TestContextualFluentAssertionsProduceManualFindingsWithoutRewrites(t *testing.T) {
+	t.Parallel()
+
+	source := []byte(`extends VestTest
+
+func consume(_value: Variant) -> void:
+	pass
+
+func helper() -> Variant:
+	return assert_that(1).is_equal_to(1)
+
+func test_contexts() -> void:
+	var saved: Variant = assert_that(2).is_not_null()
+	consume(assert_that(3).is_true())
+`)
+	result, err := Transform("tests/contextual.test.gd", source)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Replace(string(source), "extends VestTest", "extends GDTest", 1), string(result.Output))
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.fluent-assertion-context",
+		"unsupported.fluent-assertion-context",
+		"unsupported.fluent-assertion-context",
+	}, findingCodes(result.Findings))
+	for _, finding := range result.Findings[1:] {
+		assert.Equal(t, Warning, finding.Severity)
+		assert.Positive(t, finding.Line)
+		assert.Positive(t, finding.Column)
+	}
 }
 
 func TestParameterProviderWrappersSatisfyDiscoveryReturnContract(t *testing.T) {

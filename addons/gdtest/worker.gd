@@ -848,7 +848,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 				"status": status,
 				"assertions": int(result.get("assertions", 0)),
 				"messages": result.get("messages", []),
-				"outcomes": result.get("outcomes", []),
+				"outcomes": Protocol.wire_outcomes(result.get("outcomes", [])),
 				"duration_ns": (Time.get_ticks_usec() - started_usec) * 1000,
 			}
 	)

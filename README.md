@@ -21,7 +21,7 @@ Commit `addons.toml` and `addons.lock`; do not commit `.gpm-state.toml`. Run the
 ./addons/gdtest/gdtest run
 ```
 
-On Windows use `addons\gdtest\gdtest.cmd run`. CI and disposable worktrees can use `gpm install --host-only`; ordinary CI installation always uses `gpm install`, never `gpm update`.
+CI and disposable worktrees can use `gpm install --host-only`; ordinary CI installation always uses `gpm install`, never `gpm update`. Windows release slices are intentionally deferred until the user-level daemon has a validated Windows transport and Windows CI coverage; the current release set is macOS and Linux arm64/x86_64.
 
 The `--host-tool` capability was implemented for gpm on branch `feat/host-tool-platforms`, commit `80a6244`; use a gpm release containing that change. With an older gpm, add the equivalent manifest entry and run `gpm install`:
 

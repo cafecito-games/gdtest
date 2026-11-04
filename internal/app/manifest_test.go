@@ -28,6 +28,25 @@ func TestDiscoveryCandidatesResolveDynamicStableIDToOwningFile(t *testing.T) {
 	assert.Equal(t, "tests/alpha.test.gd", selected.Files[0].Path)
 }
 
+func TestDiscoveryCandidatesRetainDynamicOnlyOwnerFile(t *testing.T) {
+	t.Parallel()
+	manifest := discovery.Manifest{Files: []model.FilePlan{
+		{Path: "tests/dynamic_only.test.gd"},
+		{Path: "tests/static.test.gd", Cases: []model.CasePlan{{ID: "tests/static.test.gd::test_static"}}},
+	}}
+
+	selected, err := discoveryCandidates(
+		manifest,
+		[]string{"tests/dynamic_only.test.gd::dynamic@3:0[generated]"},
+		false,
+	)
+
+	require.NoError(t, err)
+	require.Len(t, selected.Files, 1)
+	assert.Equal(t, "tests/dynamic_only.test.gd", selected.Files[0].Path)
+	assert.Empty(t, selected.Files[0].Cases)
+}
+
 func TestSelectCompletedManifestSupportsDynamicIDsNamesAndAffectedIntersection(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

@@ -113,6 +113,21 @@ func inspectScript(relative string, source []byte, tree *ast.File, enforceContra
 	for _, function := range functions {
 		location := sourceLocation(cleanPath, function.NameSpan)
 		script.metadata.Methods = append(script.metadata.Methods, Symbol{Name: function.Name, Location: location})
+		if function.Name == "suite" && enforceContracts {
+			if len(function.Parameters) != 0 {
+				return parsedScript{}, fmt.Errorf(
+					"discover %s:%d:%d: suite must take no arguments",
+					cleanPath, function.NameSpan.Start.Line, function.NameSpan.Start.Column,
+				)
+			}
+			if function.ReturnType != "" && function.ReturnType != "void" {
+				return parsedScript{}, fmt.Errorf(
+					"discover %s:%d:%d: suite must return void, got %s",
+					cleanPath, function.NameSpan.Start.Line, function.NameSpan.Start.Column,
+					function.ReturnType,
+				)
+			}
+		}
 		if hookNames[function.Name] {
 			if err := validateHook(cleanPath, function); enforceContracts && err != nil {
 				return parsedScript{}, err

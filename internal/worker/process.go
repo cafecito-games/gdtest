@@ -38,11 +38,12 @@ type ProcessOptions struct {
 // Process is one authenticated, persistent Godot worker. Operations other than
 // Cancel are serialized because the worker executes at most one command at a time.
 type Process struct {
-	options ProcessOptions
-	project string
-	cmd     *exec.Cmd
-	conn    net.Conn
-	encoder *protocol.Encoder
+	options  ProcessOptions
+	project  string
+	workerID string
+	cmd      *exec.Cmd
+	conn     net.Conn
+	encoder  *protocol.Encoder
 
 	opMu       sync.Mutex
 	writeMu    sync.Mutex
@@ -51,6 +52,12 @@ type Process struct {
 	runID      string
 	lastCase   string
 	generation uint64
+	sequence   uint64
+
+	outputMu       sync.Mutex
+	capturedOutput []model.Event
+	capturedBytes  int
+	outputDropped  bool
 
 	messages    chan processMessage
 	processDone chan struct{}
@@ -203,7 +210,7 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		}
 	}
 	p := &Process{
-		options: options, project: project, cmd: command,
+		options: options, project: project, workerID: workerID, cmd: command,
 		generation: options.Generation,
 		messages:   make(chan processMessage, 256), processDone: make(chan struct{}),
 	}
@@ -218,8 +225,14 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 	if options.Stderr != nil {
 		stderrDestination = options.Stderr
 	}
-	stdout := &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stdoutDestination, stdoutTail)}
-	stderr := &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stderrDestination, stderrTail)}
+	stdout := &processOutputWriter{
+		process: p, stream: "stdout",
+		writer: &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stdoutDestination, stdoutTail)},
+	}
+	stderr := &processOutputWriter{
+		process: p, stream: "stderr",
+		writer: &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stderrDestination, stderrTail)},
+	}
 	p.outputWait.Add(2)
 	go drainOutput(&p.outputWait, stdout, stdoutPipe)
 	go drainOutput(&p.outputWait, stderr, stderrPipe)
@@ -251,12 +264,29 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		)
 	}
 	decoder := protocol.NewDecoder(connection, protocol.DefaultMaxMessageSize)
-	if err := verifyHandshake(decoder, token, project, options.SessionID, options.Generation); err != nil {
+	if err := verifyHandshake(decoder, token, project, options.SessionID, workerID, options.Generation); err != nil {
 		p.killAndWait()
 		return nil, startupFailure(
 			"authenticated handshake", err, stdoutTail, stderrTail, true, options, project,
 		)
 	}
+	var readyMessage protocol.Envelope
+	if err := decoder.Decode(&readyMessage); err != nil {
+		p.killAndWait()
+		return nil, startupFailure(
+			"worker readiness", fmt.Errorf("read worker-ready event: %w", err),
+			stdoutTail, stderrTail, true, options, project,
+		)
+	}
+	readyEvent, err := p.decodeEvent(readyMessage)
+	if err != nil || readyEvent.Type != model.EventWorkerReady {
+		p.killAndWait()
+		if err == nil {
+			err = fmt.Errorf("expected worker_ready event, got %q", readyEvent.Type)
+		}
+		return nil, startupFailure("worker readiness", err, stdoutTail, stderrTail, true, options, project)
+	}
+	p.sequence = 0
 	if err := connection.SetDeadline(time.Time{}); err != nil {
 		p.killAndWait()
 		return nil, startupFailure(
@@ -405,6 +435,10 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 	if sink == nil {
 		return errors.New("worker event sink is required")
 	}
+	if err := validateWorkerPlan(plan); err != nil {
+		return err
+	}
+	p.sequence = 0
 	if plan.Generation != p.Generation() {
 		return fmt.Errorf("plan generation %d does not match worker generation %d", plan.Generation, p.Generation())
 	}
@@ -416,6 +450,7 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 	p.runID = plan.RunID
 	p.lastCase = ""
 	p.stateMu.Unlock()
+	p.clearCapturedOutput()
 	defer func() {
 		p.stateMu.Lock()
 		p.runID = ""
@@ -461,7 +496,7 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 		if message.Type != "event" {
 			return fmt.Errorf("unexpected worker message type %q during run", message.Type)
 		}
-		event, err := decodeProcessEvent(message)
+		event, err := p.decodeEvent(message)
 		if err != nil {
 			return err
 		}
@@ -473,9 +508,21 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 			p.lastCase = event.TestID
 			p.stateMu.Unlock()
 		}
+		if event.Type == model.EventRunFinished {
+			if err := p.emitCapturedOutput(sink); err != nil {
+				p.killAndWait()
+				return err
+			}
+		}
 		if err := sink.Emit(event); err != nil {
 			p.killAndWait()
 			return err
+		}
+		if event.Type != model.EventRunFinished {
+			if err := p.emitCapturedOutput(sink); err != nil {
+				p.killAndWait()
+				return err
+			}
 		}
 		if event.Type == model.EventWorkerError {
 			if !recoverableRunDiagnostic(event) {
@@ -511,6 +558,10 @@ func recoverableRunDiagnostic(event model.Event) bool {
 func (p *Process) Discover(ctx context.Context, plan model.TestPlan) (model.DiscoveryManifest, error) {
 	p.opMu.Lock()
 	defer p.opMu.Unlock()
+	if err := validateWorkerPlan(plan); err != nil {
+		return model.DiscoveryManifest{}, err
+	}
+	p.sequence = 0
 	if plan.Generation != p.Generation() {
 		return model.DiscoveryManifest{}, fmt.Errorf(
 			"discovery plan generation %d does not match worker generation %d",
@@ -550,7 +601,7 @@ func (p *Process) Discover(ctx context.Context, plan model.TestPlan) (model.Disc
 			return model.DiscoveryManifest{}, p.crashError(receiveErr)
 		}
 		if message.Type == "event" {
-			event, decodeErr := decodeProcessEvent(message)
+			event, decodeErr := p.decodeEvent(message)
 			if decodeErr != nil {
 				return model.DiscoveryManifest{}, decodeErr
 			}
@@ -729,7 +780,7 @@ func (p *Process) simpleCommand(ctx context.Context, commandType, responseType s
 			return p.crashError(err)
 		}
 		if message.Type == "event" {
-			event, decodeErr := decodeProcessEvent(message)
+			event, decodeErr := p.decodeEvent(message)
 			if decodeErr != nil {
 				return decodeErr
 			}
@@ -816,11 +867,18 @@ func (p *Process) killAndWait() {
 	p.outputWait.Wait()
 }
 
-func decodeProcessEvent(message protocol.Envelope) (model.Event, error) {
+func (p *Process) decodeEvent(message protocol.Envelope) (model.Event, error) {
+	if message.Type != "event" {
+		return model.Event{}, fmt.Errorf("expected worker event, got %q", message.Type)
+	}
 	var wireEvent struct {
-		Kind  model.EventType `json:"kind"`
-		RunID string          `json:"run_id"`
-		Data  model.Event     `json:"data"`
+		Kind       model.EventType `json:"kind"`
+		WorkerID   string          `json:"worker_id"`
+		SessionID  string          `json:"session_id"`
+		Generation uint64          `json:"generation"`
+		RunID      string          `json:"run_id"`
+		Sequence   uint64          `json:"sequence"`
+		Data       model.Event     `json:"data"`
 	}
 	if err := json.Unmarshal(message.Payload, &wireEvent); err != nil {
 		return model.Event{}, fmt.Errorf("decode worker event: %w", err)
@@ -828,9 +886,127 @@ func decodeProcessEvent(message protocol.Envelope) (model.Event, error) {
 	if wireEvent.Kind == "" {
 		return model.Event{}, errors.New("worker event has no kind")
 	}
+	if wireEvent.WorkerID != p.workerID || wireEvent.SessionID != p.options.SessionID {
+		return model.Event{}, errors.New("worker event identity does not match authenticated worker")
+	}
+	if wireEvent.Generation != p.Generation() {
+		return model.Event{}, fmt.Errorf(
+			"worker event generation %d does not match %d",
+			wireEvent.Generation,
+			p.Generation(),
+		)
+	}
+	if wireEvent.Sequence != p.sequence+1 {
+		return model.Event{}, fmt.Errorf(
+			"worker event sequence %d does not follow %d",
+			wireEvent.Sequence,
+			p.sequence,
+		)
+	}
+	p.sequence = wireEvent.Sequence
 	event := wireEvent.Data
 	event.ProtocolVersion = model.ProtocolVersion
 	event.Type = wireEvent.Kind
 	event.RunID = wireEvent.RunID
 	return event, nil
+}
+
+func validateWorkerPlan(plan model.TestPlan) error {
+	if plan.ProtocolVersion != model.ProtocolVersion {
+		return fmt.Errorf(
+			"test plan protocol %d does not match %d",
+			plan.ProtocolVersion,
+			model.ProtocolVersion,
+		)
+	}
+	if plan.RunID == "" || plan.Generation == 0 {
+		return errors.New("test plan needs a run ID and positive generation")
+	}
+	for _, file := range plan.Files {
+		if !validManifestPath(file.Path) {
+			return fmt.Errorf("test plan has invalid project-relative path %q", file.Path)
+		}
+	}
+	return nil
+}
+
+const maxCapturedOutputBytes = 1 << 20
+
+type processOutputWriter struct {
+	process *Process
+	stream  string
+	writer  io.Writer
+}
+
+func (w *processOutputWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	if written > 0 {
+		w.process.captureOutput(w.stream, data[:written])
+	}
+	return written, err
+}
+
+func (p *Process) captureOutput(stream string, data []byte) {
+	p.stateMu.Lock()
+	runID := p.runID
+	p.stateMu.Unlock()
+	if runID == "" || len(data) == 0 {
+		return
+	}
+	p.outputMu.Lock()
+	defer p.outputMu.Unlock()
+	remaining := maxCapturedOutputBytes - p.capturedBytes
+	if remaining <= 0 {
+		p.outputDropped = true
+		return
+	}
+	if len(data) > remaining {
+		data = data[:remaining]
+		p.outputDropped = true
+	}
+	text := string(append([]byte(nil), data...))
+	p.capturedOutput = append(p.capturedOutput, model.Event{
+		ProtocolVersion: model.ProtocolVersion,
+		Type:            model.EventOutput,
+		RunID:           runID,
+		Message:         text,
+		Metadata:        map[string]any{"stream": stream},
+	})
+	p.capturedBytes += len(data)
+}
+
+func (p *Process) clearCapturedOutput() {
+	p.outputMu.Lock()
+	p.capturedOutput = nil
+	p.capturedBytes = 0
+	p.outputDropped = false
+	p.outputMu.Unlock()
+}
+
+func (p *Process) emitCapturedOutput(sink executor.EventSink) error {
+	p.outputMu.Lock()
+	events := p.capturedOutput
+	dropped := p.outputDropped
+	p.capturedOutput = nil
+	p.capturedBytes = 0
+	p.outputDropped = false
+	p.outputMu.Unlock()
+	for _, event := range events {
+		if err := sink.Emit(event); err != nil {
+			return err
+		}
+	}
+	if dropped {
+		p.stateMu.Lock()
+		runID := p.runID
+		p.stateMu.Unlock()
+		return sink.Emit(model.Event{
+			ProtocolVersion: model.ProtocolVersion,
+			Type:            model.EventOutput,
+			RunID:           runID,
+			Message:         "gdtest truncated worker output after 1048576 bytes",
+			Metadata:        map[string]any{"truncated": true},
+		})
+	}
+	return nil
 }

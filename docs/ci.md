@@ -9,12 +9,9 @@ gpm install --host-only
 ./addons/gdtest/gdtest run --json | tee gdtest-results.jsonl
 ```
 
-Minimal Windows job:
-
-```powershell
-gpm install --host-only
-addons\gdtest\gdtest.cmd run --json | Tee-Object gdtest-results.jsonl
-```
+Windows release/CI support is deferred until gdtest has a validated native
+user-level daemon transport and a Windows CI runner. The package index does not
+advertise Windows executable slices in the meantime.
 
 `--host-only` materializes mandatory core and the implicit current-host executable. It does not alter the byte-identical lockfile. A normal install is also valid because the gdtest addon entry carries `platforms = []`.
 

@@ -58,6 +58,30 @@ func TestGlobalBoundAndUniqueSlots(t *testing.T) {
 	assert.Equal(t, 2, scheduler.Stats().PeakActive)
 }
 
+func TestIsolationNamesRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		want Isolation
+	}{
+		{name: "", want: Reuse},
+		{name: "reuse", want: Reuse},
+		{name: "recycle", want: Recycle},
+		{name: "fresh", want: Fresh},
+		{name: "exclusive", want: Exclusive},
+	} {
+		actual, err := ParseIsolation(test.name)
+		require.NoError(t, err)
+		assert.Equal(t, test.want, actual)
+		assert.Equal(t, test.want.String(), actual.String())
+	}
+
+	_, err := ParseIsolation("shared")
+	require.EqualError(t, err, `isolation "shared" must be reuse, recycle, fresh, or exclusive`)
+	assert.Equal(t, "isolation(99)", Isolation(99).String())
+}
+
 func TestManySessionsNeverExceedGlobalBound(t *testing.T) {
 	t.Parallel()
 	scheduler := newTestScheduler(t, Options{Capacity: 4})
@@ -99,6 +123,32 @@ func TestManySessionsNeverExceedGlobalBound(t *testing.T) {
 	}
 	assert.Equal(t, int32(4), peak.Load())
 	assert.Equal(t, 4, scheduler.Stats().PeakActive)
+}
+
+func TestOneSessionCanUseMultipleFileLevelSlots(t *testing.T) {
+	t.Parallel()
+	scheduler := newTestScheduler(t, Options{Capacity: 2})
+
+	started := make(chan int, 2)
+	release := make(chan struct{})
+	futures := make([]Future, 0, 2)
+	for range 2 {
+		futures = append(futures, scheduler.Submit(context.Background(), Request{
+			Session: "project", Generation: 1, Priority: Interactive,
+			Run: func(_ context.Context, lease Lease) error {
+				started <- lease.Slot
+				<-release
+				return nil
+			},
+		}))
+	}
+	first := receiveInt(t, started)
+	second := receiveInt(t, started)
+	assert.NotEqual(t, first, second)
+	close(release)
+	for _, future := range futures {
+		require.NoError(t, waitResult(t, future).Err)
+	}
 }
 
 func TestBackgroundWorkIsCappedWithoutBlockingInteractiveSlots(t *testing.T) {
@@ -352,5 +402,16 @@ func waitSignal(t *testing.T, signal <-chan struct{}) {
 	case <-signal:
 	case <-time.After(2 * time.Second):
 		require.FailNow(t, "timed out waiting for signal")
+	}
+}
+
+func receiveInt(t *testing.T, values <-chan int) int {
+	t.Helper()
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "timed out waiting for integer")
+		return 0
 	}
 }

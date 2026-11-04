@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 )
 
@@ -52,12 +51,11 @@ type Project struct {
 
 // Defaults returns the conventional, conservative project policy.
 func Defaults() Project {
-	jobs := min(runtime.NumCPU(), 4)
 	return Project{
 		Tests:             []string{"**/*.test.gd"},
 		Exclude:           []string{".godot/**"},
 		Godot:             "godot",
-		Jobs:              jobs,
+		Jobs:              0,
 		WarmWorkers:       1,
 		WorkerIdleTimeout: Duration(2 * time.Minute),
 		WorkerMaxRuns:     100,
@@ -67,15 +65,26 @@ func Defaults() Project {
 
 // Load reads gdtest.json from root, returning defaults when it does not exist.
 func Load(root string) (Project, error) {
+	return loadProject(root, Defaults())
+}
+
+// LoadWithUser reads project configuration over user-level defaults.
+func LoadWithUser(root string, user User) (Project, error) {
+	defaults := Defaults()
+	defaults.Godot = user.Godot
+	return loadProject(root, defaults)
+}
+
+func loadProject(root string, defaults Project) (Project, error) {
 	path := filepath.Join(root, Filename)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return Defaults(), nil
+		return defaults, nil
 	}
 	if err != nil {
 		return Project{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	config := Defaults()
+	config := defaults
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&config); err != nil {

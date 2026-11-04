@@ -12,5 +12,3 @@ version = "0.0.0"
 "macos.x86_64" = ["bin/macos-x86_64/gdtest"]
 "linux.arm64" = ["bin/linux-arm64/gdtest"]
 "linux.x86_64" = ["bin/linux-x86_64/gdtest"]
-"windows.arm64" = ["bin/windows-arm64/gdtest.exe"]
-"windows.x86_64" = ["bin/windows-x86_64/gdtest.exe"]

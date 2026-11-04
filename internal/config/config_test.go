@@ -40,3 +40,21 @@ func TestLoadAppliesProjectValuesOverDefaults(t *testing.T) {
 	assert.Equal(t, "custom-godot", config.Godot)
 	assert.Equal(t, 3*time.Second, time.Duration(config.WorkerIdleTimeout))
 }
+
+func TestLoadWithUserAppliesUserGodotUnlessProjectOverridesIt(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	user := UserDefaults()
+	user.Godot = "user-godot"
+	loaded, err := LoadWithUser(root, user)
+	require.NoError(t, err)
+	assert.Equal(t, "user-godot", loaded.Godot)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, Filename), []byte(`{"godot":"project-godot"}`), 0o600,
+	))
+	loaded, err = LoadWithUser(root, user)
+	require.NoError(t, err)
+	assert.Equal(t, "project-godot", loaded.Godot)
+}

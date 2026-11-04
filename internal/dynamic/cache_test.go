@@ -71,11 +71,12 @@ func TestKeyIncludesEveryCompatibilityInput(t *testing.T) {
 	base := testIdentity()
 	want, err := Key(base)
 	require.NoError(t, err)
-	variants := []Identity{base, base, base, base}
+	variants := []Identity{base, base, base, base, base}
 	variants[0].RuntimeVersion = "runtime-b"
 	variants[1].GodotIdentity = "godot-b"
 	variants[2].Configuration = []byte("config-b")
 	variants[3].ContentFingerprint = "content-b"
+	variants[4].InputFingerprint = "inputs-b"
 	for _, variant := range variants {
 		got, keyErr := Key(variant)
 		require.NoError(t, keyErr)
@@ -121,6 +122,7 @@ func testIdentity() Identity {
 	return Identity{
 		ToolVersion: "tool-a", RuntimeVersion: "runtime-a", GodotIdentity: "godot-a",
 		Configuration: []byte("config-a"), ContentFingerprint: "content-a", Generation: 1,
+		InputFingerprint: "inputs-a",
 	}
 }
 

@@ -45,7 +45,7 @@ func TestGodotDynamicDiscoveryAndExactExecution(t *testing.T) {
 	identity := dynamic.Identity{
 		ToolVersion: "test-build", RuntimeVersion: "test-runtime", GodotIdentity: "godot-test",
 		Configuration: []byte(`{"only_mode":"auto"}`), ContentFingerprint: plan.ContentFingerprint,
-		Generation: plan.Generation,
+		InputFingerprint: "fixture-inputs", Generation: plan.Generation,
 	}
 	computed := 0
 	manifest, hit, err := dynamic.LoadOrCompute(ctx, store, identity, func(computeCtx context.Context) (model.DiscoveryManifest, error) {
@@ -66,6 +66,22 @@ func TestGodotDynamicDiscoveryAndExactExecution(t *testing.T) {
 	assert.Contains(t, dynamicID, "::dynamic@")
 	assert.Equal(t, "async case", manifest.Files[0].Cases[0].Name)
 	assert.NotEmpty(t, manifest.Files[0].Cases[0].Suites)
+	caseByName := make(map[string]model.DiscoveryCase)
+	for _, testCase := range manifest.Files[0].Cases {
+		caseByName[testCase.Name] = testCase
+	}
+	require.Contains(t, caseByName, "slow child")
+	require.Contains(t, caseByName, "fast child")
+	require.Len(t, caseByName["slow child"].Suites, 1)
+	require.Len(t, caseByName["fast child"].Suites, 1)
+	assert.Equal(t, "slow sibling", caseByName["slow child"].Suites[0].Name)
+	assert.Equal(t, "fast sibling", caseByName["fast child"].Suites[0].Name)
+	require.Contains(t, caseByName, "first duplicate")
+	require.Contains(t, caseByName, "second duplicate")
+	assert.NotEqual(
+		t, caseByName["first duplicate"].Suites[0].ID,
+		caseByName["second duplicate"].Suites[0].ID,
+	)
 	assert.NotContains(t, dynamicID, root)
 	assert.Equal(t, "api-content", manifest.ContentFingerprint)
 	copyRoot := copyGodotProject(t, root)
@@ -178,7 +194,7 @@ func TestGodotDynamicDiscoveryAndExactExecution(t *testing.T) {
 
 	invalid := parseFixture(t, root, "fixtures/godot/api/discovery_invalid.test.gd")
 	invalidManifest, err := process.Discover(ctx, model.TestPlan{
-		ProtocolVersion: model.ProtocolVersion, Generation: 1,
+		ProtocolVersion: model.ProtocolVersion, RunID: "invalid-discovery", Generation: 1,
 		ContentFingerprint: "invalid-content", Files: []model.FilePlan{invalid},
 	})
 	require.NoError(t, err)
@@ -191,6 +207,59 @@ func TestGodotDynamicDiscoveryAndExactExecution(t *testing.T) {
 		invalidMessages = append(invalidMessages, discoveryError.Message)
 	}
 	assert.Contains(t, invalidMessages, "expect is only valid while a case is executing")
+}
+
+func TestGodotOutcomeMessagesCrossTheProtocolBoundary(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot outcome test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	file := parseFixture(t, root, "fixtures/godot/api/outcomes.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "outcome-messages", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "outcomes", Generation: 1,
+		ContentFingerprint: "outcome-content", Files: []model.FilePlan{file},
+	}
+	manifest, err := process.Discover(ctx, plan)
+	require.NoError(t, err)
+	for _, testCase := range manifest.Files[0].Cases {
+		plan.SelectedIDs = append(plan.SelectedIDs, testCase.ID)
+	}
+	plan.SelectionApplied = true
+	require.NoError(t, process.Reset(ctx))
+
+	finished := make(map[string]model.Event)
+	var outputEvents []model.Event
+	err = process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		if event.Type == model.EventCaseFinished {
+			finished[event.TestID] = event
+		}
+		if event.Type == model.EventOutput && strings.Contains(event.Message, "gdtest-output-marker") {
+			outputEvents = append(outputEvents, event)
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+
+	skip := finished["fixtures/godot/api/outcomes.test.gd::test_skip_outcome"]
+	assert.Equal(t, "skip", skip.Status)
+	require.Len(t, skip.Outcomes, 1)
+	assert.Equal(t, "skip", skip.Outcomes[0].Kind)
+	assert.Equal(t, "not available", skip.Outcomes[0].Message)
+	assert.Equal(t, "dictionary", skip.Outcomes[0].Data.Type)
+	void := finished["fixtures/godot/api/outcomes.test.gd::test_void_outcome"]
+	assert.Equal(t, "void", void.Status)
+	assert.Equal(t, []string{"void remains observable"}, void.Messages)
+	require.NotEmpty(t, outputEvents)
+	assert.Empty(t, outputEvents[0].TestID)
+	assert.Equal(t, "outcomes", outputEvents[0].RunID)
 }
 
 func run(

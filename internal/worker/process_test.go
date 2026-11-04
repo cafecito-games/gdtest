@@ -44,6 +44,26 @@ func TestPersistentProcessReusesOneChild(t *testing.T) {
 	shutdownProcess(t, process)
 }
 
+func TestPersistentProcessCapturesRunEngineOutput(t *testing.T) {
+	t.Parallel()
+	process := startHelperProcess(t, 1)
+	defer shutdownProcess(t, process)
+
+	var outputs []model.Event
+	err := process.Run(context.Background(), helperPlan("output", 1), executor.EventSinkFunc(func(event model.Event) error {
+		if event.Type == model.EventOutput {
+			outputs = append(outputs, event)
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	require.NotEmpty(t, outputs)
+	assert.Contains(t, outputs[0].Message, "captured worker output")
+	assert.Empty(t, outputs[0].TestID)
+	assert.Equal(t, "output", outputs[0].RunID)
+	assert.Equal(t, "stdout", outputs[0].Metadata["stream"])
+}
+
 func TestPersistentProcessDiscoversSerializableManifest(t *testing.T) {
 	t.Parallel()
 	process := startHelperProcess(t, 3)
@@ -213,9 +233,12 @@ func TestGDTestWorkerHelper(t *testing.T) {
 	generation, _ := strconv.ParseUint(arguments["--gdtest-generation"], 10, 64)
 	hello, _ := json.Marshal(handshake{
 		RuntimeVersion: version.Product,
+		WorkerID:       arguments["--gdtest-worker-id"],
 		ProjectPath:    arguments["--path"],
 		SessionID:      arguments["--gdtest-session"],
 		Generation:     generation,
+		GodotVersion:   testGodotVersion(),
+		Capabilities:   testCapabilities(),
 	})
 	_ = encoder.Encode(protocol.Envelope{
 		Version: protocol.Version, Type: "hello",
@@ -225,11 +248,18 @@ func TestGDTestWorkerHelper(t *testing.T) {
 	sendEvent := func(runID string, kind model.EventType, data model.Event) {
 		sequence++
 		payload, _ := json.Marshal(struct {
-			Kind     model.EventType `json:"kind"`
-			RunID    string          `json:"run_id"`
-			Sequence uint64          `json:"sequence"`
-			Data     model.Event     `json:"data"`
-		}{Kind: kind, RunID: runID, Sequence: sequence, Data: data})
+			Kind       model.EventType `json:"kind"`
+			WorkerID   string          `json:"worker_id"`
+			SessionID  string          `json:"session_id"`
+			Generation uint64          `json:"generation"`
+			RunID      string          `json:"run_id"`
+			Sequence   uint64          `json:"sequence"`
+			Data       model.Event     `json:"data"`
+		}{
+			Kind: kind, WorkerID: arguments["--gdtest-worker-id"],
+			SessionID: arguments["--gdtest-session"], Generation: generation,
+			RunID: runID, Sequence: sequence, Data: data,
+		})
 		_ = encoder.Encode(protocol.Envelope{Version: protocol.Version, Type: "event", Payload: payload})
 	}
 	sendEvent("", model.EventWorkerReady, model.Event{})
@@ -278,6 +308,10 @@ func TestGDTestWorkerHelper(t *testing.T) {
 			sequence = 0
 			sendEvent(activeRun, model.EventRunStarted, model.Event{})
 			sendEvent(activeRun, model.EventCaseStarted, model.Event{TestID: "case-" + activeRun})
+			if activeRun == "output" {
+				_, _ = fmt.Fprintln(os.Stdout, "captured worker output")
+				time.Sleep(10 * time.Millisecond)
+			}
 			if activeRun == "crash" {
 				_ = connection.Close()
 				os.Exit(23)

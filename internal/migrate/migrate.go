@@ -289,6 +289,7 @@ func providerReturnTypeAllowed(value string) bool {
 }
 
 func (t *transformer) fluentAssertions(tree *ast.File) {
+	standalone := make([]token.Span, 0)
 	ast.Inspect(tree, func(node ast.Node) bool {
 		statement, ok := node.(*ast.ExpressionStatement)
 		if !ok {
@@ -298,6 +299,7 @@ func (t *transformer) fluentAssertions(tree *ast.File) {
 		if !ok {
 			return true
 		}
+		standalone = append(standalone, statement.Expression.Span())
 		if len(chain.matchers) != 1 {
 			t.manual(statement.Expression.Span(), "unsupported.fluent-assertion", "fluent assertion chains with multiple matchers require manual conversion")
 			return false
@@ -315,6 +317,54 @@ func (t *transformer) fluentAssertions(tree *ast.File) {
 		t.rewrite(statement.Expression.Span(), target+"("+strings.Join(parts, ", ")+")", "rewrite.fluent-assertion", "replace simple fluent assertion with direct assertion")
 		return false
 	})
+
+	// A fluent chain is only safely replaceable as a standalone expression.
+	// When it contributes a value to a return, assignment, argument, or larger
+	// expression, retain it and require a human to preserve the surrounding
+	// semantics. Inspecting call roots also catches bare assert_that(...).
+	contextual := make([]token.Span, 0)
+	ast.Inspect(tree, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpression)
+		if !ok {
+			return true
+		}
+		if _, fluent := parseFluent(call); !fluent {
+			return true
+		}
+		span := call.Span()
+		for _, safe := range standalone {
+			if spanContains(safe, span) {
+				return false
+			}
+		}
+		contextual = append(contextual, span)
+		return true
+	})
+	sort.Slice(contextual, func(i, j int) bool {
+		if contextual[i].Start.Offset != contextual[j].Start.Offset {
+			return contextual[i].Start.Offset < contextual[j].Start.Offset
+		}
+		return contextual[i].End.Offset > contextual[j].End.Offset
+	})
+	outer := make([]token.Span, 0, len(contextual))
+	for _, span := range contextual {
+		covered := false
+		for _, existing := range outer {
+			if spanContains(existing, span) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		outer = append(outer, span)
+		t.manual(
+			span,
+			"unsupported.fluent-assertion-context",
+			"fluent assertions used as values require manual conversion",
+		)
+	}
 }
 
 func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
@@ -328,7 +378,17 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 			if member, ok := value.Callee.(*ast.MemberExpression); ok {
 				if object, ok := member.Object.(*ast.Identifier); ok && object.Name == "Vest" {
 					switch member.Property {
-					case "message", "get_tree", "sleep", "until":
+					case "message":
+						if t.messageContextIsSafe(value.Span()) {
+							t.rewrite(member.Span(), member.Property, "rewrite.utility", "remove Vest singleton qualifier")
+						} else {
+							t.manualOnce(
+								value.Span(),
+								"unsupported.message-context",
+								"Vest.message outside a test case requires manual migration",
+							)
+						}
+					case "get_tree", "sleep", "until":
 						t.rewrite(member.Span(), member.Property, "rewrite.utility", "remove Vest singleton qualifier")
 					case "timeout":
 						t.manualOnce(value.Span(), "unsupported.timeout", "Vest.timeout has no gdtest v1 equivalent")
@@ -370,6 +430,22 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 		}
 		return true
 	})
+}
+
+func (t *transformer) messageContextIsSafe(span token.Span) bool {
+	for _, function := range t.functions {
+		if !spanContains(function.Span(), span) {
+			continue
+		}
+		return strings.HasPrefix(function.Name, "test_") ||
+			function.Name == "before_case" || function.Name == "after_case" ||
+			function.Name == "before_each" || function.Name == "after_each"
+	}
+	return false
+}
+
+func spanContains(outer, inner token.Span) bool {
+	return outer.Start.Offset <= inner.Start.Offset && outer.End.Offset >= inner.End.Offset
 }
 
 type fluentChain struct {

@@ -11,7 +11,7 @@ The released gpm version did not expose an atomic add operation that wrote an ex
 
 ## Decision
 
-Release packages contain a binary-free mandatory core and six architecture slices: macOS arm64/x86_64, Linux arm64/x86_64, and Windows arm64/x86_64. Packaging always happens from a temporary staged addon tree. The release version is injected into both the Go binary and `version.gd`; authenticated handshakes reject a mismatch.
+Release packages contain a binary-free mandatory core and four validated architecture slices: macOS arm64/x86_64 and Linux arm64/x86_64. Windows slices are deferred until a native user-level daemon transport and Windows CI can be validated; publishing cross-compiled binaries whose default daemon mode is known not to work would violate the isolation contract. Packaging always happens from a temporary staged addon tree. The release version is injected into both the Go binary and `version.gd`; authenticated handshakes reject a mismatch.
 
 Consumers install with gpm's `--host-tool` add flag. That operation writes `platforms = []`, selects only core plus the implicit current-host slice for the initial install, and rolls the manifest entry back if installation fails. Nil and explicit-empty platform lists retain identical lock hash semantics so locks remain byte-identical across hosts and selection modes.
 

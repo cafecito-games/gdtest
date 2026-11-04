@@ -9,7 +9,8 @@ func params_provider() -> Array[Variant]:
 
 ## Receives suite lifecycle metadata.
 func before_suite(info: VestDefs.Suite) -> void:
-	Vest.message(info.name)
+	if info.name.is_empty():
+		return
 
 
 ## Receives case lifecycle metadata.

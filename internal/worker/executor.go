@@ -112,7 +112,7 @@ func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink execu
 	defer func() { _ = connection.Close() }()
 	decoder := protocol.NewDecoder(connection, protocol.DefaultMaxMessageSize)
 	encoder := protocol.NewEncoder(connection)
-	if err := verifyHandshake(decoder, token, project, e.SessionID, e.Generation); err != nil {
+	if err := verifyHandshake(decoder, token, project, e.SessionID, workerID, e.Generation); err != nil {
 		return err
 	}
 	if err := sink.Emit(model.Event{ProtocolVersion: model.ProtocolVersion, Type: model.EventWorkerReady, RunID: plan.RunID}); err != nil {
@@ -131,6 +131,8 @@ func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink execu
 	}); err != nil {
 		return fmt.Errorf("send run command: %w", err)
 	}
+	var lastSequence uint64
+	var sequenceRunID string
 	for {
 		var message protocol.Envelope
 		if err := decoder.Decode(&message); err != nil {
@@ -142,10 +144,13 @@ func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink execu
 		switch message.Type {
 		case "event":
 			var wireEvent struct {
-				Kind     model.EventType `json:"kind"`
-				RunID    string          `json:"run_id"`
-				Sequence uint64          `json:"sequence"`
-				Data     model.Event     `json:"data"`
+				Kind       model.EventType `json:"kind"`
+				WorkerID   string          `json:"worker_id"`
+				SessionID  string          `json:"session_id"`
+				Generation uint64          `json:"generation"`
+				RunID      string          `json:"run_id"`
+				Sequence   uint64          `json:"sequence"`
+				Data       model.Event     `json:"data"`
 			}
 			if err := json.Unmarshal(message.Payload, &wireEvent); err != nil {
 				return fmt.Errorf("decode worker event: %w", err)
@@ -153,6 +158,18 @@ func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink execu
 			if wireEvent.Kind == "" {
 				return errors.New("worker event has no kind")
 			}
+			if wireEvent.WorkerID != workerID || wireEvent.SessionID != e.SessionID ||
+				wireEvent.Generation != e.Generation {
+				return errors.New("worker event identity does not match authenticated worker")
+			}
+			if wireEvent.RunID != sequenceRunID {
+				sequenceRunID = wireEvent.RunID
+				lastSequence = 0
+			}
+			if wireEvent.Sequence != lastSequence+1 {
+				return fmt.Errorf("worker event sequence %d does not follow %d", wireEvent.Sequence, lastSequence)
+			}
+			lastSequence = wireEvent.Sequence
 			event := wireEvent.Data
 			event.ProtocolVersion = model.ProtocolVersion
 			event.Type = wireEvent.Kind
@@ -173,13 +190,23 @@ func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink execu
 }
 
 type handshake struct {
-	RuntimeVersion string `json:"runtime_version"`
-	ProjectPath    string `json:"project_path"`
-	SessionID      string `json:"session_id"`
-	Generation     uint64 `json:"generation"`
+	RuntimeVersion string         `json:"runtime_version"`
+	WorkerID       string         `json:"worker_id"`
+	ProjectPath    string         `json:"project_path"`
+	SessionID      string         `json:"session_id"`
+	Generation     uint64         `json:"generation"`
+	GodotVersion   map[string]any `json:"godot_version"`
+	Capabilities   []string       `json:"capabilities"`
 }
 
-func verifyHandshake(decoder *protocol.Decoder, token, project, session string, generation uint64) error {
+func verifyHandshake(
+	decoder *protocol.Decoder,
+	token string,
+	project string,
+	session string,
+	workerID string,
+	generation uint64,
+) error {
 	var message protocol.Envelope
 	if err := decoder.Decode(&message); err != nil {
 		return fmt.Errorf("read worker handshake: %w", err)
@@ -202,8 +229,22 @@ func verifyHandshake(decoder *protocol.Decoder, token, project, session string, 
 	if err != nil || expectedErr != nil || cleanProject != expectedProject {
 		return fmt.Errorf("worker project %q does not match session project %q", hello.ProjectPath, project)
 	}
-	if hello.SessionID != session || hello.Generation != generation {
+	if hello.SessionID != session || hello.WorkerID != workerID || hello.Generation != generation {
 		return errors.New("worker session or generation does not match lease")
+	}
+	if len(hello.GodotVersion) == 0 || hello.GodotVersion["major"] == nil ||
+		hello.GodotVersion["minor"] == nil || hello.GodotVersion["build"] == nil {
+		return errors.New("worker handshake has incomplete Godot version/build identity")
+	}
+	required := []string{"run", "discover", "ping", "cancel", "reload", "reset", "shutdown"}
+	capabilities := make(map[string]struct{}, len(hello.Capabilities))
+	for _, capability := range hello.Capabilities {
+		capabilities[capability] = struct{}{}
+	}
+	for _, capability := range required {
+		if _, ok := capabilities[capability]; !ok {
+			return fmt.Errorf("worker handshake is missing required capability %q", capability)
+		}
 	}
 	return nil
 }

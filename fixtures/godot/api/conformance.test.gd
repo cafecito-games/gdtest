@@ -36,6 +36,21 @@ func suite() -> void:
 							)
 				)
 	)
+	define(
+			"slow sibling",
+			func() -> void:
+				await sleep(0.0)
+				await sleep(0.0)
+				test("slow child", func() -> void: expect_true(true))
+	)
+	define(
+			"fast sibling",
+			func() -> void:
+				await sleep(0.0)
+				test("fast child", func() -> void: expect_true(true))
+	)
+	define("duplicate", func() -> void: test("first duplicate", func() -> void: pass))
+	define("duplicate", func() -> void: test("second duplicate", func() -> void: pass))
 	_async_registration_finished = true
 
 

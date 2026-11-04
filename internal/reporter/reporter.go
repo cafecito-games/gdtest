@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/cafecito-games/gdtest/internal/model"
 	"github.com/cafecito-games/gdtest/internal/results"
@@ -32,10 +33,21 @@ func (r *JSONL) Summary(summary results.Summary) error {
 }
 
 // Terminal prints failures as they arrive and one concise summary.
-type Terminal struct{ writer io.Writer }
+type Terminal struct {
+	writer  io.Writer
+	verbose bool
+	output  map[string][]model.Event
+}
 
 // NewTerminal creates a terminal reporter.
-func NewTerminal(writer io.Writer) *Terminal { return &Terminal{writer: writer} }
+func NewTerminal(writer io.Writer) *Terminal {
+	return NewTerminalWithOptions(writer, false)
+}
+
+// NewTerminalWithOptions creates a terminal reporter with optional passing-case detail.
+func NewTerminalWithOptions(writer io.Writer, verbose bool) *Terminal {
+	return &Terminal{writer: writer, verbose: verbose, output: make(map[string][]model.Event)}
+}
 
 // Emit prints immediate failure and infrastructure diagnostics.
 func (r *Terminal) Emit(event model.Event) error {
@@ -45,8 +57,33 @@ func (r *Terminal) Emit(event model.Event) error {
 		if event.Location != nil && event.Location.File != "" {
 			location = fmt.Sprintf(" (%s:%d)", event.Location.File, event.Location.Line)
 		}
-		_, err := fmt.Fprintf(r.writer, "FAIL %s%s: %s\n", event.TestID, location, event.Message)
+		details := diagnosticValues(event)
+		_, err := fmt.Fprintf(r.writer, "FAIL %s%s: %s%s\n", event.TestID, location, event.Message, details)
 		return err
+	case model.EventOutput:
+		if r.verbose {
+			return r.writeOutput(event)
+		}
+		r.output[event.TestID] = append(r.output[event.TestID], event)
+		return nil
+	case model.EventCaseFinished:
+		if r.verbose || event.Status == "fail" || event.Status == "error" {
+			for _, text := range event.Messages {
+				if text == "" && !r.verbose {
+					continue
+				}
+				if _, err := fmt.Fprintf(r.writer, "MESSAGE %s: %s\n", event.TestID, text); err != nil {
+					return err
+				}
+			}
+			for _, output := range r.output[event.TestID] {
+				if err := r.writeOutput(output); err != nil {
+					return err
+				}
+			}
+		}
+		delete(r.output, event.TestID)
+		return nil
 	case model.EventWorkerError:
 		_, err := fmt.Fprintf(r.writer, "ERROR %s: %s\n", event.Name, event.Message)
 		return err
@@ -59,13 +96,50 @@ func (r *Terminal) Emit(event model.Event) error {
 func (r *Terminal) Summary(summary results.Summary) error {
 	_, err := fmt.Fprintf(
 		r.writer,
-		"%d passed, %d failed, %d errors, %d skipped, %d todo, %d void\n",
+		"%d passed, %d failed, %d errors, %d skipped, %d todo, %d void, %d canceled\n",
 		summary.Passed,
 		summary.Failed,
 		summary.Errored,
 		summary.Skipped,
 		summary.Todo,
 		summary.Void,
+		summary.Canceled,
 	)
 	return err
+}
+
+func (r *Terminal) writeOutput(event model.Event) error {
+	text := event.Message
+	if text == "" && event.Metadata != nil {
+		if value, ok := event.Metadata["text"].(string); ok {
+			text = value
+		}
+	}
+	_, err := fmt.Fprintf(r.writer, "OUTPUT %s: %s\n", event.TestID, text)
+	return err
+}
+
+func diagnosticValues(event model.Event) string {
+	values := make([]string, 0, 2)
+	if event.Expected != nil {
+		values = append(values, "expected="+wireDisplay(*event.Expected))
+	}
+	if event.Actual != nil {
+		values = append(values, "actual="+wireDisplay(*event.Actual))
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(values, ", ") + ")"
+}
+
+func wireDisplay(value model.WireValue) string {
+	if value.Display != "" {
+		return value.Display
+	}
+	data, err := json.Marshal(value.Value)
+	if err != nil {
+		return value.Type
+	}
+	return string(data)
 }

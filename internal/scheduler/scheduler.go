@@ -30,11 +30,49 @@ type Isolation uint8
 const (
 	// Reuse uses an ordinary scheduler slot.
 	Reuse Isolation = iota
+	// Recycle uses an ordinary slot and replaces the worker after the run.
+	Recycle
 	// Fresh uses an ordinary slot but tells the caller to create a fresh worker.
 	Fresh
 	// Exclusive reserves the whole scheduler until this work completes.
 	Exclusive
 )
+
+// ParseIsolation parses the stable runner-facing isolation names. An empty
+// value selects the default bounded-reuse policy.
+func ParseIsolation(value string) (Isolation, error) {
+	switch value {
+	case "", "reuse":
+		return Reuse, nil
+	case "recycle":
+		return Recycle, nil
+	case "fresh":
+		return Fresh, nil
+	case "exclusive":
+		return Exclusive, nil
+	default:
+		return Reuse, fmt.Errorf(
+			"isolation %q must be reuse, recycle, fresh, or exclusive",
+			value,
+		)
+	}
+}
+
+// String returns the stable runner-facing isolation name.
+func (i Isolation) String() string {
+	switch i {
+	case Reuse:
+		return "reuse"
+	case Recycle:
+		return "recycle"
+	case Fresh:
+		return "fresh"
+	case Exclusive:
+		return "exclusive"
+	default:
+		return fmt.Sprintf("isolation(%d)", i)
+	}
+}
 
 // Options configures one user-level global scheduler.
 type Options struct {
@@ -119,13 +157,12 @@ type Scheduler struct {
 	backgroundLimit  int
 	interactiveBurst int
 
-	sessions      map[string]*sessionQueue
-	order         []string
-	cursor        int
-	lastSession   string
-	activeSession map[string]bool
-	minimumGen    map[string]uint64
-	slots         []bool
+	sessions    map[string]*sessionQueue
+	order       []string
+	cursor      int
+	lastSession string
+	minimumGen  map[string]uint64
+	slots       []bool
 
 	active            int
 	peakActive        int
@@ -157,8 +194,8 @@ func New(options Options) (*Scheduler, error) {
 	scheduler := &Scheduler{
 		capacity: options.Capacity, backgroundLimit: options.BackgroundLimit,
 		interactiveBurst: options.InteractiveBurst,
-		sessions:         make(map[string]*sessionQueue), activeSession: make(map[string]bool),
-		minimumGen: make(map[string]uint64), slots: make([]bool, options.Capacity),
+		sessions:         make(map[string]*sessionQueue),
+		minimumGen:       make(map[string]uint64), slots: make([]bool, options.Capacity),
 	}
 	scheduler.cond = sync.NewCond(&scheduler.mu)
 	scheduler.wait.Add(1)
@@ -337,7 +374,6 @@ func (s *Scheduler) dispatch() {
 			if s.active > s.peakActive {
 				s.peakActive = s.active
 			}
-			s.activeSession[queued.request.Session] = true
 			if queued.request.Priority == Background {
 				s.backgroundActive++
 				s.interactiveStreak = 0
@@ -365,7 +401,6 @@ func (s *Scheduler) run(queued *job, lease Lease) {
 	s.mu.Lock()
 	s.active--
 	s.slots[lease.Slot] = false
-	delete(s.activeSession, queued.request.Session)
 	if queued.request.Priority == Background {
 		s.backgroundActive--
 	}
@@ -413,9 +448,6 @@ func (s *Scheduler) firstLocked(priority Priority) *job {
 	for offset := 0; offset < count; offset++ {
 		index := (s.cursor + offset) % count
 		session := s.order[index]
-		if s.activeSession[session] {
-			continue
-		}
 		queue := s.sessions[session]
 		var jobs []*job
 		if priority == Interactive {

@@ -14,12 +14,27 @@ import (
 func TestRequiredCorpusSizesAndIdentities(t *testing.T) {
 	t.Parallel()
 	assert.Contains(t, PassingAssertionsScript(), "range(10000)")
+	assert.Contains(t, PassingAssertionsScript(), "expect_true(index >= 0)")
+	assert.NotContains(t, PassingAssertionsScript(), "ok(index >= 0)")
 	assert.Contains(t, DynamicCasesScript(), "range(10000)")
 	assert.Len(t, ThousandFiles(), FileCount)
 	assert.Len(t, TenThousandCases().Files[0].Cases, LargeCount)
 	assert.Len(t, DeepSuiteManifest().Files[0].Cases[0].Suites, SuiteDepth)
 	assert.Len(t, RichFailures(LargeCount), LargeCount)
 	assert.Len(t, SessionPlans(), SessionCount)
+}
+
+func TestPassingAssertionCorpusIsStaticallyDiscoverable(t *testing.T) {
+	t.Parallel()
+
+	plan, err := discovery.Parse(
+		"tests/passing_assertions.test.gd",
+		[]byte(PassingAssertionsScript()),
+	)
+	require.NoError(t, err)
+	require.Len(t, plan.Cases, 1)
+	assert.Equal(t, "test_passing_assertions", plan.Cases[0].MethodName)
+	assert.Equal(t, "tests/passing_assertions.test.gd::test_passing_assertions", plan.Cases[0].ID)
 }
 
 func TestThousandFileCorpusParsesDeterministically(t *testing.T) {

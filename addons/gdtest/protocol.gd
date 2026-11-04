@@ -15,6 +15,8 @@ static func encode_line(message: Dictionary[String, Variant]) -> PackedByteArray
 
 ## Decodes one JSON Lines object or returns an empty dictionary.
 static func decode_line(line: String) -> Dictionary[String, Variant]:
+	if not _json_nesting_within_limit(line):
+		return {}
 	var parsed: Variant = JSON.parse_string(line)
 	if not parsed is Dictionary:
 		return {}
@@ -22,6 +24,52 @@ static func decode_line(line: String) -> Dictionary[String, Variant]:
 	for key: Variant in parsed:
 		result[str(key)] = parsed[key]
 	return result
+
+
+static func _json_nesting_within_limit(line: String) -> bool:
+	var depth: int = 0
+	var in_string: bool = false
+	var escaped: bool = false
+	for index: int in range(line.length()):
+		var character: String = line.substr(index, 1)
+		if in_string:
+			if escaped:
+				escaped = false
+			elif character == "\\":
+				escaped = true
+			elif character == '"':
+				in_string = false
+			continue
+		if character == '"':
+			in_string = true
+		elif character == "{" or character == "[":
+			depth += 1
+			if depth > MAX_NESTING:
+				return false
+		elif character == "}" or character == "]":
+			depth -= 1
+			if depth < 0:
+				return false
+	return depth == 0
+
+
+## Converts explicit outcome data to bounded wire values.
+static func wire_outcomes(value: Variant) -> Array[Dictionary]:
+	var encoded: Array[Dictionary] = []
+	if not value is Array:
+		return encoded
+	for item: Variant in value:
+		if not item is Dictionary:
+			continue
+		var outcome: Dictionary[Variant, Variant] = item
+		encoded.append(
+				{
+					"kind": str(outcome.get("kind", "")),
+					"message": str(outcome.get("message", "")),
+					"data": wire_value(outcome.get("data", {})),
+				}
+		)
+	return encoded
 
 
 ## Converts a Variant to a stable tagged wire representation.

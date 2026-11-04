@@ -66,6 +66,7 @@ mkdir -p "$stage/addons"
 cp -R "$repo_root/addons/gdtest" "$stage/addons/gdtest"
 rm -rf "$stage/addons/gdtest/bin"
 mkdir -p "$stage/addons/gdtest/bin"
+cp "$repo_root/LICENSE" "$stage/addons/gdtest/LICENSE"
 cp "$repo_root/packaging/gpm-package.toml" "$stage/gpm-package.toml"
 
 # The runtime and host binary must advertise exactly the same product version.
@@ -97,9 +98,6 @@ build_binary darwin arm64 bin/macos-arm64/gdtest
 build_binary darwin amd64 bin/macos-x86_64/gdtest
 build_binary linux arm64 bin/linux-arm64/gdtest
 build_binary linux amd64 bin/linux-x86_64/gdtest
-build_binary windows arm64 bin/windows-arm64/gdtest.exe
-build_binary windows amd64 bin/windows-x86_64/gdtest.exe
-
 first="$work/package-one"
 second="$work/package-two"
 mkdir -p "$first" "$second"
@@ -107,7 +105,7 @@ gpm package --dir "$stage" --out "$first" --version "$version" >/dev/null
 gpm package --dir "$stage" --out "$second" --version "$version" >/dev/null
 
 expected_slices=(
-    core macos.arm64 macos.x86_64 linux.arm64 linux.x86_64 windows.arm64 windows.x86_64
+    core macos.arm64 macos.x86_64 linux.arm64 linux.x86_64
 )
 for slice in "${expected_slices[@]}"; do
     archive="gdtest-${version}-${slice}.zip"
@@ -121,11 +119,11 @@ core_listing=$(unzip -Z1 "$first/gdtest-${version}-core.zip")
 if grep -qE '(^|/)bin/|(^|/)(cmd|internal|fixtures|packaging)/|\.go$|(^|/)go\.(mod|sum)$|(^|/)spec\.md$' <<< "$core_listing"; then
     fail "core contains a host binary or build-time source"
 fi
-for required in gdtest gdtest.cmd gdtest.gd version.gd worker.gd; do
+for required in LICENSE gdtest gdtest.cmd gdtest.gd version.gd worker.gd; do
     grep -qxF "$required" <<< "$core_listing" || fail "core is missing $required"
 done
 
-for slice in macos.arm64 macos.x86_64 linux.arm64 linux.x86_64 windows.arm64 windows.x86_64; do
+for slice in macos.arm64 macos.x86_64 linux.arm64 linux.x86_64; do
     archive="$first/gdtest-${version}-${slice}.zip"
     listing=$(unzip -Z1 "$archive")
     case "$slice" in
@@ -133,8 +131,6 @@ for slice in macos.arm64 macos.x86_64 linux.arm64 linux.x86_64 windows.arm64 win
         macos.x86_64) expected="bin/macos-x86_64/gdtest" ;;
         linux.arm64) expected="bin/linux-arm64/gdtest" ;;
         linux.x86_64) expected="bin/linux-x86_64/gdtest" ;;
-        windows.arm64) expected="bin/windows-arm64/gdtest.exe" ;;
-        windows.x86_64) expected="bin/windows-x86_64/gdtest.exe" ;;
     esac
     [ "$listing" = "$expected" ] || fail "slice $slice must contain exactly $expected; found: $listing"
 done

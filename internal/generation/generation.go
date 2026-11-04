@@ -41,6 +41,24 @@ type Snapshot struct {
 	Files map[string]FileState `json:"files"`
 }
 
+// ContentFingerprint returns a deterministic digest of every relevant path
+// and its content. It is suitable for cache identities across worktrees with
+// identical project inputs.
+func (s Snapshot) ContentFingerprint() string {
+	paths := make([]string, 0, len(s.Files))
+	for name := range s.Files {
+		paths = append(paths, name)
+	}
+	sort.Strings(paths)
+	digest := sha256.New()
+	for _, name := range paths {
+		state := s.Files[name]
+		_, _ = fmt.Fprintf(digest, "%d:%s", len(name), name)
+		_, _ = fmt.Fprintf(digest, "%d:%s", len(state.ContentDigest), state.ContentDigest)
+	}
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
 // Change records one changed, added, or removed path.
 type Change struct {
 	Path string     `json:"path"`

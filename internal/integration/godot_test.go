@@ -70,7 +70,7 @@ func TestForegroundGodotPassingAndFailingFixtures(t *testing.T) {
 	})
 }
 
-func TestSourceChangeDuringRealRunIsStaleAndBodyReloadReusesWorker(t *testing.T) {
+func TestSourceChangeDuringRealRunIsStaleAndReplacementLoadsChangedBody(t *testing.T) {
 	if _, err := exec.LookPath("godot"); err != nil {
 		t.Skip("Godot generation test skipped: godot is not on PATH")
 	}
@@ -85,7 +85,7 @@ func TestSourceChangeDuringRealRunIsStaleAndBodyReloadReusesWorker(t *testing.T)
 	require.NoError(t, os.WriteFile(filename, []byte(initial), 0o600))
 	file, err := discovery.Parse("generation.test.gd", []byte(initial))
 	require.NoError(t, err)
-	bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	bootstrap := exec.CommandContext(
 		bootstrapCtx, "godot", "--headless", "--editor", "--path", root, "--quit-after", "2",
 	)
@@ -149,8 +149,30 @@ func TestSourceChangeDuringRealRunIsStaleAndBodyReloadReusesWorker(t *testing.T)
 	require.NoError(t, err)
 	after := sessions.List()
 	require.Len(t, after, 1)
-	assert.Equal(t, before[0].WorkerPID, after[0].WorkerPID)
+	assert.NotEqual(t, before[0].WorkerPID, after[0].WorkerPID)
 	assert.Equal(t, uint64(2), after[0].Generation)
+
+	plan.RunID = "changed-body-run"
+	plan.Generation = 2
+	payload, err = json.Marshal(service.RunRequest{
+		SessionID: "real-generation-session", Project: root, Godot: "godot", Plan: plan,
+	})
+	require.NoError(t, err)
+	statuses := make(map[string]string)
+	_, err = sessions.Handle(ctx, daemon.Request{
+		ID: "changed-run", Method: "session.run", Payload: payload,
+	}, func(value any) error {
+		event, ok := value.(model.Event)
+		if !ok {
+			return fmt.Errorf("daemon event has type %T, want model.Event", value)
+		}
+		if event.Type == model.EventCaseFinished {
+			statuses[event.TestID] = event.Status
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "pass", statuses["generation.test.gd::test_generation"])
 }
 
 func TestPersistentGodotWorkerReusesProcess(t *testing.T) {

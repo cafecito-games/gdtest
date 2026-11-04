@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -110,61 +109,67 @@ func (s *Server) handleConnection(ctx context.Context, connection net.Conn) {
 	}()
 	decoder := protocol.NewDecoder(connection, s.MaxSize)
 	encoder := protocol.NewEncoder(connection)
-	for {
-		var message Message
-		if err := decoder.Decode(&message); err != nil {
-			if errors.Is(err, io.EOF) || ctx.Err() != nil {
-				return
-			}
-			_ = encodeMessage(encoder, MessageError, "", "", true, map[string]any{"message": err.Error()})
-			s.log(map[string]any{"event": "client_protocol_error", "error": err.Error()})
-			if strings.Contains(err.Error(), "exceeds") {
-				return
-			}
-			continue
-		}
-		if err := validateRequest(message); err != nil {
-			_ = encodeMessage(encoder, MessageError, message.RequestID, message.Method, true, map[string]any{"message": err.Error()})
-			continue
-		}
-		request := Request{ID: message.RequestID, Method: message.Method, Payload: message.Payload}
-		if request.Method == "daemon.status" {
-			result := map[string]any{
-				"pid": os.Getpid(), "protocol": ProtocolVersion, "build_id": s.Namespace.BuildID,
-				"started_at": s.startedAt, "uptime_ns": time.Since(s.startedAt).Nanoseconds(),
-			}
-			if provider, ok := s.Handler.(StatusProvider); ok {
-				result["service"] = provider.DaemonStatus()
-			}
-			if err := encodeMessage(encoder, MessageResponse, request.ID, request.Method, true, result); err != nil {
-				return
-			}
-			continue
-		}
-		if request.Method == "daemon.stop" {
-			if err := encodeMessage(encoder, MessageResponse, request.ID, request.Method, true, map[string]any{"stopping": true}); err != nil {
-				return
-			}
-			s.Stop()
+	var message Message
+	if err := decoder.Decode(&message); err != nil {
+		if errors.Is(err, io.EOF) || ctx.Err() != nil {
 			return
 		}
-		if s.Handler == nil {
-			_ = encodeMessage(encoder, MessageError, request.ID, request.Method, true, map[string]any{"message": "unsupported daemon method"})
-			continue
+		_ = encodeMessage(encoder, MessageError, "", "", true, map[string]any{"message": err.Error()})
+		s.log(map[string]any{"event": "client_protocol_error", "error": err.Error()})
+		return
+	}
+	if err := validateRequest(message); err != nil {
+		_ = encodeMessage(encoder, MessageError, message.RequestID, message.Method, true, map[string]any{"message": err.Error()})
+		return
+	}
+	request := Request{ID: message.RequestID, Method: message.Method, Payload: message.Payload}
+	if request.Method == "daemon.status" {
+		result := map[string]any{
+			"pid": os.Getpid(), "protocol": ProtocolVersion, "build_id": s.Namespace.BuildID,
+			"started_at": s.startedAt, "uptime_ns": time.Since(s.startedAt).Nanoseconds(),
 		}
-		emit := func(event any) error {
-			return encodeMessage(encoder, MessageEvent, request.ID, request.Method, false, event)
+		if provider, ok := s.Handler.(StatusProvider); ok {
+			result["service"] = provider.DaemonStatus()
 		}
-		result, err := s.callHandler(ctx, request, emit)
-		if err != nil {
-			if encodeErr := encodeMessage(encoder, MessageError, request.ID, request.Method, true, map[string]any{"message": err.Error()}); encodeErr != nil {
-				return
-			}
-			continue
-		}
-		if err := encodeMessage(encoder, MessageResponse, request.ID, request.Method, true, result); err != nil {
+		_ = encodeMessage(encoder, MessageResponse, request.ID, request.Method, true, result)
+		return
+	}
+	if request.Method == "daemon.stop" {
+		if err := encodeMessage(encoder, MessageResponse, request.ID, request.Method, true, map[string]any{"stopping": true}); err != nil {
 			return
 		}
+		s.Stop()
+		return
+	}
+	if s.Handler == nil {
+		_ = encodeMessage(encoder, MessageError, request.ID, request.Method, true, map[string]any{"message": "unsupported daemon method"})
+		return
+	}
+
+	// A Client owns one connection for exactly one request. Watch the read side
+	// while the handler runs so a canceled or crashed client promptly cancels
+	// queued work and the exact worker operation, even when no events are emitted.
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	disconnected := make(chan struct{})
+	go func() {
+		defer close(disconnected)
+		var unexpected [1]byte
+		_, _ = connection.Read(unexpected[:])
+		cancelRequest()
+	}()
+	emit := func(event any) error {
+		return encodeMessage(encoder, MessageEvent, request.ID, request.Method, false, event)
+	}
+	result, handlerErr := s.callHandler(requestCtx, request, emit)
+	cancelRequest()
+	_ = connection.SetReadDeadline(time.Now())
+	<-disconnected
+	if handlerErr != nil {
+		_ = encodeMessage(encoder, MessageError, request.ID, request.Method, true, map[string]any{"message": handlerErr.Error()})
+		return
+	}
+	if err := encodeMessage(encoder, MessageResponse, request.ID, request.Method, true, result); err != nil {
+		return
 	}
 }
 

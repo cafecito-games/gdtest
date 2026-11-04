@@ -29,6 +29,7 @@ import (
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/reporter"
 	"github.com/cafecito-games/gdtest/internal/results"
+	"github.com/cafecito-games/gdtest/internal/scheduler"
 	"github.com/cafecito-games/gdtest/internal/service"
 	"github.com/cafecito-games/gdtest/internal/version"
 	sourcewatch "github.com/cafecito-games/gdtest/internal/watch"
@@ -85,6 +86,7 @@ func Run(ctx context.Context, arguments []string, streams IO) int {
 
 type runOptions struct {
 	project     string
+	godot       string
 	json        bool
 	allowEmpty  bool
 	noDaemon    bool
@@ -93,11 +95,16 @@ type runOptions struct {
 	affected    []string
 	affectedSet bool
 	verbose     bool
+	isolation   string
+	jobs        int
+	jobsSet     bool
+	staleRetry  int
 	selectors   []string
 }
 
 type listOptions struct {
 	project    string
+	godot      string
 	allowEmpty bool
 	name       string
 	onlyMode   string
@@ -166,6 +173,7 @@ func newRunCommand(streams IO, exitCode *int) *cobra.Command {
 		Run: func(command *cobra.Command, selectors []string) {
 			options.selectors = selectors
 			options.affectedSet = command.Flags().Changed("affected")
+			options.jobsSet = command.Flags().Changed("jobs")
 			*exitCode = runTests(command.Context(), options, streams)
 		},
 	}
@@ -182,6 +190,7 @@ func newWatchCommand(streams IO, exitCode *int) *cobra.Command {
 		Run: func(command *cobra.Command, selectors []string) {
 			options.selectors = selectors
 			options.affectedSet = command.Flags().Changed("affected")
+			options.jobsSet = command.Flags().Changed("jobs")
 			*exitCode = watchTests(command.Context(), options, streams)
 		},
 	}
@@ -201,6 +210,7 @@ func newListCommand(streams IO) *cobra.Command {
 		},
 	}
 	addProjectFlag(command, &options.project)
+	command.Flags().StringVar(&options.godot, "godot", "", "Godot executable (overrides project and user configuration)")
 	command.Flags().BoolVar(&options.allowEmpty, "allow-empty", false, "allow selectors that match no tests")
 	command.Flags().StringVar(&options.name, "name", "", "select tests whose name contains this text")
 	command.Flags().StringVar(&options.onlyMode, "only", "", "focus policy: auto, ignore, require, or forbid")
@@ -209,29 +219,33 @@ func newListCommand(streams IO) *cobra.Command {
 
 func newDoctorCommand(streams IO) *cobra.Command {
 	var project string
+	var godot string
 	command := &cobra.Command{
 		Use:   "doctor",
 		Short: "Verify the local gdtest installation",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return doctor(command.Context(), project, streams)
+			return doctor(command.Context(), project, godot, streams)
 		},
 	}
 	addProjectFlag(command, &project)
+	command.Flags().StringVar(&godot, "godot", "", "Godot executable (overrides project and user configuration)")
 	return command
 }
 
 func newWarmCommand(streams IO) *cobra.Command {
 	var project string
+	var godot string
 	command := &cobra.Command{
 		Use:   "warm",
 		Short: "Start and warm the project worker",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return warm(command.Context(), project, streams)
+			return warm(command.Context(), project, godot, streams)
 		},
 	}
 	addProjectFlag(command, &project)
+	command.Flags().StringVar(&godot, "godot", "", "Godot executable (overrides project and user configuration)")
 	return command
 }
 
@@ -280,6 +294,7 @@ func addProjectFlag(command *cobra.Command, project *string) {
 
 func addRunFlags(command *cobra.Command, options *runOptions) {
 	addProjectFlag(command, &options.project)
+	command.Flags().StringVar(&options.godot, "godot", "", "Godot executable (overrides project and user configuration)")
 	command.Flags().BoolVar(&options.json, "json", false, "write JSON Lines events")
 	command.Flags().BoolVar(&options.allowEmpty, "allow-empty", false, "allow selectors that match no tests")
 	command.Flags().BoolVar(&options.noDaemon, "no-daemon", false, "run orchestration in the foreground")
@@ -287,6 +302,11 @@ func addRunFlags(command *cobra.Command, options *runOptions) {
 	command.Flags().StringVar(&options.onlyMode, "only", "", "focus policy: auto, ignore, require, or forbid")
 	command.Flags().StringSliceVar(&options.affected, "affected", nil, "select tests affected by project-relative changed paths")
 	command.Flags().BoolVarP(&options.verbose, "verbose", "v", false, "explain affected-test selection")
+	command.Flags().StringVar(
+		&options.isolation, "isolation", "reuse",
+		"worker isolation: reuse, recycle, fresh, or exclusive",
+	)
+	command.Flags().IntVar(&options.jobs, "jobs", 0, "maximum concurrent test files (0 uses automatic concurrency)")
 }
 
 func migrateVest(ctx context.Context, options migrateOptions, streams IO) error {
@@ -415,18 +435,32 @@ func initialize(project string, streams IO) error {
 func runTests(ctx context.Context, options runOptions, streams IO) int {
 	commandStarted := time.Now()
 	timings := make(map[string]time.Duration)
+	if _, err := scheduler.ParseIsolation(options.isolation); err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	if options.jobsSet && options.jobs < 0 {
+		writeDiagnostic(streams.Err, "gdtest:", errors.New("jobs must be non-negative"))
+		return ExitError
+	}
 	root, err := projectRoot(options.project)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
-	projectConfig, err := config.Load(root)
+	projectConfig, err := loadProjectConfiguration(root)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
+	if options.godot != "" {
+		projectConfig.Godot = options.godot
+	}
 	if options.onlyMode != "" {
 		projectConfig.OnlyMode = options.onlyMode
+	}
+	if options.jobsSet {
+		projectConfig.Jobs = options.jobs
 	}
 	if err := validateOnlyMode(projectConfig.OnlyMode); err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
@@ -478,6 +512,10 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		ctx, root, projectConfig, discoveryManifest, sessionID, options.noDaemon, streams,
 	)
 	if err != nil {
+		if isStaleGenerationError(err) && options.staleRetry == 0 {
+			options.staleRetry++
+			return runTests(ctx, options, streams)
+		}
 		var findings *manifestErrors
 		if errors.As(err, &findings) {
 			if writeErr := findings.writeTo(streams.Out); writeErr != nil {
@@ -518,7 +556,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		OnlyMode: projectConfig.OnlyMode, SelectionApplied: true,
 		SelectedIDs: append([]string(nil), selected.ids...), Files: discoveryManifest.Files,
 	}
-	collector := results.NewCollector()
+	collector := results.NewCollectorWithOrder(selected.ids)
 	var eventReporter executor.EventSink
 	var finish func(results.Summary) error
 	if options.json {
@@ -526,7 +564,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		eventReporter = machine
 		finish = machine.Summary
 	} else {
-		terminal := reporter.NewTerminal(streams.Out)
+		terminal := reporter.NewTerminalWithOptions(streams.Out, options.verbose)
 		eventReporter = terminal
 		finish = terminal.Summary
 	}
@@ -538,17 +576,33 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 	})
 	executionTimings, err := executePlan(
 		ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
-		plan, sink, options.noDaemon, streams,
+		time.Duration(projectConfig.WorkerIdleTimeout), projectConfig.Jobs, options.isolation,
+		projectConfig.WarmWorkers, plan, sink, options.noDaemon, streams,
 	)
+	executionErr := err
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return ExitCanceled
 		}
-		writeDiagnostic(streams.Err, "gdtest:", err)
-		return ExitError
-	}
-	for name, duration := range executionTimings {
-		timings[name] = duration
+		if isStaleGenerationError(err) && options.staleRetry == 0 {
+			options.staleRetry++
+			return runTests(ctx, options, streams)
+		}
+		infrastructure := model.Event{
+			ProtocolVersion: model.ProtocolVersion,
+			Type:            model.EventWorkerError,
+			RunID:           plan.RunID,
+			Name:            "worker.infrastructure",
+			Message:         err.Error(),
+		}
+		if emitErr := sink.Emit(infrastructure); emitErr != nil {
+			writeDiagnostic(streams.Err, "gdtest: report infrastructure error:", emitErr)
+			return ExitError
+		}
+	} else {
+		for name, duration := range executionTimings {
+			timings[name] = duration
+		}
 	}
 	summary := collector.Summary()
 	reportingStarted := time.Now()
@@ -563,6 +617,10 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 			writeDiagnostic(streams.Err, "gdtest: timings:", err)
 			return ExitError
 		}
+	}
+	if executionErr != nil {
+		writeDiagnostic(streams.Err, "gdtest:", executionErr)
+		return ExitError
 	}
 	if summary.HasInfrastructureFailure() {
 		return ExitError
@@ -579,6 +637,10 @@ func executePlan(
 	root string,
 	godot string,
 	workerMaxRuns int,
+	workerIdleTimeout time.Duration,
+	jobs int,
+	isolation string,
+	warmWorkers int,
 	plan model.TestPlan,
 	sink executor.EventSink,
 	noDaemon bool,
@@ -588,7 +650,7 @@ func executePlan(
 	if noDaemon {
 		process, err := worker.Start(ctx, worker.ProcessOptions{
 			Godot: godot, Project: root, SessionID: "foreground-" + newID(),
-			Generation: plan.Generation, Stdout: streams.Err, Stderr: streams.Err,
+			Generation: plan.Generation,
 		})
 		if err != nil {
 			return nil, err
@@ -607,6 +669,8 @@ func executePlan(
 	response, err := daemonClient.Call(ctx, "session.run", service.RunRequest{
 		SessionID: sessionID, Project: root, Godot: godot,
 		Plan: plan, WorkerMaxRuns: workerMaxRuns,
+		WorkerIdleNS: workerIdleTimeout.Nanoseconds(), Jobs: jobs,
+		WarmWorkers: warmWorkers, Isolation: isolation,
 	}, func(data json.RawMessage) error {
 		var event model.Event
 		if err := json.Unmarshal(data, &event); err != nil {
@@ -651,14 +715,22 @@ func writeTimings(streams IO, timings map[string]time.Duration, machine bool) er
 	return nil
 }
 
+func isStaleGenerationError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "source generation changed from ") &&
+		strings.Contains(err.Error(), "; rediscover and retry")
+}
+
 func listTests(ctx context.Context, options listOptions, streams IO) error {
 	root, err := projectRoot(options.project)
 	if err != nil {
 		return err
 	}
-	projectConfig, err := config.Load(root)
+	projectConfig, err := loadProjectConfiguration(root)
 	if err != nil {
 		return err
+	}
+	if options.godot != "" {
+		projectConfig.Godot = options.godot
 	}
 	if options.onlyMode != "" {
 		projectConfig.OnlyMode = options.onlyMode
@@ -698,14 +770,17 @@ func listTests(ctx context.Context, options listOptions, streams IO) error {
 	return nil
 }
 
-func doctor(ctx context.Context, project string, streams IO) error {
+func doctor(ctx context.Context, project, godotOverride string, streams IO) error {
 	root, err := projectRoot(project)
 	if err != nil {
 		return err
 	}
-	projectConfig, err := config.Load(root)
+	projectConfig, err := loadProjectConfiguration(root)
 	if err != nil {
 		return err
+	}
+	if godotOverride != "" {
+		projectConfig.Godot = godotOverride
 	}
 	godot, err := godotIdentity(ctx, projectConfig.Godot)
 	if err != nil {
@@ -738,6 +813,7 @@ func doctor(ctx context.Context, project string, streams IO) error {
 	}
 	response, err := daemonClient.Call(ctx, "session.warm", service.WarmRequest{
 		SessionID: sessionID, Project: root, Godot: projectConfig.Godot, Generation: 1,
+		WorkerIdleNS: time.Duration(projectConfig.WorkerIdleTimeout).Nanoseconds(),
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("headless worker handshake: %w", err)
@@ -766,14 +842,17 @@ func doctor(ctx context.Context, project string, streams IO) error {
 	return err
 }
 
-func warm(ctx context.Context, project string, streams IO) error {
+func warm(ctx context.Context, project, godotOverride string, streams IO) error {
 	root, err := projectRoot(project)
 	if err != nil {
 		return err
 	}
-	projectConfig, err := config.Load(root)
+	projectConfig, err := loadProjectConfiguration(root)
 	if err != nil {
 		return err
+	}
+	if godotOverride != "" {
+		projectConfig.Godot = godotOverride
 	}
 	daemonClient, err := compatibleClient(true)
 	if err != nil {
@@ -785,6 +864,7 @@ func warm(ctx context.Context, project string, streams IO) error {
 	}
 	response, err := daemonClient.Call(ctx, "session.warm", service.WarmRequest{
 		SessionID: sessionID, Project: root, Godot: projectConfig.Godot, Generation: 1,
+		WorkerIdleNS: time.Duration(projectConfig.WorkerIdleTimeout).Nanoseconds(),
 	}, nil)
 	if err != nil {
 		return err
@@ -895,7 +975,14 @@ func serveDaemon(ctx context.Context, requestedNamespace string, streams IO) err
 		return err
 	}
 	defer func() { _ = logger.Close() }()
-	sessions := service.NewSessionService()
+	userConfig, err := config.LoadUser()
+	if err != nil {
+		return err
+	}
+	sessions := service.NewSessionServiceWithOptions(service.ServiceOptions{
+		MaxWorkers: userConfig.MaxWorkers, MaxWorkerAge: time.Duration(userConfig.WorkerMaxAge),
+		MemoryBudgetMB: userConfig.MemoryBudgetMB,
+	})
 	janitorCtx, stopJanitor := context.WithCancel(ctx)
 	janitorDone := make(chan struct{})
 	go func() {
@@ -978,6 +1065,14 @@ func resolveSessionID(ctx context.Context, root string, projectConfig config.Pro
 		return "", err
 	}
 	return key.ID(), nil
+}
+
+func loadProjectConfiguration(root string) (config.Project, error) {
+	userConfig, err := config.LoadUser()
+	if err != nil {
+		return config.Project{}, err
+	}
+	return config.LoadWithUser(root, userConfig)
 }
 
 func printJSON(writer io.Writer, data []byte) error {

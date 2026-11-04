@@ -14,6 +14,9 @@ func test_todo_outcome() -> void:
 ## Exercises a case without assertions or explicit outcomes.
 func test_void_outcome() -> void:
 	message("void remains observable")
+	# This fixture intentionally verifies direct engine-output capture.
+	# gdkit:ignore = no-engine-logging
+	print("gdtest-output-marker")
 
 
 ## Exercises timeout and asynchronous condition helper behavior.
