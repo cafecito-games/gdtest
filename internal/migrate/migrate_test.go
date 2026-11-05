@@ -689,3 +689,18 @@ func test_identity() -> void:
 	assert.Contains(t, string(result.Output), "capture_signal(_source.identity, 1)")
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 }
+
+func TestSignalCapturesInsideNestedClassesArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+class Inner:
+	func test_nested() -> void:
+		capture_signal(_source.nested, 0)
+		expect_equal(get_signal_emissions(_source.nested).size(), 0)
+`)
+	result, err := Transform("tests/nested.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.nested, 0)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}

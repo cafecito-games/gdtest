@@ -170,7 +170,9 @@ func (t *transformer) classifyCapture(call *ast.CallExpression, parents map[ast.
 	if statement, ok := parents[call].(*ast.ExpressionStatement); ok {
 		capture.statement = statement
 		if function, ok := parents[statement].(*ast.FunctionDeclaration); ok {
-			capture.function = function
+			if _, root := parents[function].(*ast.File); root {
+				capture.function = function
+			}
 		}
 	}
 	return capture
