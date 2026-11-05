@@ -1,8 +1,8 @@
 # Implementation status
 
 This file maps the delivery milestones and acceptance criteria to implementation and verification
-evidence. It deliberately distinguishes locally verified behavior from incomplete or externally
-blocked release work.
+evidence. It deliberately distinguishes implementation claims from the concrete local, CI, and
+published-release evidence that verifies them.
 
 ## Milestones
 
@@ -13,7 +13,7 @@ blocked release work.
 | 3. Worktrees and scheduler | Verified | Canonical Git worktree identity, isolated sessions, fair bounded scheduling, four isolation policies, per-file concurrency, global worker bound, LRU/idle/run/age/memory recycling, and multi-worktree stress coverage. Each process has opaque private `user://` storage removed on exit; memory measurement failure conservatively recycles the worker. See ADR 0006. |
 | 4. Discovery and generations | Verified with ADR | Static and dynamic discovery, stable IDs/locations, selectors, dependency analysis, reusable parsed-AST/static/dependency/dynamic artifacts, authoritative reconciliation, stale events, and watch mode are implemented. Any source-generation change replaces the worker instead of attempting unverifiable in-process reload; see ADR 0005. Real Godot generation and dynamic-discovery tests pass. |
 | 5. Selection and migration | Verified | Engine-completed selection, dynamic-only files, path/directory/glob/name/focus selectors, conservative affected selection, and gdparser-span Vest migration with atomic writes and precise unsupported-context findings. Nested-class scope, nested SceneTree access, inherited-name warning annotations, migration goldens, a mechanically migrated real-Godot fixture, and the complete 682-file Uzir migration audit pass. |
-| 6. Hardening and packaging | Locally verified; gdtest release pending | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, pinned Linux Godot end-to-end CI, profiling, supported-engine validation, and the specified performance corpora are implemented and verified. The prerequisite host-tool behavior is released in gpm 0.6.0; publishing and consuming the gdtest release remains external work. Windows is explicitly deferred in ADR 0004. |
+| 6. Hardening and packaging | Verified and released | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, pinned Linux Godot end-to-end CI, profiling, supported-engine validation, and the specified performance corpora are implemented and verified. gpm 0.6.0 and gdtest v0.1.1 are published, and a clean project installed and exercised the public release through the project-local host executable. Windows is explicitly deferred in ADR 0004. |
 
 All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 
@@ -21,7 +21,7 @@ All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 
 | Criterion | Status | Evidence or remaining work |
 | --- | --- | --- |
-| 1. Versioned gpm release install | gdtest release pending | Local staged release installation is verified, and gpm 0.6.0 supplies the released atomic host-tool command. Publishing and consuming the first gdtest GitHub release remains. |
+| 1. Versioned gpm release install | Verified | Published gpm 0.6.0 installed published gdtest v0.1.1 into a fresh project with the documented one-command `--host-tool` flow. The project-local binary reported 0.1.1, passed the three-case example with clean startup output, returned 1 with a source-located intentional failure, and left the committed consumer tree clean after reinstall. |
 | 2. Warm worker reuse | Verified | Separate daemon requests reuse one authenticated worker PID without startup on the second run's critical path. Multi-file requests reuse bounded lanes rather than launching one process per file. |
 | 3. Case streaming and linear serialization | Verified | Immutable events stream and are folded once. Size-swept 1,000/5,000/10,000 serialization and rich-failure benchmarks, deterministic encoded-size linearity tests, and real 10,000-assertion/10,000-case corpora pass. |
 | 4. Conflicting worktree isolation | Verified | Real dirty linked-worktree integration observes each worktree's own source and stable path-relative IDs. |
@@ -30,12 +30,12 @@ All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 | 7. Actionable infrastructure errors | Verified | Crash, cancellation, missing Godot, parse, stale generation, protocol failures, runtime GDScript errors, built-in `assert`, and case timeouts are distinct and source located. Recoverable script errors preserve the worker; timeouts taint and replace only the affected worker. |
 | 8. Cheap passing assertions | Verified | Rich values are emitted only for failures. The real-Godot assertion corpus covers every assertion's passing, failing, custom-message, and applicable invalid-input paths without rich payloads on passing assertions. |
 | 9. Vest migration safety | Verified | Goldens cover safe rewrites, both Vest provider-marker forms, idempotence, nested-class scope, strict inherited-name warnings, and execution of migrated output. The mechanically supported Uzir slice runs 8,055 tests; all 8,238 tests pass after a project-local native bridge for the deliberately deferred signal-capture API. |
-| 10. Required quality gates | Verified for current revision | The canonical full check and real-Godot suite pass. They will be rerun after each remaining hardening change. |
+| 10. Required quality gates | Verified for released revision | Release run `42019524497` passed the canonical full check, real-Godot suite, and package verification at commit `ceffcf0`. Main branch protection strictly requires the GitHub Actions `check` and `package` contexts before merge. |
 | 11. Consumer worktree cleanliness | Verified | Init/gpm ownership and scratch-install tests pass. Uzir was migrated only in the isolated `local/gdtest-dogfood` worktree; its main worktree remained clean. |
 | 12. Backend-neutral executor boundary | Verified | `internal/executor` consumes serializable plans/events independently of Godot and reporters. |
 | 13. Reproducible sliced package | Verified | Core plus four macOS/Linux slices stage reproducibly; host-only and all-platform scratch installs pass after removal of unvalidated Windows slices. |
-| 14. Atomic host-tool installation | Released and verified in gpm | gpm PR #58 merged implementation commit `80a6244` and transaction-test commit `67e8265`; gpm 0.6.0 atomically writes `platforms = []` and installs real packaged core plus only the current-host slice despite mobile/web project targets. Its release workflow, checksums, version output, and `--host-tool` help were verified against the published macOS arm64 artifact. End-to-end installation from the public gdtest release completes with criterion 1. |
-| 15. Canonical local/CI policy | Verified for current revision | `scripts/check`, prek, and CI share the required gates, select shipped runtime files, and deliberate malformed fixtures prove the gates fail. |
+| 14. Atomic host-tool installation | Released and verified end to end | gpm PR #58 merged implementation commit `80a6244` and transaction-test commit `67e8265`; gpm 0.6.0 atomically writes `platforms = []` and installs real packaged core plus only the current-host slice despite mobile/web project targets. Its release workflow, checksums, version output, and `--host-tool` help were verified against the published macOS arm64 artifact. The public gdtest v0.1.1 acceptance install contained only core plus `bin/macos-arm64/gdtest`. |
+| 15. Canonical local/CI policy | Verified for released revision | `scripts/check`, prek, and CI share the required gates, select shipped runtime files, and deliberate malformed fixtures prove the gates fail. Main protection requires strict, up-to-date `check` and `package` results from GitHub Actions. |
 
 ## Current verification evidence
 
@@ -72,7 +72,23 @@ Completed on 2026-11-05 for the current hardening batch:
   Linux installer downloaded and executed both published x86-64 and arm64 archives in clean
   architecture-matched containers. `scripts/package-addon 0.0.0-gpm-0.6-audit` and
   `scripts/test-package-addon 0.0.0-gpm-0.6-audit` then passed with the released macOS binary.
-  gdtest itself still has no release.
+- Release workflow run `42017841320` passed its quality and package jobs and published the initial
+  gdtest v0.1.0 release. A subsequent clean public install exposed recovered Godot bootstrap parse
+  diagnostics on the first run. PR #1 added a regression test and buffered pre-handshake process
+  output so a successful bootstrap retry is quiet while genuine startup failures retain their
+  bounded diagnostic tails. Both required PR checks passed, and squash commit `ceffcf0` contains
+  the fix.
+- Patch release run `42019524497`, invoked with only the `patch` choice, passed the canonical
+  quality and package jobs and atomically published gdtest v0.1.1 from `ceffcf0`. The release has
+  core plus macOS/Linux arm64/x86-64 slices and a gpm index. A fresh consumer downloaded the
+  published gpm 0.6.0 macOS arm64 archive, used `gpm add ... --version v0.1.1 --host-tool`, and
+  obtained `platforms = []`, the pure core, and only `bin/macos-arm64/gdtest`. The project-local
+  executable reported 0.1.1; its first run printed only the successful three-case summary with no
+  Godot banner or parse diagnostics. An intentional fixture returned exit 1 with
+  `failing.test.gd:7`, and repeated installation left the committed consumer worktree clean.
+- Classic main branch protection was read back through the GitHub API with `strict: true` and the
+  GitHub Actions contexts `check` and `package` (app id 15368). Pull requests remain required, and
+  force pushes and branch deletion remain disabled.
 - `scripts/package-addon 0.0.0-hardening` and `scripts/test-package-addon 0.0.0-hardening` passed
   with reproducible core/macOS/Linux slices, exact selected-tree reassembly, version handshakes,
   clean first Godot import, and host-only/default/all-platform scratch installs.
