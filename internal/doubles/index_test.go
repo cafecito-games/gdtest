@@ -18,7 +18,7 @@ func TestBuildIndexSkipsGodotAndGitDirectories(t *testing.T) {
 		".git/hooks/x.gd":    "this is not GDScript (\n",
 		"nested/.godot/b.gd": "this is not GDScript (\n",
 	})
-	index, diagnostics := BuildIndex(root)
+	index, diagnostics := BuildIndex(root, nil)
 	require.Empty(t, diagnostics)
 	require.Contains(t, index.scripts, "src/a.gd")
 	assert.Len(t, index.scripts, 1)
@@ -29,7 +29,7 @@ func TestBuildIndexReportsParseFailuresWithPosition(t *testing.T) {
 
 	_, diagnostics := BuildIndex(writeProject(t, map[string]string{
 		"src/broken.gd": "extends RefCounted\n\nfunc (:\n",
-	}))
+	}), nil)
 	require.Len(t, diagnostics, 1)
 	assert.Equal(t, "src/broken.gd", diagnostics[0].Path)
 	assert.Equal(t, 3, diagnostics[0].Line)
@@ -56,7 +56,7 @@ func TestBuildIndexDiagnosesDuplicateClassName(t *testing.T) {
 	_, diagnostics := BuildIndex(writeProject(t, map[string]string{
 		"src/a.gd": "class_name Shared\n",
 		"src/b.gd": "class_name Shared\n",
-	}))
+	}), nil)
 	require.Len(t, diagnostics, 1)
 	assert.Equal(t, "src/b.gd", diagnostics[0].Path)
 	assert.Contains(t, diagnostics[0].Message, "class_name Shared is also declared by src/a.gd")
@@ -65,7 +65,7 @@ func TestBuildIndexDiagnosesDuplicateClassName(t *testing.T) {
 func TestBuildIndexRejectsRootThatDoesNotExist(t *testing.T) {
 	t.Parallel()
 
-	index, diagnostics := BuildIndex(filepath.Join(t.TempDir(), "missing"))
+	index, diagnostics := BuildIndex(filepath.Join(t.TempDir(), "missing"), nil)
 	assert.Nil(t, index)
 	require.Len(t, diagnostics, 1)
 	assert.Contains(t, diagnostics[0].Message, "resolve project root")
@@ -79,7 +79,7 @@ func TestBuildIndexSymlinkedScriptOutsideRootIsDiagnosed(t *testing.T) {
 	root := writeProject(t, map[string]string{})
 	require.NoError(t, os.Symlink(filepath.Join(outside, "external.gd"), filepath.Join(root, "linked.gd")))
 
-	index, diagnostics := BuildIndex(root)
+	index, diagnostics := BuildIndex(root, nil)
 	require.Len(t, diagnostics, 1)
 	assert.Equal(t, "linked.gd", diagnostics[0].Path)
 	assert.Contains(t, diagnostics[0].Message, "symlink resolves outside the project root")

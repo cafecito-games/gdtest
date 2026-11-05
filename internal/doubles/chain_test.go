@@ -105,7 +105,7 @@ func TestAnalyzeBaseThatFailedToParseIsDiagnosed(t *testing.T) {
 	index, indexDiagnostics := BuildIndex(writeProject(t, map[string]string{
 		"src/base.gd":  "func (:\n",
 		"src/child.gd": "extends \"res://src/base.gd\"\n",
-	}))
+	}), nil)
 	require.Len(t, indexDiagnostics, 1)
 	assert.Equal(t, "src/base.gd", indexDiagnostics[0].Path)
 	_, diagnostics := Analyze(index, entryFor("child.gd"))
@@ -228,7 +228,7 @@ func TestAnalyzeSourceThatFailedToParseIsDiagnosed(t *testing.T) {
 
 	index, indexDiagnostics := BuildIndex(writeProject(t, map[string]string{
 		"src/broken.gd": "func (:\n",
-	}))
+	}), nil)
 	require.Len(t, indexDiagnostics, 1)
 	_, diagnostics := Analyze(index, config.TestDouble{Source: "src/broken.gd", Output: "doubles/broken_double.gd"})
 	assert.Equal(t, []string{"source script failed to parse"}, messagesOf(diagnostics))

@@ -149,6 +149,7 @@ func newRootCommand(streams IO, exitCode *int) *cobra.Command {
 		newDoctorCommand(streams),
 		newVersionCommand(streams),
 		newMigrateCommand(streams),
+		newGenerateCommand(streams, exitCode),
 		newDaemonCommand(streams),
 	)
 	return root

@@ -27,7 +27,7 @@ func writeProject(t *testing.T, files map[string]string) string {
 // reports diagnostics.
 func buildProject(t *testing.T, files map[string]string) *Index {
 	t.Helper()
-	index, diagnostics := BuildIndex(writeProject(t, files))
+	index, diagnostics := BuildIndex(writeProject(t, files), nil)
 	require.Empty(t, diagnostics)
 	require.NotNil(t, index)
 	return index

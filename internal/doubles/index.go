@@ -14,6 +14,7 @@ import (
 	"github.com/cafecito-games/gdparser/ast"
 	"github.com/cafecito-games/gdparser/parser"
 	"github.com/cafecito-games/gdparser/token"
+	"github.com/cafecito-games/gdtest/internal/pathglob"
 )
 
 // ownershipMarker matches the exact first line of a generated double. The
@@ -62,10 +63,11 @@ type member struct {
 }
 
 // BuildIndex parses every *.gd file under root, skipping .godot and .git
-// directories. Failures to read or parse a file become diagnostics; the index
-// still contains every file that parsed. When root cannot be resolved, the
-// returned index is nil.
-func BuildIndex(root string) (*Index, []Diagnostic) {
+// directories and any file or directory matched by exclude, which uses the
+// same glob semantics as test discovery. Failures to read or parse a file
+// become diagnostics; the index still contains every file that parsed. When
+// root cannot be resolved, the returned index is nil.
+func BuildIndex(root string, exclude []string) (*Index, []Diagnostic) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, []Diagnostic{{Path: root, Message: "resolve project root: " + err.Error()}}
@@ -90,9 +92,12 @@ func BuildIndex(root string) (*Index, []Diagnostic) {
 			if current != canonical && (entry.Name() == ".godot" || entry.Name() == ".git") {
 				return fs.SkipDir
 			}
+			if current != canonical && pathglob.MatchesAny(relative+"/placeholder", exclude) {
+				return fs.SkipDir
+			}
 			return nil
 		}
-		if filepath.Ext(entry.Name()) == ".gd" {
+		if filepath.Ext(entry.Name()) == ".gd" && !pathglob.MatchesAny(relative, exclude) {
 			index.addFile(current, relative, entry)
 		}
 		return nil

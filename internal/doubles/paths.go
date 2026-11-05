@@ -15,10 +15,10 @@ import (
 // existing output is a regular file.
 func (index *Index) checkEntryPaths(entry config.TestDouble) []Diagnostic {
 	var diagnostics []Diagnostic
-	if message := index.containmentProblem(entry.Source); message != "" {
+	if message := containmentProblem(index.root, entry.Source); message != "" {
 		diagnostics = append(diagnostics, Diagnostic{Path: entry.Source, Message: "source " + message})
 	}
-	if message := index.containmentProblem(entry.Output); message != "" {
+	if message := containmentProblem(index.root, entry.Output); message != "" {
 		diagnostics = append(diagnostics, Diagnostic{Path: entry.Output, Message: "output " + message})
 		return diagnostics
 	}
@@ -36,10 +36,11 @@ func (index *Index) checkEntryPaths(entry config.TestDouble) []Diagnostic {
 }
 
 // containmentProblem resolves the deepest existing ancestor of relative and
-// reports why that location is not inside the project root, or "" when it is.
-func (index *Index) containmentProblem(relative string) string {
-	target := filepath.Join(index.root, filepath.FromSlash(relative))
-	if !within(index.root, target) {
+// reports why that location is not inside root, or "" when it is. root must be
+// canonical.
+func containmentProblem(root string, relative string) string {
+	target := filepath.Join(root, filepath.FromSlash(relative))
+	if !within(root, target) {
 		return "escapes the project root"
 	}
 	current := target
@@ -51,7 +52,7 @@ func (index *Index) containmentProblem(relative string) string {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Sprintf("cannot be inspected: %v", err)
 		}
-		if current == index.root {
+		if current == root {
 			return "is missing its project root"
 		}
 		current = filepath.Dir(current)
@@ -60,7 +61,7 @@ func (index *Index) containmentProblem(relative string) string {
 	if err != nil {
 		return fmt.Sprintf("cannot be resolved: %v", err)
 	}
-	if !within(index.root, resolved) {
+	if !within(root, resolved) {
 		return "resolves outside the project root"
 	}
 	return ""

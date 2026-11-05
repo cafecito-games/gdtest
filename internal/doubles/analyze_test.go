@@ -384,7 +384,7 @@ func TestAnalyzeIsDeterministicAcrossRootPaths(t *testing.T) {
 
 func mustIndex(t *testing.T, root string) *Index {
 	t.Helper()
-	index, diagnostics := BuildIndex(root)
+	index, diagnostics := BuildIndex(root, nil)
 	require.NotNil(t, index)
 	require.Len(t, diagnostics, 1, "unrelated parse failure is reported by the index, not the entry")
 	return index

@@ -84,7 +84,7 @@ func TestRenderGoldenInventoryDouble(t *testing.T) {
 		Output:    "doubles/inventory_double.gd",
 		ClassName: "InventoryDouble",
 	})
-	goldenPath := filepath.Join("testdata", "inventory_double.golden.gd")
+	goldenPath := filepath.Join("testdata", "inventory_double.gd.golden")
 	if *updateGoldens {
 		require.NoError(t, os.WriteFile(goldenPath, []byte(rendered), 0o600))
 	}
@@ -118,9 +118,9 @@ func TestRenderIsDeterministicAcrossRootPaths(t *testing.T) {
 	firstRoot := writeProject(t, files)
 	secondRoot := writeProject(t, files)
 	require.NotEqual(t, firstRoot, secondRoot)
-	firstIndex, firstDiagnostics := BuildIndex(firstRoot)
+	firstIndex, firstDiagnostics := BuildIndex(firstRoot, nil)
 	require.Empty(t, firstDiagnostics)
-	secondIndex, secondDiagnostics := BuildIndex(secondRoot)
+	secondIndex, secondDiagnostics := BuildIndex(secondRoot, nil)
 	require.Empty(t, secondDiagnostics)
 	firstModel, _ := Analyze(firstIndex, entry)
 	secondModel, _ := Analyze(secondIndex, entry)
