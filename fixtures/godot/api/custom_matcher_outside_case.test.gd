@@ -33,6 +33,7 @@ func get_suite_name() -> String:
 func test_expect_that_outside_case__cases() -> Array[Variant]:
 	var matcher: GuardMatcher = GuardMatcher.new()
 	expect_that("sample", matcher)
+	assert(not matcher.match_called, "outside-case expect_that must not invoke matcher")
 	return [[matcher.match_called]]
 
 

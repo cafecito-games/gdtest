@@ -30,3 +30,25 @@ func test_untyped_caller_passes_freed_instance() -> void:
 	node.free()
 	var freed_instance: Variant = node
 	expect_that("sample", freed_instance)
+
+
+## Attempts dynamic instantiation of abstract GDTestMatcher via Variant.
+func test_dynamic_abstract_matcher_instantiation_returns_null() -> void:
+	var abstract_class: Variant = GDTestMatcher
+	var instance: Variant = abstract_class.new()
+	expect_null(instance)
+	expect_that("sample", instance)
+
+
+## Attempts compiling direct GDTestMatcher.new() call.
+func test_static_abstract_matcher_instantiation_rejected() -> void:
+	var dynamic_script: GDScript = GDScript.new()
+	dynamic_script.source_code = "extends RefCounted\nfunc build() -> GDTestMatcher:\n\treturn GDTestMatcher.new()\n"
+	dynamic_script.reload()
+
+
+## Attempts compiling a non-abstract GDTestMatcher subclass missing abstract methods.
+func test_unimplemented_abstract_matcher_subclass() -> void:
+	var dynamic_script: GDScript = GDScript.new()
+	dynamic_script.source_code = "extends GDTestMatcher\nfunc name() -> String:\n\treturn \"incomplete\"\n"
+	dynamic_script.reload()

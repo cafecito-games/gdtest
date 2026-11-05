@@ -1,16 +1,17 @@
-## Base class for project-defined custom matchers.
+## Abstract base class for project-defined custom matchers.
+@abstract
 class_name GDTestMatcher
 extends RefCounted
 
 
 ## Identifies this matcher in test failure diagnostics.
-func name() -> String:
-	return ""
+@abstract
+func name() -> String
 
 
-## Evaluates the actual value against this matcher.
-func match(_actual: Variant) -> GDTestMatchResult:
-	return GDTestMatchResult._gdtest_invalid("GDTestMatcher.match() must be overridden")
+## Evaluates `actual` against this matcher.
+@abstract
+func match(actual: Variant) -> GDTestMatchResult
 
 
 ## Validates matcher protocol and executes match evaluation fail-closed.

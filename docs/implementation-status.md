@@ -48,7 +48,7 @@ factory-constructed match results, and emit standard `assertion_failed` events w
 serialized actual and expected values, and composed failure explanations.
 
 - Runtime GDScript (`addons/gdtest/gdtest_matcher.gd`, `addons/gdtest/gdtest_match_result.gd`, `addons/gdtest/gdtest.gd`):
-  - `GDTestMatcher` defines `name() -> String`, default `match(actual) -> GDTestMatchResult`, and static `_gdtest_evaluate(actual, matcher) -> GDTestMatchResult`.
+  - `GDTestMatcher` is an `@abstract` class declaring `@abstract func name() -> String`, `@abstract func match(actual: Variant) -> GDTestMatchResult`, and static `_gdtest_evaluate(actual, matcher) -> GDTestMatchResult`.
   - `GDTestMatchResult` exposes getter-only `is_match`, `message`, `expected`, and `has_expected` properties (with no setters), factory methods `matched()` and `unmatched(...)`, and defensive container cloning up to depth 16 with cycle detection using `is_same` ancestor tracking, preserving collection typing (`Array[T]`, `Dictionary[K, V]`) and avoiding duplicate `Object` allocations.
   - `GDTest.expect_that` evaluates passing assertions with zero stack trace capture and zero diagnostic payload allocations. On failure or outside-case calls, it emits source-located diagnostics pointing directly at the caller's `expect_that` site, validating matcher and result contracts fail-closed with assertion `"expect_that"` without incrementing valid assertion counts.
   - Classified in `.gdkit/architecture.json` under layer `api` and feature `runtime`.

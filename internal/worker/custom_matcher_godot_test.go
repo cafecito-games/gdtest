@@ -101,8 +101,6 @@ func TestGodotCustomMatcherFailuresAndFailClosedMatrix(t *testing.T) {
 		"test_fail_closed_null_matcher",
 		"test_fail_closed_empty_matcher_name",
 		"test_fail_closed_whitespace_matcher_name",
-		"test_fail_closed_unoverridden_matcher_name",
-		"test_fail_closed_unoverridden_matcher_match",
 		"test_fail_closed_null_match_result",
 		"test_fail_closed_direct_new_match_result",
 		"test_fail_closed_empty_unmatched_message",
@@ -241,8 +239,6 @@ func TestGodotCustomMatcherFailuresAndFailClosedMatrix(t *testing.T) {
 		{"test_fail_closed_null_matcher", "expect_that requires a valid GDTestMatcher"},
 		{"test_fail_closed_empty_matcher_name", "GDTestMatcher.name() must return a non-empty String"},
 		{"test_fail_closed_whitespace_matcher_name", "GDTestMatcher.name() must return a non-empty String"},
-		{"test_fail_closed_unoverridden_matcher_name", "GDTestMatcher.name() must return a non-empty String"},
-		{"test_fail_closed_unoverridden_matcher_match", "GDTestMatcher.match() must be overridden"},
 		{"test_fail_closed_null_match_result", "GDTestMatcher.match() must return a GDTestMatchResult"},
 		{"test_fail_closed_direct_new_match_result", "GDTestMatchResult must be constructed with matched() or unmatched()"},
 		{"test_fail_closed_empty_unmatched_message", "GDTestMatchResult.unmatched() requires a non-empty message"},
@@ -331,9 +327,12 @@ func TestGodotCustomMatcherRuntimeErrorsAndWorkerReset(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{
-		"test_untyped_caller_passes_dictionary_matcher": "error",
-		"test_untyped_matcher_returns_dictionary":       "error",
-		"test_untyped_caller_passes_freed_instance":     "error",
+		"test_untyped_caller_passes_dictionary_matcher":            "error",
+		"test_untyped_matcher_returns_dictionary":                  "error",
+		"test_untyped_caller_passes_freed_instance":                "error",
+		"test_dynamic_abstract_matcher_instantiation_returns_null": "fail",
+		"test_static_abstract_matcher_instantiation_rejected":      "error",
+		"test_unimplemented_abstract_matcher_subclass":             "error",
 	}, untypedStatuses)
 
 	require.NoError(t, process.Reset(ctx))
@@ -398,23 +397,25 @@ func TestGodotCustomMatcherOutsideCaseRejection(t *testing.T) {
 		discoveryError.Location.Line,
 	)
 
-	// Running the case verifies matcher.match_called was false
-	caseStatuses := make(map[string]string)
+	var outsideRunFinished model.Event
+	outsideCasesExecuted := 0
 	err = process.Run(ctx, model.TestPlan{
 		ProtocolVersion: model.ProtocolVersion,
 		RunID:           "custom-matcher-outside-case-run",
 		Generation:      1,
 		Files:           []model.FilePlan{outsideCaseFile},
 	}, executor.EventSinkFunc(func(event model.Event) error {
-		if event.Type == model.EventCaseFinished {
-			caseStatuses[event.Name] = event.Status
+		switch event.Type {
+		case model.EventCaseStarted, model.EventCaseFinished:
+			outsideCasesExecuted++
+		case model.EventRunFinished:
+			outsideRunFinished = event
 		}
 		return nil
 	}))
 	require.NoError(t, err)
-	for _, status := range caseStatuses {
-		assert.Equal(t, "pass", status)
-	}
+	assert.Zero(t, outsideCasesExecuted, "discovery error in provider must skip file cases")
+	assert.Equal(t, "error", outsideRunFinished.Status)
 
 	require.NoError(t, process.Reset(ctx))
 

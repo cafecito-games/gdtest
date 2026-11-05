@@ -622,13 +622,18 @@ func expect_that(actual: Variant, matcher: GDTestMatcher, message: String = "") 
 
 #### Matcher protocol
 
-A custom matcher extends `GDTestMatcher` and provides two methods:
+A custom matcher extends the `@abstract` base class `GDTestMatcher` and
+implements both abstract methods:
 
 ```gdscript
+@abstract
 class_name GDTestMatcher
 extends RefCounted
 
+@abstract
 func name() -> String
+
+@abstract
 func match(actual: Variant) -> GDTestMatchResult
 ```
 
@@ -668,11 +673,13 @@ post-evaluation caller mutations or cyclic structures from altering diagnostics.
    point directly at the `expect_that` call site.
 2. If called outside an active test case, `expect_that` records a source-located
    framework error without invoking `matcher`.
-3. If `matcher` is null, unoverridden, returns an empty name, returns null, or
-   returns an invalid result (such as via direct `GDTestMatchResult.new()` or an
-   empty mismatch message), `expect_that` records a source-located assertion
-   failure with assertion `"expect_that"` without incrementing the valid
-   assertion count.
+3. `GDTestMatcher` and its `name()` / `match(actual)` methods are `@abstract`, so
+   Godot 4.7 rejects direct instantiation or unimplemented subclasses at script
+   compile time. If at runtime `matcher` is null, returns an empty or
+   whitespace-only name, returns null, or returns an invalid result (such as via
+   direct `GDTestMatchResult.new()` or an empty mismatch message), `expect_that`
+   records a source-located assertion failure with assertion `"expect_that"`
+   without incrementing the valid assertion count.
 4. On a passing match, `_gdtest_assertions` increments by 1 and case status is
    promoted to `"pass"`.
 5. On a mismatch, `_gdtest_assertions` increments by 1, and an `assertion_failed`
