@@ -532,6 +532,7 @@ func _gdtest_finish_registration() -> void:
 	for definition_value: Variant in _gdtest_definition_roots:
 		if definition_value is Dictionary:
 			await _gdtest_run_definition(_string_dictionary(definition_value))
+	_gdtest_definition_roots.clear()
 	_gdtest_suite_stack.clear()
 	_gdtest_active_definition.clear()
 	_gdtest_registration_active = false
@@ -595,6 +596,10 @@ func _gdtest_end_case() -> Dictionary[String, Variant]:
 		"messages": _gdtest_messages.duplicate(),
 		"outcomes": _gdtest_outcome_data.duplicate(true),
 	}
+
+
+func _gdtest_has_error() -> bool:
+	return _gdtest_status == "error"
 
 
 func _gdtest_record_error(text: String) -> void:
@@ -748,7 +753,7 @@ func _require_case(operation: String) -> bool:
 func _require_registration(operation: String) -> bool:
 	if _gdtest_registration_active:
 		return true
-	_record_discovery_error(operation + " is only valid during suite registration")
+	_record_framework_error(operation + " is only valid during suite registration")
 	return false
 
 
@@ -883,6 +888,21 @@ func _gdtest_release_outside_probes() -> void:
 	if _gdtest_outside_probe_context != null:
 		_gdtest_outside_probe_context.detach()
 	_gdtest_outside_probe_context = null
+
+
+func _gdtest_dispose() -> void:
+	_gdtest_release_signal_probes()
+	_gdtest_release_callback_probes()
+	_gdtest_release_double_context()
+	_gdtest_release_probe_context()
+	_gdtest_release_outside_probes()
+	_gdtest_dynamic_cases.clear()
+	_gdtest_dynamic_suites.clear()
+	_gdtest_definition_roots.clear()
+	_gdtest_active_definition.clear()
+	_gdtest_suite_stack.clear()
+	_gdtest_failure_sink = Callable()
+	_gdtest_tree = null
 
 
 func _gdtest_release_double_context() -> void:

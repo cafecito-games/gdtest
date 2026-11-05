@@ -195,7 +195,7 @@ func TestGodotCallbackProbeOutsideCaseReportsErrorAndReturnsInertProbe(t *testin
 
 	var workerErrors []model.Event
 	var runFinished model.Event
-	var hookCaseStatus string
+	casesExecuted := 0
 	err = process.Run(ctx, model.TestPlan{
 		ProtocolVersion: model.ProtocolVersion,
 		RunID:           "callback-probe-suite-hook-run",
@@ -205,17 +205,19 @@ func TestGodotCallbackProbeOutsideCaseReportsErrorAndReturnsInertProbe(t *testin
 		switch event.Type {
 		case model.EventWorkerError:
 			workerErrors = append(workerErrors, event)
-		case model.EventCaseFinished:
-			hookCaseStatus = event.Status
+		case model.EventCaseStarted, model.EventCaseFinished:
+			casesExecuted++
 		case model.EventRunFinished:
 			runFinished = event
 		}
 		return nil
 	}))
 	require.NoError(t, err)
-	assert.Equal(t, "pass", hookCaseStatus)
+	assert.Zero(t, casesExecuted, "before_all framework error must prevent suite cases from running")
 	assert.Equal(t, "error", runFinished.Status)
 	require.Len(t, workerErrors, 1)
+	assert.Equal(t, "worker.framework", workerErrors[0].Name)
+	assert.Equal(t, "framework", workerErrors[0].Assertion)
 	assert.Equal(t, "callback_probe is only valid while a case is executing", workerErrors[0].Message)
 	require.NotNil(t, workerErrors[0].Location)
 	assert.Equal(t, hookFile.Path, workerErrors[0].Location.File)

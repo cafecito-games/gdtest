@@ -53,10 +53,7 @@ func NewTerminalWithOptions(writer io.Writer, verbose bool) *Terminal {
 func (r *Terminal) Emit(event model.Event) error {
 	switch event.Type {
 	case model.EventAssertionFail:
-		location := ""
-		if event.Location != nil && event.Location.File != "" {
-			location = fmt.Sprintf(" (%s:%d)", event.Location.File, event.Location.Line)
-		}
+		location := formatLocation(event.Location)
 		details := diagnosticValues(event)
 		_, err := fmt.Fprintf(r.writer, "FAIL %s%s: %s%s\n", event.TestID, location, event.Message, details)
 		return err
@@ -85,11 +82,22 @@ func (r *Terminal) Emit(event model.Event) error {
 		delete(r.output, event.TestID)
 		return nil
 	case model.EventWorkerError:
-		_, err := fmt.Fprintf(r.writer, "ERROR %s: %s\n", event.Name, event.Message)
+		location := formatLocation(event.Location)
+		_, err := fmt.Fprintf(r.writer, "ERROR %s%s: %s\n", event.Name, location, event.Message)
 		return err
 	default:
 		return nil
 	}
+}
+
+func formatLocation(location *model.Location) string {
+	if location == nil || location.File == "" {
+		return ""
+	}
+	if location.Line > 0 {
+		return fmt.Sprintf(" (%s:%d)", location.File, location.Line)
+	}
+	return fmt.Sprintf(" (%s)", location.File)
 }
 
 // Summary prints counts in deterministic order.

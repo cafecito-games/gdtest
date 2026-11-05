@@ -898,7 +898,7 @@ func recoverableRunDiagnostic(event model.Event) bool {
 		}
 	}
 	switch code {
-	case "worker.discovery", "worker.script_load", "worker.invalid_test":
+	case "worker.discovery", "worker.framework", "worker.script_load", "worker.invalid_test":
 		return true
 	default:
 		return false

@@ -13,6 +13,122 @@ static func encode_line(message: Dictionary[String, Variant]) -> PackedByteArray
 	return (JSON.stringify(message) + "\n").to_utf8_buffer()
 
 
+## Builds the initial authenticated `hello` protocol envelope.
+static func hello_envelope(
+		token: String,
+		worker_id: String,
+		session_id: String,
+		generation: int,
+		project_path: String
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": "hello",
+		"token": token,
+		"payload": {
+			"runtime_version": Version.PRODUCT_VERSION,
+			"worker_id": worker_id,
+			"session_id": session_id,
+			"generation": generation,
+			"project_path": project_path,
+			"godot_version": Engine.get_version_info(),
+			"capabilities": [
+				"run",
+				"bench",
+				"discover",
+				"ping",
+				"cancel",
+				"reload",
+				"reset",
+				"shutdown",
+			],
+		},
+	}
+
+
+## Builds one sequenced worker `event` protocol envelope.
+static func event_envelope(
+		request_id: String,
+		event_type: String,
+		worker_id: String,
+		session_id: String,
+		generation: int,
+		run_id: String,
+		sequence: int,
+		data: Dictionary[String, Variant]
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": "event",
+		"request_id": request_id,
+		"payload": {
+			"kind": event_type,
+			"worker_id": worker_id,
+			"session_id": session_id,
+			"generation": generation,
+			"run_id": run_id,
+			"sequence": sequence,
+			"data": data,
+		},
+	}
+
+
+## Returns zeroed status counts for one file or run.
+static func empty_totals() -> Dictionary[String, int]:
+	return { "pass": 0, "fail": 0, "error": 0, "skip": 0, "todo": 0, "void": 0, "canceled": 0 }
+
+
+## Builds a versioned response envelope for one worker command reply.
+static func response_envelope(
+		message_type: String,
+		request_id: String,
+		payload: Dictionary[String, Variant]
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": message_type,
+		"request_id": request_id,
+		"payload": payload,
+	}
+
+
+## Builds a versioned pong envelope for a worker liveness check.
+static func pong_envelope(
+		request_id: String,
+		worker_id: String,
+		generation: int
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": "pong",
+		"request_id": request_id,
+		"payload": { "worker_id": worker_id, "generation": generation },
+	}
+
+
+## Builds a generation acknowledgement envelope for reload and reset commands.
+static func generation_ack(
+		message_type: String,
+		request_id: String,
+		generation: int
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": message_type,
+		"request_id": request_id,
+		"generation": generation,
+	}
+
+
+## Builds a worker_error event payload for a named worker or protocol error code.
+static func worker_error(
+		code: String,
+		text: String,
+		test_id: String
+) -> Dictionary[String, Variant]:
+	return { "name": code, "message": text, "test_id": test_id, "metadata": { "code": code } }
+
+
 ## Decodes one JSON Lines object or returns an empty dictionary.
 static func decode_line(line: String) -> Dictionary[String, Variant]:
 	if not _json_nesting_within_limit(line):
@@ -226,17 +342,7 @@ static func discovery_manifest(
 
 ## Normalizes one runtime discovery diagnostic while retaining its location.
 static func discovery_error(value: Variant, default_file: String) -> Dictionary[String, Variant]:
-	var diagnostic: Dictionary[String, Variant] = string_dictionary(value)
-	var location: Dictionary[String, Variant] = string_dictionary(diagnostic.get("location", {}))
-	if str(location.get("file", "")).is_empty():
-		location["file"] = default_file
-	if not location.has("line"):
-		location["line"] = -1
-	return {
-		"code": str(diagnostic.get("code", "worker.discovery")),
-		"message": str(diagnostic.get("message", value)),
-		"location": location,
-	}
+	return _runtime_diagnostic(value, default_file, "worker.discovery")
 
 
 ## Normalizes every runtime discovery diagnostic in `values` against `default_file`.
@@ -245,6 +351,87 @@ static func discovery_errors(values: Array[Variant], default_file: String) -> Ar
 	for value: Variant in values:
 		normalized.append(discovery_error(value, default_file))
 	return normalized
+
+
+## Normalizes one execution-time framework diagnostic while retaining its location.
+static func framework_error(value: Variant, default_file: String) -> Dictionary[String, Variant]:
+	return _runtime_diagnostic(value, default_file, "worker.framework")
+
+
+## Normalizes every execution-time framework diagnostic in `values` against `default_file`.
+static func framework_errors(values: Array[Variant], default_file: String) -> Array[Variant]:
+	var normalized: Array[Variant] = []
+	for value: Variant in values:
+		normalized.append(framework_error(value, default_file))
+	return normalized
+
+
+## Builds one `worker_error` wire payload from a normalized or raw runtime diagnostic.
+static func diagnostic_worker_error(
+		value: Variant,
+		default_file: String,
+		default_code: String,
+		assertion: String,
+		case_id: String
+) -> Dictionary[String, Variant]:
+	var diagnostic: Dictionary[String, Variant] = _runtime_diagnostic(
+			value,
+			default_file,
+			default_code
+	)
+	var payload: Dictionary[String, Variant] = {
+		"name": str(diagnostic["code"]),
+		"message": str(diagnostic["message"]),
+		"test_id": case_id,
+		"metadata": { "code": diagnostic["code"] },
+	}
+	if not assertion.is_empty():
+		payload["assertion"] = assertion
+	var location: Dictionary[String, Variant] = string_dictionary(diagnostic["location"])
+	if not str(location.get("file", "")).is_empty():
+		payload["location"] = location
+	return payload
+
+
+## Builds one `assertion_failed` wire payload with normalized project-relative location.
+static func assertion_failed(
+		case_id: String,
+		diagnostic: Dictionary[String, Variant]
+) -> Dictionary[String, Variant]:
+	var location: Dictionary[String, Variant] = string_dictionary(diagnostic.get("location", {}))
+	if location.has("file"):
+		location["file"] = str(location["file"]).trim_prefix("res://")
+	var payload: Dictionary[String, Variant] = {
+		"test_id": case_id,
+		"assertion": diagnostic.get("assertion", ""),
+		"message": diagnostic.get("message", ""),
+		"actual": wire_value(diagnostic.get("actual")),
+	}
+	if not str(location.get("file", "")).is_empty():
+		payload["location"] = location
+	if bool(diagnostic.get("has_expected", false)):
+		payload["expected"] = wire_value(diagnostic.get("expected"))
+	return payload
+
+
+static func _runtime_diagnostic(
+		value: Variant,
+		default_file: String,
+		default_code: String
+) -> Dictionary[String, Variant]:
+	var diagnostic: Dictionary[String, Variant] = string_dictionary(value)
+	var location: Dictionary[String, Variant] = string_dictionary(diagnostic.get("location", {}))
+	var file_path: String = str(location.get("file", ""))
+	if file_path.is_empty():
+		file_path = default_file
+	location["file"] = file_path.trim_prefix("res://")
+	if not location.has("line"):
+		location["line"] = -1
+	return {
+		"code": str(diagnostic.get("code", default_code)),
+		"message": str(diagnostic.get("message", value)),
+		"location": location,
+	}
 
 
 ## Orders two strings lexicographically by raw UTF-8 bytes.
@@ -295,6 +482,29 @@ static func run_finished(
 		"counts": counts,
 		"duration_ns": duration_usec * 1000,
 		"metadata": metadata,
+	}
+
+
+## Serializes one case_started event payload.
+static func case_started(
+		case_id: String,
+		case_name: String,
+		path: String,
+		line: int
+) -> Dictionary[String, Variant]:
+	return {
+		"test_id": case_id,
+		"name": case_name,
+		"location": { "file": path.trim_prefix("res://"), "line": line },
+	}
+
+
+## Serializes one worker_tainted event payload when a case times out or is canceled.
+static func worker_tainted(case_id: String, timed_out: bool) -> Dictionary[String, Variant]:
+	return {
+		"test_id": case_id,
+		"message": "case timeout" if timed_out else "case cancellation",
+		"metadata": { "reason": "case_timeout" if timed_out else "canceled" },
 	}
 
 

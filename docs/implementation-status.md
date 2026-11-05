@@ -383,8 +383,10 @@ asynchronous `wait_until_count` handling across `GDTestSignalProbe` and `GDTestC
   - `fixtures/godot/api/callback_probe_outside_case.test.gd`,
     `fixtures/godot/api/callback_probe_class_initializer.test.gd`, and
     `fixtures/godot/api/callback_probe_suite_hook.test.gd`: outside-case creation in providers,
-    member initializers, and suite hooks returns a closed inert probe with an invalid `Callable()`
-    and reports source-located `worker.discovery` diagnostics in both `Discover` and `Run`.
+    member initializers, and suite hooks returns a closed inert probe with an invalid `Callable()`,
+    reporting source-located `worker.discovery` diagnostics during `Discover` and `worker.framework`
+    diagnostics during suite-hook `Run` while skipping the affected suite body and attempting
+    cleanup hooks.
   - `fixtures/godot/api/callback_probe_leak.test.gd` and
     `fixtures/godot/api/callback_probe_timeout.test.gd`: retained callbacks invoked >1,024 times in
     later cases and subsequent runs on the same persistent worker PID pass with bounded
@@ -398,3 +400,42 @@ asynchronous `wait_until_count` handling across `GDTestSignalProbe` and `GDTestC
   `TestDocumentedBasicExampleExecutes`, and `scripts/package-addon 0.0.0-issue-5` plus
   `scripts/test-package-addon 0.0.0-issue-5` passed alongside `scripts/check` on Godot 4.7.2 and
   gpm 0.6.0, verifying the shipped core files and packaged `callback_probe` runtime handshake.
+
+## Post-Discovery Framework Error Reporting
+
+- Runtime drainage and lifecycle cleanup (`addons/gdtest/gdtest.gd`, `addons/gdtest/protocol.gd`,
+  `addons/gdtest/worker.gd`, `addons/gdtest/worker_case_task.gd`):
+  - `_require_registration` routes through `_record_framework_error` so calling `define`, `test`,
+    or `test_each` inside an active case marks that case `error` with a source-located `framework`
+    diagnostic instead of appending silently to `_gdtest_discovery_errors`.
+  - `worker.gd` drains `_gdtest_discovery_errors` immediately after every execution-time hook
+    (`before_all`, root and nested `before_suite`, nested and root `after_suite`, `after_all`),
+    after each case, and before `suite_finished`, emitting source-located `worker.framework`
+    `worker_error` events with normalized project-relative paths (no `res://` prefix) and counting
+    each error in the file and run totals.
+  - Framework errors in `before_all`, root or nested `before_suite`, and `before_case` /
+    `before_each` prevent the affected file, suite, or case body from running while still
+    attempting applicable cleanup hooks (`after_case`, `after_suite`, `after_all`) per `api-spec.md`
+    section 8.
+  - `GDTest._gdtest_dispose()` clears dynamic registration closures and probe contexts after
+    discovery, normal execution, and skipped prepared files so `RefCounted` suites leave zero
+    leaked `ObjectDB` instances on worker exit.
+- Go orchestration, folding, and reporting (`internal/worker`, `internal/service`,
+  `internal/results`, `internal/reporter`, `internal/app`):
+  - `worker.Process` treats `worker.framework` as a recoverable diagnostic so persistent workers
+    reset and continue serving subsequent runs, and `GodotExecutor.Run` applies the same
+    project-relative diagnostic path validation as `worker.Process`.
+  - `SessionService.runFiles` promotes aggregate `run_finished` status on `worker_error`,
+    `suite_finished`, and per-file `run_finished` events across multi-file runs.
+  - `results.Collector` folds `worker.framework` events into `Summary.Errors` and `Summary.Errored`
+    without marking `Summary.Infrastructure`, so execution-time framework misuse exits with
+    `ExitFailures` (`1`) while real discovery/protocol/worker failures retain `ExitError` (`2`).
+  - `reporter.Terminal` renders `ERROR <name> (<file>:<line>): <message>` when a `worker_error`
+    carries source location metadata.
+- Verification (`fixtures/godot/api/hook_misuse.test.gd`,
+  `internal/worker/hook_misuse_godot_test.go`, `internal/integration/godot_test.go`,
+  `internal/results/results_test.go`, `internal/reporter/reporter_test.go`,
+  `internal/service/session_test.go`, `internal/app/app_test.go`): unit and real-Godot tests prove
+  ordered, source-located framework error reporting across `before_all`, `before_suite`,
+  `after_suite`, `after_all`, and in-case registration misuse in foreground, JSONL, and multi-file
+  session runs.

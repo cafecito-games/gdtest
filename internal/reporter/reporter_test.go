@@ -95,3 +95,76 @@ func TestJSONLSummaryIncludesStrictOutcomePolicyFailures(t *testing.T) {
 		}
 	}`, output.String())
 }
+
+func TestTerminalWorkerErrorPrintsSourceLocationWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewTerminal(&output)
+	require.NoError(t, reporter.Emit(model.Event{
+		Type:     model.EventWorkerError,
+		Name:     "worker.framework",
+		Message:  "expect is only valid while a case is executing",
+		Location: &model.Location{File: "tests/hooks.test.gd", Line: 14},
+	}))
+	require.NoError(t, reporter.Emit(model.Event{
+		Type:     model.EventWorkerError,
+		Name:     "worker.script_load",
+		Message:  "unable to load test script",
+		Location: &model.Location{File: "tests/broken.test.gd", Line: -1},
+	}))
+	require.NoError(t, reporter.Emit(model.Event{
+		Type:    model.EventWorkerError,
+		Name:    "worker.infrastructure",
+		Message: "socket closed",
+	}))
+
+	assert.Equal(
+		t,
+		"ERROR worker.framework (tests/hooks.test.gd:14): expect is only valid while a case is executing\n"+
+			"ERROR worker.script_load (tests/broken.test.gd): unable to load test script\n"+
+			"ERROR worker.infrastructure: socket closed\n",
+		output.String(),
+	)
+}
+
+func TestJSONLSummaryIncludesFrameworkErrors(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewJSONL(&output)
+	require.NoError(t, reporter.Summary(results.Summary{
+		Cases:   []results.CaseResult{},
+		Passed:  1,
+		Errored: 1,
+		Errors: []model.Event{{
+			Type:      model.EventWorkerError,
+			Name:      "worker.framework",
+			Assertion: "framework",
+			Message:   "expect is only valid while a case is executing",
+			Location:  &model.Location{File: "tests/hooks.test.gd", Line: 14},
+		}},
+	}))
+
+	assert.JSONEq(t, `{
+		"type": "summary",
+		"summary": {
+			"cases": [],
+			"errors": [{
+				"protocol_version": 0,
+				"type": "worker_error",
+				"name": "worker.framework",
+				"assertion": "framework",
+				"message": "expect is only valid while a case is executing",
+				"location": {"file": "tests/hooks.test.gd", "line": 14}
+			}],
+			"passed": 1,
+			"failed": 0,
+			"skipped": 0,
+			"todo": 0,
+			"void": 0,
+			"errored": 1,
+			"canceled": 0
+		}
+	}`, output.String())
+}

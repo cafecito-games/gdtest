@@ -43,13 +43,14 @@ func _execute(
 		await instance.callv(&"before_case", [info])
 	elif instance.has_method("before_each"):
 		await instance.callv(&"before_each", [info])
-	var callback: Variant = case_plan.get("callback")
-	if callback is Callable:
-		await callback.callv(parameters)
-	elif not method_name.is_empty() and instance.has_method(method_name):
-		await instance.callv(method_name, parameters)
-	else:
-		instance._gdtest_record_error_at("case callback is unavailable", info.file, info.line)
+	if not instance._gdtest_has_error():
+		var callback: Variant = case_plan.get("callback")
+		if callback is Callable:
+			await callback.callv(parameters)
+		elif not method_name.is_empty() and instance.has_method(method_name):
+			await instance.callv(method_name, parameters)
+		else:
+			instance._gdtest_record_error_at("case callback is unavailable", info.file, info.line)
 	if instance.has_method("after_case"):
 		await instance.callv(&"after_case", [info])
 	elif instance.has_method("after_each"):
