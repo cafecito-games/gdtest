@@ -2,12 +2,14 @@
 package daemon
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 
 	"github.com/cafecito-games/gdtest/internal/version"
@@ -54,7 +56,7 @@ func NewNamespace(cacheRoot string, protocolVersion int, buildID string) (Namesp
 		Root:         root,
 		Protocol:     protocolVersion,
 		BuildID:      buildID,
-		SocketPath:   filepath.Join(root, "daemon.sock"),
+		SocketPath:   daemonSocketPath(root),
 		MetadataPath: filepath.Join(root, "metadata.json"),
 		LockPath:     filepath.Join(root, "daemon.lock"),
 		LogPath:      filepath.Join(root, "daemon.jsonl"),
@@ -63,11 +65,48 @@ func NewNamespace(cacheRoot string, protocolVersion int, buildID string) (Namesp
 
 // Prepare creates the namespace with current-user-only permissions.
 func (n Namespace) Prepare() error {
-	if err := os.MkdirAll(n.Root, 0o700); err != nil {
-		return fmt.Errorf("create daemon namespace: %w", err)
+	if err := preparePrivateDirectory(n.Root); err != nil {
+		return fmt.Errorf("prepare daemon namespace: %w", err)
 	}
-	if err := os.Chmod(n.Root, 0o700); err != nil {
-		return fmt.Errorf("secure daemon namespace: %w", err)
+	socketDirectory := filepath.Dir(n.SocketPath)
+	if filepath.Clean(socketDirectory) != filepath.Clean(n.Root) {
+		if err := preparePrivateDirectory(socketDirectory); err != nil {
+			return fmt.Errorf("prepare daemon socket directory: %w", err)
+		}
+	}
+	return nil
+}
+
+const safeUnixSocketPathBytes = 90
+
+func daemonSocketPath(root string) string {
+	direct := filepath.Join(root, "daemon.sock")
+	if runtime.GOOS == "windows" || len([]byte(direct)) <= safeUnixSocketPathBytes {
+		return direct
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(root)))
+	directory := fmt.Sprintf("gdt-%x", digest[:12])
+	base := os.TempDir()
+	short := filepath.Join(base, directory, "d.sock")
+	if len([]byte(short)) > safeUnixSocketPathBytes {
+		short = filepath.Join(string(filepath.Separator)+"tmp", directory, "d.sock")
+	}
+	return short
+}
+
+func preparePrivateDirectory(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is not a private directory", path)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("secure %s: %w", path, err)
 	}
 	return nil
 }

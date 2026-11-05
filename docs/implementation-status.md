@@ -116,7 +116,14 @@ Completed on 2026-11-05 for the current hardening batch:
   Linux arm64 host binary. CI and release workflows now use those verified release installers;
   the prior `go install` command produced `gpm version dev` and could not satisfy the packaging
   version gate. The x86-64 installer paths independently verified both release-asset digests and
-  exact Godot/gpm version output under Linux emulation. `actionlint` also passes for both workflows.
+  exact Godot/gpm version output under Linux emulation. CI installs gdkit from its pinned v0.10.0
+  module and rejects any different reported version. `actionlint` also passes for both workflows.
+- Packaged-install verification runs `doctor` from the project-local host executable under an
+  isolated home and requires its project, engine, runtime, import-cache, daemon namespace/status,
+  worker, and static/completed discovery fields before stopping the exact release daemon. This
+  exposed the Unix socket limit for long cache paths; bounded hashed fallback sockets now retain
+  private permissions and deterministic namespace identity, with real server/race coverage and
+  successful macOS and Linux arm64 package runs. See ADR 0007.
 
 ## Uzir customer dogfood
 

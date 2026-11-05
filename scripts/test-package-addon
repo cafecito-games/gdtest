@@ -22,7 +22,12 @@ done
 
 work=$(mktemp -d)
 server_pid=""
+doctor_binary=""
+doctor_home=""
 cleanup() {
+    if [ -n "$doctor_binary" ] && [ -n "$doctor_home" ]; then
+        HOME="$doctor_home" "$doctor_binary" daemon stop >/dev/null 2>&1 || true
+    fi
     if [ -n "$server_pid" ]; then
         kill "$server_pid" >/dev/null 2>&1 || true
         wait "$server_pid" >/dev/null 2>&1 || true
@@ -104,8 +109,9 @@ esac
 assert_exact_tree() {
     local project="$1"
     shift
-    local expected="$work/expected-$(basename "$project").txt"
-    local actual="$work/actual-$(basename "$project").txt"
+    local expected actual
+    expected="$work/expected-$(basename "$project").txt"
+    actual="$work/actual-$(basename "$project").txt"
     : > "$expected"
     for archive in "$@"; do
         unzip -Z1 "$dist/$archive" | sed '/\/$/d' >> "$expected"
@@ -179,6 +185,31 @@ EOF
         --project "$host_project" tests/package.test.gd 2>&1) \
         || fail "gpm-installed executable/runtime handshake failed:$'\n'$package_output"
     grep -qF "1 passed" <<< "$package_output" || fail "packaged handshake did not execute the passing test"
+
+	doctor_binary="$host_project/addons/gdtest/gdtest"
+	doctor_home="$work/doctor-home"
+	mkdir -p "$doctor_home"
+	doctor_output=$(HOME="$doctor_home" "$doctor_binary" doctor --project "$host_project" 2>&1) \
+		|| fail "packaged doctor failed:$'\n'$doctor_output"
+	host_project_canonical=$(cd "$host_project" && pwd -P)
+	for expected in \
+		"project_root: $host_project_canonical" \
+		"godot_version: " \
+		"runtime_version: $version" \
+		"import_cache_ready: true" \
+		"daemon_namespace: " \
+		"daemon_status: " \
+		"daemon_worker: " \
+		"tests_static: 1" \
+		"tests_completed: 1"
+	do
+		grep -qF "$expected" <<< "$doctor_output" \
+			|| fail "packaged doctor omitted '$expected':$'\n'$doctor_output"
+	done
+	HOME="$doctor_home" "$doctor_binary" daemon stop >/dev/null \
+		|| fail "packaged doctor daemon did not stop"
+	doctor_binary=""
+	doctor_home=""
 
 	mkdir -p "$standalone_project/tests"
 	cp "$host_project/tests/package.test.gd" "$standalone_project/tests/package.test.gd"

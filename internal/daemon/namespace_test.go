@@ -3,6 +3,8 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,25 @@ func TestNamespaceRejectsUnsafeBuildID(t *testing.T) {
 
 	_, err := NewNamespace(t.TempDir(), 1, "../other")
 	require.Error(t, err)
+}
+
+func TestLongNamespaceUsesBoundedPrivateSocketDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows local transport is deferred")
+	}
+	cacheRoot := filepath.Join(t.TempDir(), strings.Repeat("long-cache-segment-", 10))
+	namespace, err := NewNamespace(cacheRoot, 1, "long-path-build")
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len([]byte(namespace.SocketPath)), safeUnixSocketPathBytes)
+	assert.NotEqual(t, filepath.Clean(namespace.Root), filepath.Clean(filepath.Dir(namespace.SocketPath)))
+
+	require.NoError(t, namespace.Prepare())
+	rootInfo, err := os.Stat(namespace.Root)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), rootInfo.Mode().Perm())
+	socketInfo, err := os.Stat(filepath.Dir(namespace.SocketPath))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), socketInfo.Mode().Perm())
 }
 
 func TestMetadataRoundTripAndMismatch(t *testing.T) {

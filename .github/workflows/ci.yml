@@ -21,7 +21,10 @@ jobs:
           version: v2.11.4
           install-only: true
       - name: Install gdkit
-        run: go install github.com/cafecito-games/gdkit/cmd/gdkit@v0.10.0
+        run: |
+          go install github.com/cafecito-games/gdkit/cmd/gdkit@v0.10.0
+          gdkit_version=$(gdkit --version)
+          [[ "$gdkit_version" == "gdkit version 0.10.0"* ]]
       - name: Install pinned Godot 4.7.2
         run: |
           sudo apt-get update -qq

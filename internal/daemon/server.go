@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -239,6 +240,9 @@ func (s *Server) cleanup() {
 	s.wait.Wait()
 	_ = os.Remove(s.Namespace.MetadataPath)
 	_ = os.Remove(s.Namespace.SocketPath)
+	if socketDirectory := filepath.Dir(s.Namespace.SocketPath); filepath.Clean(socketDirectory) != filepath.Clean(s.Namespace.Root) {
+		_ = os.Remove(socketDirectory)
+	}
 	s.log(map[string]any{"event": "daemon_stopped", "level": "info"})
 }
 
