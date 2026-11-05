@@ -103,19 +103,23 @@ type startupTimingWorker interface {
 type workerFactory func(context.Context, worker.ProcessOptions) (managedWorker, error)
 
 type session struct {
-	mu          sync.Mutex
-	id          string
-	project     string
-	godot       string
-	worker      managedWorker
-	workerBorn  time.Time
-	workerBytes uint64
-	source      *sourcewatch.Reconciler
-	lastUsed    time.Time
-	runs        uint64
-	workerRuns  uint64
-	idleTTL     time.Duration
-	lifecycle   projectidentity.Lifecycle
+	mu sync.Mutex
+	id string
+	// schedulerKey names this incarnation of the session in the scheduler.
+	// Evicting a session retires its key; a later session with the same id
+	// gets a new key, so the retired fence never rejects the new incarnation.
+	schedulerKey string
+	project      string
+	godot        string
+	worker       managedWorker
+	workerBorn   time.Time
+	workerBytes  uint64
+	source       *sourcewatch.Reconciler
+	lastUsed     time.Time
+	runs         uint64
+	workerRuns   uint64
+	idleTTL      time.Duration
+	lifecycle    projectidentity.Lifecycle
 }
 
 // SessionInfo is the stable daemon-sessions response.
@@ -133,6 +137,7 @@ type SessionInfo struct {
 type SessionService struct {
 	mu               sync.Mutex
 	sessions         map[string]*session
+	incarnations     uint64
 	factory          workerFactory
 	maxWorkers       int
 	maxWorkerAge     time.Duration
@@ -229,7 +234,7 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if err := requireCurrentGeneration(value.Plan.Generation, result.Update.Generation); err != nil {
 			return nil, err
 		}
-		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, isolation, func(runCtx context.Context) (any, error) {
+		return s.schedule(ctx, entry, value.Plan.Generation, scheduler.Interactive, isolation, func(runCtx context.Context) (any, error) {
 			return s.run(runCtx, entry, value, isolation, emit, time.Since(submitted))
 		})
 	case "session.bench":
@@ -259,7 +264,7 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if err := requireCurrentGeneration(value.Plan.Generation, result.Update.Generation); err != nil {
 			return nil, err
 		}
-		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, isolation, func(runCtx context.Context) (any, error) {
+		return s.schedule(ctx, entry, value.Plan.Generation, scheduler.Interactive, isolation, func(runCtx context.Context) (any, error) {
 			return s.bench(runCtx, entry, value, isolation, emit, time.Since(submitted))
 		})
 	case "session.discover":
@@ -284,7 +289,7 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if err := requireCurrentGeneration(value.Plan.Generation, result.Update.Generation); err != nil {
 			return nil, err
 		}
-		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, scheduler.Reuse, func(runCtx context.Context) (any, error) {
+		return s.schedule(ctx, entry, value.Plan.Generation, scheduler.Interactive, scheduler.Reuse, func(runCtx context.Context) (any, error) {
 			return s.discover(runCtx, entry, value)
 		})
 	case "session.generation":
@@ -334,7 +339,7 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if result.Update.Generation > 0 {
 			value.Generation = result.Update.Generation
 		}
-		return s.schedule(ctx, value.SessionID, value.Generation, scheduler.Background, scheduler.Reuse, func(runCtx context.Context) (any, error) {
+		return s.schedule(ctx, entry, value.Generation, scheduler.Background, scheduler.Reuse, func(runCtx context.Context) (any, error) {
 			return s.warm(runCtx, entry, value)
 		})
 	case "daemon.sessions":
@@ -410,7 +415,7 @@ func (s *SessionService) runFiles(
 	aggregateTimings := make(map[string]int64)
 	primarySubmitted := time.Now()
 	_, err = s.schedule(
-		ctx, request.SessionID, request.Plan.Generation,
+		ctx, entry, request.Plan.Generation,
 		scheduler.Interactive, isolation,
 		func(setupCtx context.Context) (any, error) {
 			aggregateTimings["queue_wait"] = time.Since(primarySubmitted).Nanoseconds()
@@ -469,7 +474,7 @@ func (s *SessionService) runFiles(
 			fileRequest.Plan.Files = []model.FilePlan{file}
 			fileSubmitted := time.Now()
 			value, err := s.schedule(
-				runCtx, request.SessionID, request.Plan.Generation,
+				runCtx, entry, request.Plan.Generation,
 				scheduler.Interactive, isolation,
 				func(fileCtx context.Context) (any, error) {
 					return s.runFileOnWorker(
@@ -786,7 +791,7 @@ func (s *SessionService) discover(ctx context.Context, entry *session, request D
 
 func (s *SessionService) schedule(
 	ctx context.Context,
-	sessionID string,
+	entry *session,
 	generation uint64,
 	priority scheduler.Priority,
 	isolation scheduler.Isolation,
@@ -800,7 +805,7 @@ func (s *SessionService) schedule(
 	}
 	var value any
 	future := s.scheduler.Submit(ctx, scheduler.Request{
-		Session: sessionID, Generation: generation, Priority: priority, Isolation: isolation,
+		Session: entry.schedulerKey, Generation: generation, Priority: priority, Isolation: isolation,
 		Run: func(runCtx context.Context, _ scheduler.Lease) error {
 			var err error
 			value, err = operation(runCtx)
@@ -810,6 +815,9 @@ func (s *SessionService) schedule(
 	result, err := future.Wait(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if errors.Is(result.Err, scheduler.ErrObsoleteGeneration) {
+		return nil, obsoleteWorkError(entry, generation)
 	}
 	return value, result.Err
 }
@@ -1123,8 +1131,9 @@ func (s *SessionService) get(id, project, godot string, workerIdleNS int64) (*se
 		idleTTL = time.Duration(workerIdleNS)
 	}
 	now := time.Now().UTC()
+	s.incarnations++
 	created := &session{
-		id: id, project: project, godot: godot, lastUsed: now, idleTTL: idleTTL,
+		id: id, schedulerKey: fmt.Sprintf("%s#%d", id, s.incarnations), project: project, godot: godot, lastUsed: now, idleTTL: idleTTL,
 		lifecycle: projectidentity.Lifecycle{ProjectRoot: project, LastUsed: now},
 	}
 	if s.sourceFactory != nil {
@@ -1200,7 +1209,7 @@ func (s *SessionService) reconcileSource(
 		return result, nil
 	}
 	if s.scheduler != nil {
-		s.scheduler.AdvanceGeneration(entry.id, result.Update.Generation)
+		s.scheduler.AdvanceGeneration(entry.schedulerKey, result.Update.Generation)
 	}
 	s.logLifecycle(
 		"source_generation_advanced",
@@ -1452,7 +1461,7 @@ func (s *SessionService) Reconcile(
 			continue
 		}
 		if s.scheduler != nil {
-			s.scheduler.AdvanceGeneration(entry.id, ^uint64(0))
+			s.scheduler.Retire(entry.schedulerKey)
 		}
 		s.discardWorker(entry)
 		entry.mu.Unlock()
@@ -1631,13 +1640,41 @@ func validateProjectPath(value string) error {
 	return nil
 }
 
+// StaleGenerationSuffix ends every daemon error that means the request was
+// planned against a source generation the daemon no longer serves. Clients
+// match it to re-plan and resubmit instead of failing.
+const StaleGenerationSuffix = "; rediscover and retry"
+
 func requireCurrentGeneration(requested, current uint64) error {
 	if current == 0 || current == requested {
 		return nil
 	}
 	return fmt.Errorf(
-		"source generation changed from %d to %d; rediscover and retry",
+		"source generation changed from %d to %d"+StaleGenerationSuffix,
 		requested,
 		current,
 	)
+}
+
+// staleWorkError reports scheduler fencing in the same retryable form as
+// requireCurrentGeneration, while still matching scheduler.ErrObsoleteGeneration.
+type staleWorkError struct {
+	message string
+}
+
+func (e staleWorkError) Error() string { return e.message }
+
+func (e staleWorkError) Unwrap() error { return scheduler.ErrObsoleteGeneration }
+
+func obsoleteWorkError(entry *session, requested uint64) error {
+	current := uint64(0)
+	if entry.source != nil {
+		current = entry.source.Generation()
+	}
+	if current > requested {
+		return staleWorkError{message: fmt.Sprintf(
+			"source generation changed from %d to %d"+StaleGenerationSuffix, requested, current,
+		)}
+	}
+	return staleWorkError{message: "project session was retired before its work ran" + StaleGenerationSuffix}
 }

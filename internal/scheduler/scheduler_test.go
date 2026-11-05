@@ -353,6 +353,47 @@ func TestExclusiveWaitsForAllSlotsAndBlocksFollowers(t *testing.T) {
 	}
 }
 
+func TestRetireRejectsQueuedAndFutureWorkAndKeepsOtherSessionsFair(t *testing.T) {
+	t.Parallel()
+	scheduler := newTestScheduler(t, Options{Capacity: 1})
+	started := make(chan struct{})
+	block := make(chan struct{})
+	running := scheduler.Submit(context.Background(), Request{
+		Session: "retired", Generation: 1, Priority: Interactive,
+		Run: func(context.Context, Lease) error {
+			close(started)
+			<-block
+			return nil
+		},
+	})
+	waitSignal(t, started)
+	ranQueued := atomic.Bool{}
+	queued := scheduler.Submit(context.Background(), Request{
+		Session: "retired", Generation: 5, Priority: Interactive,
+		Run: func(context.Context, Lease) error { ranQueued.Store(true); return nil },
+	})
+	ranOther := atomic.Bool{}
+	other := scheduler.Submit(context.Background(), Request{
+		Session: "other", Generation: 1, Priority: Interactive,
+		Run: func(context.Context, Lease) error { ranOther.Store(true); return nil },
+	})
+
+	scheduler.Retire("retired")
+	require.ErrorIs(t, waitResult(t, queued).Err, ErrObsoleteGeneration)
+	late := scheduler.Submit(context.Background(), Request{
+		Session: "retired", Generation: ^uint64(0) - 1, Priority: Interactive,
+		Run: func(context.Context, Lease) error { return nil },
+	})
+	require.ErrorIs(t, waitResult(t, late).Err, ErrObsoleteGeneration)
+
+	close(block)
+	require.NoError(t, waitResult(t, running).Err)
+	require.NoError(t, waitResult(t, other).Err)
+	assert.False(t, ranQueued.Load())
+	assert.True(t, ranOther.Load())
+	assert.Zero(t, scheduler.Stats().Queued)
+}
+
 func newTestScheduler(t *testing.T, options Options) *Scheduler {
 	t.Helper()
 	scheduler, err := New(options)

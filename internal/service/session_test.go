@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/model"
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/scheduler"
+	sourcewatch "github.com/cafecito-games/gdtest/internal/watch"
 	"github.com/cafecito-games/gdtest/internal/worker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1251,7 +1253,7 @@ func TestSessionServicePeriodicReconcileInvalidatesObsoleteWork(t *testing.T) {
 	assert.Equal(t, uint64(2), updates["periodic-session"].Update.Generation)
 
 	future := service.scheduler.Submit(context.Background(), scheduler.Request{
-		Session: "periodic-session", Generation: 1, Priority: scheduler.Background,
+		Session: service.sessions["periodic-session"].schedulerKey, Generation: 1, Priority: scheduler.Background,
 		Run: func(context.Context, scheduler.Lease) error { return nil },
 	})
 	result, err := future.Wait(context.Background())
@@ -1266,6 +1268,88 @@ func TestSessionServicePeriodicReconcileInvalidatesObsoleteWork(t *testing.T) {
 	assert.True(t, processes[0].closed.Load())
 	assert.Equal(t, uint64(2), processes[1].Generation())
 	assert.False(t, processes[1].closed.Load())
+}
+
+func TestSessionServiceAcceptsWorkForSessionRecreatedAfterIdleEviction(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
+	var processes []*fakeWorker
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 470 + len(processes), generation: options.Generation}
+		processes = append(processes, process)
+		return process, nil
+	})
+	defer func() { require.NoError(t, service.Close(context.Background())) }()
+	payload, err := json.Marshal(WarmRequest{
+		SessionID: "evicted-session", Project: root, Godot: "godot", Generation: 1,
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "warm", Method: "session.warm", Payload: payload,
+	}, nil)
+	require.NoError(t, err)
+	retired := service.sessions["evicted-session"].schedulerKey
+
+	removed, err := service.Reconcile(time.Now().UTC().Add(time.Hour), time.Minute, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, projectidentity.RemoveIdle, removed["evicted-session"])
+
+	// The same project session id comes back with a fresh source tracker at
+	// generation 1; the eviction fence must not reject it.
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "warm-again", Method: "session.warm", Payload: payload,
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, processes, 2)
+	assert.False(t, processes[1].closed.Load())
+	assert.NotEqual(t, retired, service.sessions["evicted-session"].schedulerKey)
+
+	// Work still addressed to the evicted incarnation stays fenced.
+	future := service.scheduler.Submit(context.Background(), scheduler.Request{
+		Session: retired, Generation: 1, Priority: scheduler.Interactive,
+		Run: func(context.Context, scheduler.Lease) error { return nil },
+	})
+	result, err := future.Wait(context.Background())
+	require.NoError(t, err)
+	require.ErrorIs(t, result.Err, scheduler.ErrObsoleteGeneration)
+}
+
+func TestSessionServiceReportsFencedWorkAsRetryableStaleGeneration(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
+	script := filepath.Join(root, "example.test.gd")
+	require.NoError(t, os.WriteFile(script, []byte("extends GDTest\nfunc test_value() -> void:\n\tpass\n"), 0o600))
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		return &fakeWorker{pid: 490, generation: options.Generation}, nil
+	})
+	defer func() { require.NoError(t, service.Close(context.Background())) }()
+	entry, err := service.get("fenced-session", root, "godot", 0)
+	require.NoError(t, err)
+	_, err = service.reconcileSource(context.Background(), entry, sourcewatch.Initial)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(script, []byte("extends GDTest\nfunc test_value() -> void:\n\tvar changed: int = 1\n"), 0o600))
+	_, err = service.reconcileSource(context.Background(), entry, sourcewatch.Periodic)
+	require.NoError(t, err)
+
+	ran := false
+	_, err = service.schedule(
+		context.Background(), entry, 1, scheduler.Interactive, scheduler.Reuse,
+		func(context.Context) (any, error) { ran = true; return nil, nil },
+	)
+	require.EqualError(t, err, "source generation changed from 1 to 2"+StaleGenerationSuffix)
+	require.ErrorIs(t, err, scheduler.ErrObsoleteGeneration)
+	assert.False(t, ran)
+
+	service.scheduler.Retire(entry.schedulerKey)
+	_, err = service.schedule(
+		context.Background(), entry, 2, scheduler.Interactive, scheduler.Reuse,
+		func(context.Context) (any, error) { ran = true; return nil, nil },
+	)
+	require.ErrorIs(t, err, scheduler.ErrObsoleteGeneration)
+	assert.True(t, strings.HasSuffix(err.Error(), StaleGenerationSuffix), err.Error())
+	assert.False(t, ran)
 }
 
 func TestSessionServiceReconcilesDeletedWorktree(t *testing.T) {
