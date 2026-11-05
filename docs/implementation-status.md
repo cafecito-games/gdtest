@@ -243,3 +243,86 @@ signal-capture migration subset, and the ADR for the renamed probe disconnect me
 - Not verified here: `scripts/package-addon` and `scripts/test-package-addon` require gpm 0.6.0 or
   newer. The installed `gpm` reports `dev`, and the released module is not reachable from this
   machine, so the packaging gate remains to be run in an environment with gpm 0.6.0.
+
+## Generated test doubles
+
+Implements `gdtest generate doubles`, the `test_doubles` configuration, the `GDTest.double_context()`
+runtime (`GDTestDoubleContext`, `GDTestDoubleMethod`), and the ahead-of-time generator in
+`internal/doubles`. The contract is `api-spec.md` section 14.7, and the decision record is
+ADR 0009.
+
+- Example (`examples/basic`): `inventory.gd` and `shop.gd` are hand-written. The generated
+  `doubles/inventory_double.gd` and its `.uid` are committed and not hand-edited. The injection
+  test `inventory_double.test.gd` covers sticky FIFO results, sync and async `then_answer`,
+  `then_call_real`, void `then_return()`, `calls()` arguments with a defaulted parameter, and
+  `reset()`. `gdtest run --no-daemon` on the example reports `10 passed, 0 failed, 0 errors` across
+  the example's files, of which the inventory test contributes six. The integration test
+  `TestDocumentedBasicExampleExecutes` asserts the `10 passed` count and passes under `-race`.
+- Gate: `scripts/check` runs `generate doubles --check --project examples/basic` after the build
+  step. A one-byte change to the generated file exits `1` and reports `stale:`. Removing the marker
+  line exits `2` with a refusal. Restoring the file exits `0`.
+- Class names: the example's `Inventory` and `InventoryDouble` duplicate the names of the
+  `fixtures/godot/api` classes. `examples/basic` has its own `project.godot`, so the repository-root
+  project skips it during import, and no single Godot project contains both declarations. A
+  headless import of a copy of the root project reported `Detected another project.godot at
+  res://examples/basic. The folder will be ignored.` and registered `Inventory` only once.
+- Migration: the runtime-mock finding (`unsupported.runtime-mock`) names `gdtest generate doubles`
+  and `docs/vest-migration.md`. The migrator's conversions are unchanged.
+- Packaging: `scripts/package-addon 0.0.0-test` includes the four `gdtest_double_*` and
+  `gdtest_invocation` runtime files in the core slice. `scripts/test-package-addon 0.0.0-test` passes
+  with the release gpm 0.6.0, pinned by `scripts/install-gpm-linux-ci`, including the packaged Godot
+  handshake (no skip).
+- Not covered by the example: the failure fixtures for unexpected calls, wrong-typed answers, and
+  wrong-arity answers live in `fixtures/godot/api/double_failures.test.gd` and are asserted by
+  `internal/worker/double_godot_test.go`. Those fixtures are not part of the example project.
+- Known pre-existing condition: Godot prints `ObjectDB instances were leaked at exit` for the
+  example project run. The unmodified baseline examples (`math.test.gd`, `signal_probe.test.gd`)
+  produce the same warning, so it is not introduced by the generated double.
+- Review hardening (each item names the test that proves it):
+  - Configured class_name collisions with real scripts exit `2`:
+    `TestAnalyzeRefusesConfiguredClassNameDeclaredByAnotherScript`,
+    `TestBuildIndexDiagnosesDuplicateClassName`, and
+    `TestGenerateDoublesRenamedOutputCollidingWithRealScriptFailsClosed`.
+  - Ownership under excluded paths is found without parsing the excluded file:
+    `TestBuildIndexFindsOwnershipInExcludedScriptsWithoutParsingThem` and
+    `TestGenerateDoublesExcludedOutputIsOwnedAndRemovedWhenUnconfigured`.
+  - Marker paths with spaces round-trip: `TestBuildIndexRecordsOwnershipForSourcePathsWithSpaces`
+    and `TestGenerateDoublesPathsWithSpacesRoundTrip`.
+  - `.godot` and `.git` segments are rejected in source and output paths, and indexing skips
+    those directories: `TestValidateTestDoublesRejectsInvalidEntries` and
+    `TestBuildIndexSkipsGodotAndGitDirectories`.
+  - Global enum returns are checked as enums: `TestAnalyzeReturnCheckTable`.
+  - Output rename convergence: generated doubles never enter the class map, so a renamed output
+    keeps its class_name and an interrupted rename converges:
+    `TestBuildIndexGeneratedDoublesNeverDeclareClasses`,
+    `TestGenerateDoublesRenamedOutputKeepsClassNameAndConverges`, and
+    `TestGenerateDoublesInterruptedRenameConvergesByRemovingOldOutput`.
+  - Removal preflight: every removal is proven before the first rename, so a failed probe or a
+    vanished owned file changes no target: `TestWriteRemovalProbeFailureChangesNoTarget`,
+    `TestWriteRefusesUnexpectedFileRemovedSincePrepare`, and
+    `TestGenerateDoublesUnremovableOwnedFileChangesNothing`, which uses real permissions and is
+    skipped under root.
+  - Marker-owned scripts are recognized before parsing, so a generated file with a corrupted body
+    is still regenerated or removed: `TestGenerateDoublesCorruptedOwnedOutputIsRegeneratedAndRemovable`.
+  - Outputs that differ only in case are rejected as duplicates, because they name one file on
+    case-insensitive filesystems: `TestValidateTestDoublesRejectsInvalidEntries`.
+  - An owned output that is the same file as a case-variant configured output is never removed,
+    so a case-only rename on a case-insensitive filesystem keeps the new output:
+    `TestPrepareKeepsOwnedOutputThatAliasesCaseVariantDesiredOutput` and
+    `TestPrepareRemovesDistinctOwnedOutputDifferingOnlyInCase`.
+  - An unimplemented abstract method starting with `_` is refused instead of producing an
+    uninstantiable double: `TestAnalyzeRefusesUnimplementedAbstractPrivateMethod`.
+  - Caller locations skip only `res://addons/gdtest/`, so a user test under a nested
+    `addons/gdtest` directory keeps its line:
+    `TestGodotDoubleCallerUnderNestedAddonsDirectoryKeepsItsLocation`.
+  - A project `class_name` equal to a generated inner class (`GDTestControls` or a
+    `<Method>Method` controller) is refused, because Godot 4.7 rejects an inner class that hides a
+    global script class: `TestAnalyzeRefusesGeneratedInnerClassHidingGlobalClass`.
+    The configured `class_name` of the double itself is held to the same rule:
+    `TestAnalyzeRefusesConfiguredClassNameEqualToGeneratedInnerClass`.
+  - The `addons/gdtest/`, `.godot`, and `.git` path rules ignore letter case, so a case variant
+    cannot reach the runtime directory on a case-insensitive filesystem:
+    `TestValidateTestDoublesRejectsInvalidEntries`.
+  - An owned output is never removed while it is the same file as a configured output spelled
+    differently, including through a directory symbolic link inside the project:
+    `TestGenerateDoublesOutputThroughDirectorySymlinkStaysOwned`.

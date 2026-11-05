@@ -8,7 +8,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -16,6 +15,7 @@ import (
 	"github.com/cafecito-games/gdparser"
 	"github.com/cafecito-games/gdparser/ast"
 	"github.com/cafecito-games/gdtest/internal/model"
+	"github.com/cafecito-games/gdtest/internal/pathglob"
 )
 
 // Manifest is an ordered, project-relative static test manifest.
@@ -64,10 +64,10 @@ func DiscoverWithParser(root string, options Options, parse ParseFunc) (Manifest
 		if relative == "." {
 			return nil
 		}
-		if entry.IsDir() && matchesAny(relative+"/placeholder", options.Exclude) {
+		if entry.IsDir() && pathglob.MatchesAny(relative+"/placeholder", options.Exclude) {
 			return fs.SkipDir
 		}
-		if entry.Type().IsRegular() && strings.HasSuffix(relative, ".gd") && !matchesAny(relative, options.Exclude) {
+		if entry.Type().IsRegular() && strings.HasSuffix(relative, ".gd") && !pathglob.MatchesAny(relative, options.Exclude) {
 			paths = append(paths, relative)
 		}
 		return nil
@@ -123,7 +123,7 @@ func DiscoverWithParser(root string, options Options, parse ParseFunc) (Manifest
 		content.WriteByte(0)
 		content.WriteString(script.metadata.ContentFingerprint)
 		content.WriteByte('\n')
-		if matchesAny(relative, options.Patterns) && script.metadata.ExtendsGDTest {
+		if pathglob.MatchesAny(relative, options.Patterns) && script.metadata.ExtendsGDTest {
 			manifest.Files = append(manifest.Files, script.plan)
 		}
 	}
@@ -143,48 +143,6 @@ func Parse(relative string, source []byte) (model.FilePlan, error) {
 		return model.FilePlan{}, err
 	}
 	return script.plan, nil
-}
-
-func matchesAny(filename string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if globMatch(pattern, filename) {
-			return true
-		}
-	}
-	return false
-}
-
-func globMatch(pattern, filename string) bool {
-	if !strings.Contains(pattern, "**") {
-		matched, err := path.Match(pattern, filename)
-		return err == nil && matched
-	}
-	var expression strings.Builder
-	expression.WriteByte('^')
-	for index := 0; index < len(pattern); {
-		if strings.HasPrefix(pattern[index:], "**/") {
-			expression.WriteString("(?:.*/)?")
-			index += 3
-			continue
-		}
-		if strings.HasPrefix(pattern[index:], "**") {
-			expression.WriteString(".*")
-			index += 2
-			continue
-		}
-		switch pattern[index] {
-		case '*':
-			expression.WriteString("[^/]*")
-		case '?':
-			expression.WriteString("[^/]")
-		default:
-			expression.WriteString(regexp.QuoteMeta(pattern[index : index+1]))
-		}
-		index++
-	}
-	expression.WriteByte('$')
-	matched, err := regexp.MatchString(expression.String(), filename)
-	return err == nil && matched
 }
 
 func displayName(name string) string {

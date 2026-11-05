@@ -50,14 +50,6 @@ func TestSelectUnknownSelector(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestDoubleStarMatchesNestedAndRootFiles(t *testing.T) {
-	t.Parallel()
-
-	for _, filename := range []string{"root.test.gd", "one/root.test.gd", "one/two/root.test.gd"} {
-		assert.True(t, globMatch("**/*.test.gd", filename), filename)
-	}
-}
-
 func TestDiscoverResolvesTransitiveGDTestAndMetadata(t *testing.T) {
 	t.Parallel()
 

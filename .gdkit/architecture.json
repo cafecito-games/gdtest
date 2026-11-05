@@ -7,6 +7,8 @@
     {"pattern": "addons/gdtest/gdtest.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/*_info.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/gdtest_invocation.gd", "layer": "api", "feature": "runtime"},
+    {"pattern": "addons/gdtest/gdtest_double_context.gd", "layer": "api", "feature": "runtime"},
+    {"pattern": "addons/gdtest/gdtest_double_method.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/gdtest_signal_probe.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/version.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/protocol.gd", "layer": "transport", "feature": "runtime"},

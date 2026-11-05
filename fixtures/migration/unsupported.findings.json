@@ -1,9 +1,9 @@
 [
   {"path":"tests/unsupported.test.gd","line":1,"column":9,"severity":"info","code":"rewrite.base-class","message":"replace VestTest base class with GDTest","planned":true},
   {"path":"tests/unsupported.test.gd","line":6,"column":2,"severity":"warning","code":"unsupported.lifecycle-signal","message":"Vest lifecycle signals require manual hook migration"},
-  {"path":"tests/unsupported.test.gd","line":7,"column":14,"severity":"warning","code":"unsupported.runtime-mock","message":"runtime-generated mocks have no gdtest v1 equivalent"},
-  {"path":"tests/unsupported.test.gd","line":8,"column":2,"severity":"warning","code":"unsupported.runtime-mock","message":"runtime-generated mocks have no gdtest v1 equivalent"},
-  {"path":"tests/unsupported.test.gd","line":9,"column":2,"severity":"warning","code":"unsupported.runtime-mock","message":"runtime-generated mocks have no gdtest v1 equivalent"},
+  {"path":"tests/unsupported.test.gd","line":7,"column":14,"severity":"warning","code":"unsupported.runtime-mock","message":"runtime-generated mocks are not supported; generate a typed double with gdtest generate doubles (see docs/vest-migration.md)"},
+  {"path":"tests/unsupported.test.gd","line":8,"column":2,"severity":"warning","code":"unsupported.runtime-mock","message":"runtime-generated mocks are not supported; generate a typed double with gdtest generate doubles (see docs/vest-migration.md)"},
+  {"path":"tests/unsupported.test.gd","line":9,"column":2,"severity":"warning","code":"unsupported.runtime-mock","message":"runtime-generated mocks are not supported; generate a typed double with gdtest generate doubles (see docs/vest-migration.md)"},
   {"path":"tests/unsupported.test.gd","line":10,"column":2,"severity":"warning","code":"unsupported.benchmark","message":"benchmarks have no gdtest v1 equivalent"},
   {"path":"tests/unsupported.test.gd","line":11,"column":2,"severity":"warning","code":"unsupported.signal-capture","message":"signal capture has no gdtest v1 equivalent"},
   {"path":"tests/unsupported.test.gd","line":11,"column":17,"severity":"warning","code":"unsupported.lifecycle-signal","message":"Vest lifecycle signals require manual hook migration"},

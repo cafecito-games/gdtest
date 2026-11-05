@@ -582,7 +582,7 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 			}
 			switch name {
 			case "mock", "when", "get_calls_of":
-				t.manualOnce(value.Span(), "unsupported.runtime-mock", "runtime-generated mocks have no gdtest v1 equivalent")
+				t.manualOnce(value.Span(), "unsupported.runtime-mock", "runtime-generated mocks are not supported; generate a typed double with gdtest generate doubles (see docs/vest-migration.md)")
 			case "benchmark":
 				t.manualOnce(value.Span(), "unsupported.benchmark", "benchmarks have no gdtest v1 equivalent")
 			case "capture_signal", "get_signal_emissions":

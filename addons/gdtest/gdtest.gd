@@ -43,6 +43,7 @@ var _gdtest_case_ordinals: Dictionary[int, int] = {}
 var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
 var _gdtest_signal_probes: Array[GDTestSignalProbe] = []
+var _gdtest_double_context: GDTestDoubleContext = null
 var _gdtest_sequence: int = 0
 
 
@@ -478,6 +479,21 @@ func watch_signal(what: Signal) -> GDTestSignalProbe:
 	return probe
 
 
+## Returns the executing case's double context, creating it on first use.
+##
+## Doubles and signal probes created in one case share one call sequence, so their
+## recorded invocations can be ordered against each other.
+func double_context() -> GDTestDoubleContext:
+	if not _require_case("double_context"):
+		return GDTestDoubleContext.closed()
+	if _gdtest_double_context == null:
+		_gdtest_double_context = GDTestDoubleContext.open(
+				Callable(self, &"_gdtest_allocate_sequence"),
+				Callable(self, &"_report_probe_error")
+		)
+	return _gdtest_double_context
+
+
 func _gdtest_configure(tree: SceneTree, file: String, failure_sink: Callable) -> void:
 	_gdtest_tree = tree
 	_gdtest_file = file
@@ -538,10 +554,12 @@ func _gdtest_begin_case() -> void:
 	_gdtest_messages.clear()
 	_gdtest_outcome_data.clear()
 	_gdtest_signal_probes.clear()
+	_gdtest_double_context = null
 
 
 func _gdtest_end_case() -> Dictionary[String, Variant]:
 	_gdtest_release_signal_probes()
+	_gdtest_release_double_context()
 	_gdtest_case_active = false
 	return {
 		"status": _gdtest_status,
@@ -801,6 +819,12 @@ func _gdtest_release_signal_probes() -> void:
 	_gdtest_signal_probes.clear()
 
 
+func _gdtest_release_double_context() -> void:
+	if _gdtest_double_context != null:
+		_gdtest_double_context.close()
+	_gdtest_double_context = null
+
+
 func _report_probe_error(text: String, location: Dictionary[String, Variant]) -> void:
 	if _gdtest_case_active:
 		_gdtest_record_error_at(
@@ -817,7 +841,7 @@ func _user_location() -> Dictionary[String, Variant]:
 	for frame_value: Variant in stack:
 		var frame: Dictionary[String, Variant] = _string_dictionary(frame_value)
 		var source: String = str(frame.get("source", ""))
-		if not source.contains("/addons/gdtest/"):
+		if not source.begins_with("res://addons/gdtest/"):
 			return { "file": source, "line": int(frame.get("line", -1)) }
 	return { "file": _gdtest_file, "line": -1 }
 

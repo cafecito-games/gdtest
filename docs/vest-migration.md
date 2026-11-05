@@ -31,7 +31,7 @@ Compatible assertion names and unrelated formatting are left alone. Run the migr
 
 ## Manual findings
 
-gdtest intentionally has no v1 equivalent for runtime-generated mocks, call-history stubbing, benchmarks, generated mixins, event callbacks, or arbitrary fluent matcher chains. These constructs remain in the source and are reported with a file, line, column, stable finding code, and explanation. A finding never silently deletes or weakens a test.
+gdtest has no v1 equivalent for benchmarks, generated mixins, event callbacks, or arbitrary fluent matcher chains. Runtime-generated mocks (`mock`, `when`, `get_calls_of`) are not converted mechanically; a typed double generated ahead of time from `gdtest.json` replaces the common uses, as described under "Runtime mocks and benchmarks" below. These constructs remain in the source and are reported with a file, line, column, stable finding code, and explanation. A finding never silently deletes or weakens a test.
 
 Signal captures are the exception that migrates. A `capture_signal(member_signal, literal_count)`
 statement that is a top-level statement of a `test_` function becomes a case-scoped
@@ -118,7 +118,54 @@ Replace each chained matcher with one direct `expect_*` call with the same actua
 
 ### Runtime mocks and benchmarks
 
-gdtest has no runtime mock generator or benchmark API in v1. Replace a mock with a small hand-written fake class in the test file, and move benchmarks out of the gdtest suite.
+gdtest does not synthesize mocks at runtime. Instead, declare a typed double of the real class in `gdtest.json` and generate it ahead of time with `gdtest generate doubles`. The generated double is a subclass of the source script, so it is passed wherever the source type is expected. See `api-spec.md` section 14.7 for the full contract.
+
+Convert a Vest mock by hand with these steps:
+
+1. Add an entry for the class that the test mocks. The `source` is the project-relative path of its script; `output` is a path under a directory the project owns, and `class_name` names the generated class:
+
+   ```json
+   "test_doubles": [
+     { "source": "inventory.gd", "output": "doubles/inventory_double.gd", "class_name": "InventoryDouble" }
+   ]
+   ```
+
+2. Run `gdtest generate doubles` and commit the generated `.gd` and `.gd.uid` files. Do not edit them; run `gdtest generate doubles --check` in CI.
+
+3. Replace `mock(Class)` with the generated class and pass the constructor arguments the real class requires, plus `double_context()` first. Replace each `when(mock.method).then_return(value)` with `double.gdtest.method.then_return(value)`, and each `get_calls_of(mock.method)` with `double.gdtest.method.calls()` or `call_count()`.
+
+Before, with Vest:
+
+```gdscript
+func test_stock_is_added_to_inventory() -> void:
+	var inventory = mock(Inventory)
+	when(inventory.add).then_return(true)
+	var shop := Shop.new(inventory)
+	expect_true(shop.stock("apple"))
+	expect_equal(get_calls_of(inventory.add).size(), 1)
+```
+
+After, with a configured generated double:
+
+```gdscript
+func test_stock_is_added_to_inventory() -> void:
+	var inventory: InventoryDouble = InventoryDouble.new(double_context(), 3)
+	var shop: Shop = Shop.new(inventory)
+	inventory.gdtest.add.then_return(true)
+	expect_true(shop.stock("apple"))
+	expect_equal(inventory.gdtest.add.call_count(), 1)
+	expect_equal(inventory.gdtest.add.calls()[0].arguments, ["apple", 1])
+```
+
+Differences a converted test must account for:
+
+- Argument matchers (`with_args`, and `when` chains with matchers) have no equivalent. Assert on `calls()[i].arguments` instead.
+- Queued results are consumed first in, first out, and the last remaining result repeats for every later call. Call `reset()` to clear queued results and recorded calls before configuring a different sequence.
+- A call with no configured result is an unexpected call. It fails the case at the test's line and returns the neutral default. Configure every method the code under test calls, or use `then_call_real()` on a method that should run its real body.
+- Use `then_answer(callable)` for a computed result. The callable must accept the same number of arguments as the method, and an async callable is awaited only when the method is itself async. A synchronous method needs a synchronous callable.
+- Doubles do not replace an instance that already exists. Construct the double and pass it in.
+
+Move benchmarks out of the gdtest suite.
 
 ### Vest.timeout
 

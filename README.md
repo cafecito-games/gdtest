@@ -77,6 +77,17 @@ For hermetic debugging use `gdtest run --no-daemon`. For CI use `--json` and pre
 
 Migration uses gdparser syntax spans, preserves unsupported source, and reports precise manual findings. See the [Vest migration guide](docs/vest-migration.md).
 
+## Generated test doubles
+
+Declare doubles in `gdtest.json` under `test_doubles`, then generate them ahead of time:
+
+```sh
+./addons/gdtest/gdtest generate doubles
+./addons/gdtest/gdtest generate doubles --check
+```
+
+`--check` writes nothing and exits `1` when a generated file is missing, stale, or unexpected. Commit the generated files. See the [test double specification](api-spec.md#147-generated-test-doubles) and the [executable example](examples/basic/inventory_double.test.gd).
+
 ## Development
 
 Go 1.26, Godot 4.7, gdkit 0.10.0 or newer, golangci-lint v2, and gpm 0.6.0 or newer are required. Run `scripts/check` before committing. See [CONTRIBUTING.md](CONTRIBUTING.md) for packaging, benchmarks, and the complete local workflow.
