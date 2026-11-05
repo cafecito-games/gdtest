@@ -123,3 +123,11 @@ func test_calls_and_signal_probe_share_one_sequence() -> void:
 	expect_equal(probe.emissions()[0].sequence, 2)
 	expect_equal(inventory.gdtest.clear.calls()[0].sequence, 3)
 	emitter.free()
+
+
+## Returns the configured value from a double of an abstract method.
+func test_abstract_method_then_return_yields_value() -> void:
+	var calculator: CalculatorDouble = CalculatorDouble.new(double_context())
+	calculator.gdtest.compute.then_return(7)
+	expect_equal(calculator.compute(2), 7)
+	expect_equal(calculator.gdtest.compute.call_count(), 1)

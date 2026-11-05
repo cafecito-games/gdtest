@@ -42,3 +42,10 @@ func test_wrong_arity_answer_reports_at_test_line() -> void:
 func test_constructor_call_reports_at_source_constructor() -> void:
 	var ledger: LedgerDouble = LedgerDouble.new(double_context())
 	expect_equal(ledger.gdtest.clear.calls()[0].sequence, 1)
+
+
+## Rejects then_call_real on an abstract method and enqueues nothing for the next call.
+func test_abstract_call_real_reports_and_enqueues_nothing() -> void:
+	var calculator: CalculatorDouble = CalculatorDouble.new(double_context())
+	calculator.gdtest.compute.then_call_real()
+	calculator.compute(4)

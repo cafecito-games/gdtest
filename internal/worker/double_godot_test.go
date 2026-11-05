@@ -49,7 +49,94 @@ func TestGodotTestDoublesRunPassingCasesOnPersistentWorker(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	assert.Zero(t, failures)
-	require.Len(t, statuses, 9)
+	require.Len(t, statuses, 10)
+	for id, status := range statuses {
+		assert.Equal(t, "pass", status, "status for %s", id)
+	}
+}
+
+func TestGodotDoubleKeptPastItsCaseRecordsNothingInLaterCases(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot double leak test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	leakFile := parseFixture(t, root, "fixtures/godot/api/double_leak.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "double-leak", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion,
+		RunID:           "double-leak",
+		Generation:      1,
+		Files:           []model.FilePlan{leakFile},
+	}
+	var diagnostics []model.Event
+	statuses := make(map[string]string)
+	err = process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		switch event.Type {
+		case model.EventAssertionFail, model.EventWorkerError:
+			diagnostics = append(diagnostics, event)
+		case model.EventCaseFinished:
+			statuses[event.TestID] = event.Status
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	require.Len(t, statuses, 3)
+	for id, status := range statuses {
+		assert.Equal(t, "pass", status, "status for %s", id)
+	}
+	assert.Empty(t, diagnostics)
+}
+
+func TestGodotDoubleContextOutsideCaseIsClosedAndReportsDiscoveryError(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot double context discovery test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	outsideFile := parseFixture(t, root, "fixtures/godot/api/double_context_outside_case.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "double-context-outside", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	manifest, err := process.Discover(ctx, model.TestPlan{
+		ProtocolVersion:    model.ProtocolVersion,
+		RunID:              "double-context-outside",
+		ContentFingerprint: "double-context-outside",
+		Generation:         1,
+		Files:              []model.FilePlan{outsideFile},
+	})
+	require.NoError(t, err)
+	require.Len(t, manifest.Errors, 1)
+	discoveryError := manifest.Errors[0]
+	assert.Equal(t, "worker.discovery", discoveryError.Code)
+	assert.Equal(t, "double_context is only valid while a case is executing", discoveryError.Message)
+	require.NotNil(t, discoveryError.Location)
+	assert.Equal(t, outsideFile.Path, discoveryError.Location.File)
+	assert.Equal(t, lineContaining(t, root, outsideFile.Path, "double_context()"), discoveryError.Location.Line)
+
+	var statuses = map[string]string{}
+	err = process.Run(ctx, model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion,
+		RunID:           "double-context-outside-run",
+		Generation:      1,
+		Files:           []model.FilePlan{outsideFile},
+	}, executor.EventSinkFunc(func(event model.Event) error {
+		if event.Type == model.EventCaseFinished {
+			statuses[event.TestID] = event.Status
+		}
+		return nil
+	}))
+	require.NoError(t, err)
 	for id, status := range statuses {
 		assert.Equal(t, "pass", status, "status for %s", id)
 	}
@@ -69,30 +156,55 @@ func TestGodotTestDoubleMisuseReportsFrameworkErrorsAtTestLines(t *testing.T) {
 	require.NoError(t, err)
 	defer shutdown(t, process)
 
-	expected := map[string]struct {
-		file     string
+	type expectation struct {
 		snippet  string
 		fragment string
-	}{
+	}
+	type expectedCase struct {
+		file         string
+		expectations []expectation
+	}
+	expected := map[string]expectedCase{
 		"test_unexpected_call_reports_at_test_line": {
-			file:     "fixtures/godot/api/double_failures.test.gd",
-			snippet:  `inventory.add("ghost")`,
-			fragment: "unexpected call to Inventory.add",
+			file: "fixtures/godot/api/double_failures.test.gd",
+			expectations: []expectation{{
+				snippet:  `inventory.add("ghost")`,
+				fragment: "unexpected call to Inventory.add",
+			}},
 		},
 		"test_wrong_typed_answer_reports_at_test_line": {
-			file:     "fixtures/godot/api/double_failures.test.gd",
-			snippet:  `inventory.add("typed")`,
-			fragment: "Inventory.add answer returned String, expected bool",
+			file: "fixtures/godot/api/double_failures.test.gd",
+			expectations: []expectation{{
+				snippet:  `inventory.add("typed")`,
+				fragment: "Inventory.add answer returned String, expected bool",
+			}},
 		},
 		"test_wrong_arity_answer_reports_at_test_line": {
-			file:     "fixtures/godot/api/double_failures.test.gd",
-			snippet:  `inventory.gdtest.add.then_answer(_answer_with_one)`,
-			fragment: "then_answer callable takes 1 arguments; expected 2",
+			file: "fixtures/godot/api/double_failures.test.gd",
+			expectations: []expectation{{
+				snippet:  `inventory.gdtest.add.then_answer(_answer_with_one)`,
+				fragment: "then_answer callable takes 1 arguments; expected 2",
+			}},
 		},
 		"test_constructor_call_reports_at_source_constructor": {
-			file:     "fixtures/godot/api/ledger.gd",
-			snippet:  "\tclear()",
-			fragment: "unexpected call to Ledger.clear",
+			file: "fixtures/godot/api/ledger.gd",
+			expectations: []expectation{{
+				snippet:  "\tclear()",
+				fragment: "unexpected call to Ledger.clear",
+			}},
+		},
+		"test_abstract_call_real_reports_and_enqueues_nothing": {
+			file: "fixtures/godot/api/double_failures.test.gd",
+			expectations: []expectation{
+				{
+					snippet:  `calculator.gdtest.compute.then_call_real()`,
+					fragment: "cannot call an abstract method through then_call_real",
+				},
+				{
+					snippet:  `calculator.compute(4)`,
+					fragment: "unexpected call to Calculator.compute",
+				},
+			},
 		},
 	}
 	plan := model.TestPlan{
@@ -118,13 +230,20 @@ func TestGodotTestDoubleMisuseReportsFrameworkErrorsAtTestLines(t *testing.T) {
 		id := failureFile.Path + "::" + method
 		assert.Equal(t, "error", statuses[id], "status for %s", method)
 		events := diagnostics[id]
-		require.Len(t, events, 1, "diagnostics for %s", method)
-		diagnostic := events[0]
-		assert.Equal(t, "framework", diagnostic.Assertion)
-		assert.Contains(t, diagnostic.Message, want.fragment)
-		require.NotNil(t, diagnostic.Location)
-		assert.Equal(t, want.file, diagnostic.Location.File)
-		assert.Equal(t, lineContaining(t, root, want.file, want.snippet), diagnostic.Location.Line, "line for %s", method)
+		require.Len(t, events, len(want.expectations), "diagnostics for %s", method)
+		for index, expectation := range want.expectations {
+			diagnostic := events[index]
+			assert.Equal(t, "framework", diagnostic.Assertion)
+			assert.Contains(t, diagnostic.Message, expectation.fragment)
+			require.NotNil(t, diagnostic.Location)
+			assert.Equal(t, want.file, diagnostic.Location.File)
+			assert.Equal(
+				t,
+				lineContaining(t, root, want.file, expectation.snippet),
+				diagnostic.Location.Line,
+				"line for %s", method,
+			)
+		}
 	}
 }
 
@@ -141,6 +260,6 @@ func lineContaining(t *testing.T, root, relative, snippet string) int {
 			line = index + 1
 		}
 	}
-	require.Equal(t, 1, found, "snippet %q must occur exactly once", snippet)
+	require.Equal(t, 1, found, "snippet %q must occur exactly once in %s", snippet, relative)
 	return line
 }
