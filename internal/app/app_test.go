@@ -254,10 +254,21 @@ func TestSummaryExitCodeDistinguishesStrictPolicyFromInfrastructure(t *testing.T
 			want: ExitFailures,
 		},
 		{
+			name: "execution framework error",
+			summary: results.Summary{
+				Passed:  1,
+				Errored: 1,
+				Errors:  []model.Event{{Type: model.EventWorkerError, Name: "worker.framework"}},
+			},
+			want: ExitFailures,
+		},
+		{
 			name: "infrastructure takes precedence",
 			summary: results.Summary{
+				Errored:        2,
+				Errors:         []model.Event{{Type: model.EventWorkerError, Name: "worker.framework"}},
 				PolicyFailures: []results.PolicyFailure{{Status: "void", Count: 1}},
-				Infrastructure: []model.Event{{Type: model.EventWorkerError}},
+				Infrastructure: []model.Event{{Type: model.EventWorkerError, Name: "worker.discovery"}},
 			},
 			want: ExitError,
 		},

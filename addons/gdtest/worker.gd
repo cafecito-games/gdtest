@@ -62,29 +62,13 @@ func _start() -> void:
 		quit(2)
 		return
 	_send(
-			{
-				"version": Version.WORKER_PROTOCOL_VERSION,
-				"type": "hello",
-				"token": _token,
-				"payload": {
-					"runtime_version": Version.PRODUCT_VERSION,
-					"worker_id": _worker_id,
-					"session_id": _session_id,
-					"generation": _generation,
-					"project_path": ProjectSettings.globalize_path("res://").trim_suffix("/"),
-					"godot_version": Engine.get_version_info(),
-					"capabilities": [
-						"run",
-						"bench",
-						"discover",
-						"ping",
-						"cancel",
-						"reload",
-						"reset",
-						"shutdown",
-					],
-				},
-			}
+			Protocol.hello_envelope(
+					_token,
+					_worker_id,
+					_session_id,
+					_generation,
+					ProjectSettings.globalize_path("res://").trim_suffix("/")
+			)
 	)
 	_send_event("worker_ready", {})
 	while not _shutdown_requested or _running:
@@ -229,15 +213,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 	_send_event("run_started", { "generation": _generation })
 	var started_usec: int = Time.get_ticks_usec()
 	_serialization_usec = 0
-	var totals: Dictionary[String, int] = {
-		"pass": 0,
-		"fail": 0,
-		"error": 0,
-		"skip": 0,
-		"todo": 0,
-		"void": 0,
-		"canceled": 0,
-	}
+	var totals: Dictionary[String, int] = Protocol.empty_totals()
 	var plan_value: Variant = payload.get("plan", {})
 	if not plan_value is Dictionary:
 		_send_worker_error("protocol.invalid_plan", "run plan must be an object")
@@ -278,17 +254,17 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 	if not policy_error.is_empty():
 		_send_discovery_error({ "message": policy_error }, "")
 		totals["error"] += 1
-	for prepared_value: Variant in prepared_files:
-		var prepared: Dictionary[String, Variant] = _dict(prepared_value)
-		if _cancel_requested:
+	var focus_only: bool = has_focus and only_mode != "ignore"
+	for prepared_index: int in range(prepared_files.size()):
+		var prepared: Dictionary[String, Variant] = _dict(prepared_files[prepared_index])
+		if _cancel_requested or not policy_error.is_empty():
+			_release_skipped_prepared_files(prepared_files, prepared_index, totals)
 			break
-		if not policy_error.is_empty():
-			break
-		var focus_only: bool = has_focus and only_mode != "ignore"
 		var file_totals: Dictionary[String, int] = await _run_prepared_file(prepared, focus_only)
 		for status: String in totals:
 			totals[status] += file_totals.get(status, 0)
 		if _abort_run_requested:
+			_release_skipped_prepared_files(prepared_files, prepared_index + 1, totals)
 			break
 	if _cancel_requested:
 		totals["canceled"] += 1
@@ -429,9 +405,9 @@ func _prepare_file(
 	if emit_errors:
 		for normalized: Variant in discovery_errors:
 			_send_discovery_error(normalized, path)
+		prepared["instance"] = instance
 	else:
-		instance._gdtest_release_outside_probes()
-	prepared["instance"] = instance
+		instance._gdtest_dispose()
 	prepared["cases"] = cases
 	prepared["errors"] = discovery_errors
 	prepared["root_info"] = GDTestSuiteInfo.new(
@@ -471,15 +447,7 @@ func _run_prepared_file(
 		prepared: Dictionary[String, Variant],
 		focus_only: bool
 ) -> Dictionary[String, int]:
-	var totals: Dictionary[String, int] = {
-		"pass": 0,
-		"fail": 0,
-		"error": 0,
-		"skip": 0,
-		"todo": 0,
-		"void": 0,
-		"canceled": 0,
-	}
+	var totals: Dictionary[String, int] = Protocol.empty_totals()
 	var path: String = str(prepared.get("path", ""))
 	var instance_value: Variant = prepared.get("instance")
 	var discovery_error_count: int = int(prepared.get("discovery_error_count", 0))
@@ -502,10 +470,13 @@ func _run_prepared_file(
 					and (not focus_only or bool(case_value.get("is_only", false)))
 			):
 				cases.append(case_value)
-	_send_event("suite_started", { "id": root_info.id, "name": root_info.name, "file": path })
+	_send_event(
+			"suite_started",
+			{ "id": root_info.id, "name": root_info.name, "file": path.trim_prefix("res://") }
+	)
 	if not cases.is_empty():
-		await _call_optional(instance, &"before_all", [])
-		await _call_optional(instance, &"before_suite", [root_info])
+		await _call_hook(instance, &"before_all", [], path, totals)
+		await _call_hook(instance, &"before_suite", [root_info], path, totals)
 	var open_suites: Array[GDTestSuiteInfo] = []
 	for case_value: Variant in cases:
 		if _cancel_requested or _abort_run_requested:
@@ -514,31 +485,41 @@ func _run_prepared_file(
 		var desired_suites: Array[GDTestSuiteInfo] = _suite_infos(case_plan.get("suite_infos", []))
 		var common_count: int = _common_suite_count(open_suites, desired_suites)
 		for index: int in range(open_suites.size() - 1, common_count - 1, -1):
-			await _call_optional(instance, &"after_suite", [open_suites[index]])
+			await _call_hook(instance, &"after_suite", [open_suites[index]], path, totals)
 		open_suites.resize(common_count)
 		for index: int in range(common_count, desired_suites.size()):
-			await _call_optional(instance, &"before_suite", [desired_suites[index]])
+			await _call_hook(instance, &"before_suite", [desired_suites[index]], path, totals)
 			open_suites.append(desired_suites[index])
 		var status: String = await _run_case(instance, path, case_plan)
 		totals[status] = totals.get(status, 0) + 1
+		totals["error"] += _drain_framework_errors(instance, path)
 	if not cases.is_empty():
 		for index: int in range(open_suites.size() - 1, -1, -1):
-			await _call_optional(instance, &"after_suite", [open_suites[index]])
-		await _call_optional(instance, &"after_suite", [root_info])
-		await _call_optional(instance, &"after_all", [])
-	for hook_error: Variant in Protocol.discovery_errors(
-			instance._gdtest_drain_discovery_errors(),
-			path
-	):
-		_send_discovery_error(hook_error, path)
-		totals["error"] += 1
-	instance._gdtest_release_outside_probes()
+			await _call_hook(instance, &"after_suite", [open_suites[index]], path, totals)
+		await _call_hook(instance, &"after_suite", [root_info], path, totals)
+		await _call_hook(instance, &"after_all", [], path, totals)
+	totals["error"] += _drain_framework_errors(instance, path)
+	instance._gdtest_dispose()
 	_send_event(
 			"suite_finished",
 			{ "id": root_info.id, "status": Protocol.aggregate_status(totals), "counts": totals }
 	)
 	_active_test = null
 	return totals
+
+
+func _release_skipped_prepared_files(
+		prepared_files: Array[Dictionary],
+		start_index: int,
+		totals: Dictionary[String, int]
+) -> void:
+	for index: int in range(start_index, prepared_files.size()):
+		var prepared: Dictionary[String, Variant] = _dict(prepared_files[index])
+		totals["error"] += int(prepared.get("discovery_error_count", 0))
+		var instance_value: Variant = prepared.get("instance")
+		if instance_value is GDTest:
+			var instance: GDTest = instance_value
+			instance._gdtest_dispose()
 
 
 func _planned_cases(
@@ -817,7 +798,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 			{
 				"test_id": case_id,
 				"name": case_name,
-				"location": { "file": path, "line": info.line },
+				"location": { "file": path.trim_prefix("res://"), "line": info.line },
 			}
 	)
 	instance._gdtest_begin_case()
@@ -865,22 +846,47 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	return status
 
 
+func _call_hook(
+		instance: GDTest,
+		method: StringName,
+		arguments: Array[Variant],
+		path: String,
+		totals: Dictionary[String, int]
+) -> void:
+	await _call_optional(instance, method, arguments)
+	totals["error"] += _drain_framework_errors(instance, path)
+
+
 func _call_optional(instance: Object, method: StringName, arguments: Array[Variant]) -> void:
 	if instance.has_method(method):
 		await instance.callv(method, arguments)
 
 
+func _drain_framework_errors(instance: GDTest, default_file: String) -> int:
+	var drained: Array[Variant] = Protocol.framework_errors(
+			instance._gdtest_drain_discovery_errors(),
+			default_file
+	)
+	for diagnostic: Variant in drained:
+		_send_event(
+				"worker_error",
+				Protocol.diagnostic_worker_error(
+						diagnostic,
+						default_file,
+						"worker.framework",
+						"framework",
+						_active_case_id
+				)
+		)
+	return drained.size()
+
+
 func _on_assertion_failed(diagnostic: Dictionary[String, Variant]) -> void:
 	var serialization_started_usec: int = Time.get_ticks_usec()
-	var payload: Dictionary[String, Variant] = {
-		"test_id": _active_case_id,
-		"assertion": diagnostic.get("assertion", ""),
-		"message": diagnostic.get("message", ""),
-		"location": diagnostic.get("location", {}),
-		"actual": Protocol.wire_value(diagnostic.get("actual")),
-	}
-	if bool(diagnostic.get("has_expected", false)):
-		payload["expected"] = Protocol.wire_value(diagnostic.get("expected"))
+	var payload: Dictionary[String, Variant] = Protocol.assertion_failed(
+			_active_case_id,
+			diagnostic
+	)
 	_serialization_usec += Time.get_ticks_usec() - serialization_started_usec
 	_send_event("assertion_failed", payload)
 
@@ -924,21 +930,18 @@ func _reset_command(command: Dictionary[String, Variant]) -> void:
 
 func _send_event(event_type: String, data: Dictionary[String, Variant]) -> void:
 	_sequence += 1
-	var event: Dictionary[String, Variant] = {
-		"version": Version.WORKER_PROTOCOL_VERSION,
-		"type": "event",
-		"request_id": _request_id,
-		"payload": {
-			"kind": event_type,
-			"worker_id": _worker_id,
-			"session_id": _session_id,
-			"generation": _generation,
-			"run_id": _run_id,
-			"sequence": _sequence,
-			"data": data,
-		},
-	}
-	_send(event)
+	_send(
+			Protocol.event_envelope(
+					_request_id,
+					event_type,
+					_worker_id,
+					_session_id,
+					_generation,
+					_run_id,
+					_sequence,
+					data
+			)
+	)
 
 
 func _send_worker_error(code: String, text: String) -> void:
@@ -954,17 +957,15 @@ func _send_worker_error(code: String, text: String) -> void:
 
 
 func _send_discovery_error(value: Variant, default_file: String) -> void:
-	var diagnostic: Dictionary[String, Variant] = Protocol.discovery_error(value, default_file)
-	var location: Dictionary[String, Variant] = _dict(diagnostic["location"])
 	_send_event(
 			"worker_error",
-			{
-				"name": str(diagnostic["code"]),
-				"message": str(diagnostic["message"]),
-				"test_id": _active_case_id,
-				"location": location,
-				"metadata": { "code": diagnostic["code"] },
-			}
+			Protocol.diagnostic_worker_error(
+					value,
+					default_file,
+					"worker.discovery",
+					"",
+					_active_case_id
+			)
 	)
 
 

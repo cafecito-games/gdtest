@@ -804,9 +804,9 @@ Probes belong to the case that created them. gdtest disconnects every probe
 after the case's `after_case` or `after_each` hook and before the case result
 is finalized, including timed-out and canceled cases. A connection made in one
 case is therefore absent in the next case that reuses the same worker and test
-instance. Calling `watch_signal` outside an executing case is a discovery error
-and returns an inert probe. A null signal, or one whose owner has been freed,
-is a framework error and returns an inert probe.
+instance. Calling `watch_signal` outside an executing case is a discovery or
+framework error and returns an inert probe. A null signal, or one whose owner
+has been freed, is a framework error and returns an inert probe.
 
 ### 14.7 Generated test doubles
 
@@ -935,9 +935,9 @@ same context. Doubles and signal probes created in one case share one call
 sequence, so `calls()` and `watch_signal` records can be ordered against each
 other by `sequence`.
 
-Calling `double_context()` outside an executing case is a discovery error and
-returns a closed context. Gdtest closes the case's context when the case
-finishes, including when it fails, times out, or is canceled. A double built
+Calling `double_context()` outside an executing case is a discovery or framework
+error and returns a closed context. Gdtest closes the case's context when the
+case finishes, including when it fails, times out, or is canceled. A double built
 with a closed context records nothing into any case. Each call to it reports
 through `push_error` with the form
 `gdtest: <Name>: construct doubles with double_context() inside an executing case`,

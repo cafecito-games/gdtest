@@ -216,6 +216,8 @@ func TestGodotCallbackProbeOutsideCaseReportsErrorAndReturnsInertProbe(t *testin
 	assert.Equal(t, "pass", hookCaseStatus)
 	assert.Equal(t, "error", runFinished.Status)
 	require.Len(t, workerErrors, 1)
+	assert.Equal(t, "worker.framework", workerErrors[0].Name)
+	assert.Equal(t, "framework", workerErrors[0].Assertion)
 	assert.Equal(t, "callback_probe is only valid while a case is executing", workerErrors[0].Message)
 	require.NotNil(t, workerErrors[0].Location)
 	assert.Equal(t, hookFile.Path, workerErrors[0].Location.File)

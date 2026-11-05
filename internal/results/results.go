@@ -26,6 +26,7 @@ type CaseResult struct {
 // Summary is a deterministic folded run result.
 type Summary struct {
 	Cases          []CaseResult    `json:"cases"`
+	Errors         []model.Event   `json:"errors,omitempty"`
 	Infrastructure []model.Event   `json:"infrastructure,omitempty"`
 	Passed         int             `json:"passed"`
 	Failed         int             `json:"failed"`
@@ -59,6 +60,7 @@ type Collector struct {
 	stale          bool
 	started        bool
 	ended          bool
+	errors         []model.Event
 	infrastructure []model.Event
 	runStatus      string
 	preferred      map[string]int
@@ -119,9 +121,25 @@ func (c *Collector) Emit(event model.Event) error {
 		c.stale = event.Stale
 		c.runStatus = event.Status
 	case model.EventWorkerError:
-		c.infrastructure = append(c.infrastructure, event)
+		if isFrameworkError(event) {
+			c.errors = append(c.errors, event)
+		} else {
+			c.infrastructure = append(c.infrastructure, event)
+		}
 	}
 	return nil
+}
+
+func isFrameworkError(event model.Event) bool {
+	if event.Name == "worker.framework" || event.Assertion == "framework" {
+		return true
+	}
+	if event.Metadata != nil {
+		if code, ok := event.Metadata["code"].(string); ok && code == "worker.framework" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Collector) ensureCase(id string) *CaseResult {
@@ -153,9 +171,11 @@ func (c *Collector) Summary() Summary {
 		})
 	}
 	summary := Summary{
-		Cases: make([]CaseResult, 0, len(ids)), Stale: c.stale,
+		Cases:          make([]CaseResult, 0, len(ids)),
+		Errors:         append([]model.Event(nil), c.errors...),
+		Stale:          c.stale,
 		Infrastructure: append([]model.Event(nil), c.infrastructure...),
-		Errored:        len(c.infrastructure),
+		Errored:        len(c.infrastructure) + len(c.errors),
 	}
 	for _, id := range ids {
 		result := *c.cases[id]

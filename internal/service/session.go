@@ -378,12 +378,25 @@ func (s *SessionService) runFiles(
 	var emitMu sync.Mutex
 	aggregateStatus := "pass"
 	statusRank := map[string]int{"pass": 0, "void": 0, "skip": 0, "todo": 0, "canceled": 1, "fail": 2, "error": 3}
+	promoteStatus := func(status string) {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		if statusRank[status] > statusRank[aggregateStatus] {
+			aggregateStatus = status
+		}
+	}
 	safeEmit := func(event any) error {
 		emitMu.Lock()
 		defer emitMu.Unlock()
-		if modelEvent, ok := event.(model.Event); ok && modelEvent.Type == model.EventCaseFinished &&
-			statusRank[modelEvent.Status] > statusRank[aggregateStatus] {
-			aggregateStatus = modelEvent.Status
+		if modelEvent, ok := event.(model.Event); ok {
+			switch modelEvent.Type {
+			case model.EventCaseFinished, model.EventSuiteFinished:
+				if statusRank[modelEvent.Status] > statusRank[aggregateStatus] {
+					aggregateStatus = modelEvent.Status
+				}
+			case model.EventWorkerError:
+				aggregateStatus = "error"
+			}
 		}
 		return emit(event)
 	}
@@ -460,7 +473,7 @@ func (s *SessionService) runFiles(
 				scheduler.Interactive, isolation,
 				func(fileCtx context.Context) (any, error) {
 					return s.runFileOnWorker(
-						fileCtx, entry, lane, fileRequest, safeEmit, time.Since(fileSubmitted),
+						fileCtx, entry, lane, fileRequest, safeEmit, promoteStatus, time.Since(fileSubmitted),
 					)
 				},
 			)
@@ -562,6 +575,7 @@ func (s *SessionService) runFileOnWorker(
 	lane *fileWorkerLane,
 	request RunRequest,
 	emit daemon.EmitFunc,
+	promoteStatus func(string),
 	queueWait time.Duration,
 ) (any, error) {
 	timings := map[string]int64{"queue_wait": queueWait.Nanoseconds()}
@@ -578,6 +592,9 @@ func (s *SessionService) runFileOnWorker(
 		case model.EventWorkerReady, model.EventRunStarted:
 			return nil
 		case model.EventRunFinished:
+			if promoteStatus != nil {
+				promoteStatus(event.Status)
+			}
 			mergeWorkerTimings(timings, event.Metadata)
 			s.logLateCallbackInvocations(entry, process, request.Plan.RunID, event.Metadata)
 			return nil

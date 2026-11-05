@@ -1644,3 +1644,99 @@ func TestSessionServiceDiscoveryRequestValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionServiceMultiFileRunPromotesWorkerFrameworkErrorToRunFinishedStatus(t *testing.T) {
+	t.Parallel()
+
+	var nextPID atomic.Int32
+	nextPID.Store(600)
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		pid := int(nextPID.Add(1))
+		return &fakeWorker{
+			pid:        pid,
+			generation: options.Generation,
+			runHook: func(plan model.TestPlan, sink executor.EventSink) error {
+				filePath := plan.Files[0].Path
+				caseID := filePath + "::test_passes"
+				if err := sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion,
+					Type:            model.EventCaseStarted,
+					RunID:           plan.RunID,
+					TestID:          caseID,
+				}); err != nil {
+					return err
+				}
+				if err := sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion,
+					Type:            model.EventCaseFinished,
+					RunID:           plan.RunID,
+					TestID:          caseID,
+					Status:          "pass",
+				}); err != nil {
+					return err
+				}
+				status := "pass"
+				if filePath == "b.test.gd" {
+					status = "error"
+					if err := sink.Emit(model.Event{
+						ProtocolVersion: model.ProtocolVersion,
+						Type:            model.EventWorkerError,
+						RunID:           plan.RunID,
+						Name:            "worker.framework",
+						Assertion:       "framework",
+						Message:         "expect is only valid while a case is executing",
+						Location:        &model.Location{File: "b.test.gd", Line: 15},
+						Metadata:        map[string]any{"code": "worker.framework"},
+					}); err != nil {
+						return err
+					}
+				}
+				return sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion,
+					Type:            model.EventRunFinished,
+					RunID:           plan.RunID,
+					Status:          status,
+					Generation:      plan.Generation,
+				})
+			},
+		}, nil
+	}, 2)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "multi-file-hook-error",
+		Project:   "/project",
+		Godot:     "godot",
+		Jobs:      2,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "multi-file-run",
+			Generation:      1,
+			Files:           []model.FilePlan{{Path: "a.test.gd"}, {Path: "b.test.gd"}},
+		},
+	})
+	require.NoError(t, err)
+
+	var workerErrors []model.Event
+	var runFinished model.Event
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "multi-file-run", Method: "session.run", Payload: payload,
+	}, func(value any) error {
+		event, ok := value.(model.Event)
+		if !ok {
+			return fmt.Errorf("unexpected daemon event %T", value)
+		}
+		switch event.Type {
+		case model.EventWorkerError:
+			workerErrors = append(workerErrors, event)
+		case model.EventRunFinished:
+			runFinished = event
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, workerErrors, 1)
+	assert.Equal(t, "worker.framework", workerErrors[0].Name)
+	assert.Equal(t, "error", runFinished.Status)
+}

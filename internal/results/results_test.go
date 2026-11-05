@@ -51,6 +51,66 @@ func TestCollectorFoldsDiscoveryDiagnosticsAsInfrastructure(t *testing.T) {
 	assert.True(t, summary.HasInfrastructureFailure())
 	assert.True(t, summary.HasFailures())
 	assert.Len(t, summary.Infrastructure, 1)
+	assert.Empty(t, summary.Errors)
+}
+
+func TestCollectorFoldsExecutionFrameworkErrorsSeparatelyFromInfrastructure(t *testing.T) {
+	t.Parallel()
+	collector := NewCollector()
+	events := []model.Event{
+		{Type: model.EventRunStarted, RunID: "run"},
+		{Type: model.EventCaseStarted, RunID: "run", TestID: "suite.test.gd::test_passing"},
+		{Type: model.EventCaseFinished, RunID: "run", TestID: "suite.test.gd::test_passing", Status: "pass"},
+		{
+			Type:      model.EventWorkerError,
+			RunID:     "run",
+			Name:      "worker.framework",
+			Assertion: "framework",
+			Message:   "expect is only valid while a case is executing",
+			Location:  &model.Location{File: "suite.test.gd", Line: 12},
+			Metadata:  map[string]any{"code": "worker.framework"},
+		},
+		{
+			Type:      model.EventWorkerError,
+			RunID:     "run",
+			Name:      "worker.framework",
+			Assertion: "framework",
+			Message:   "fail is only valid while a case is executing",
+			Location:  &model.Location{File: "suite.test.gd", Line: 24},
+			Metadata:  map[string]any{"code": "worker.framework"},
+		},
+		{Type: model.EventRunFinished, RunID: "run", Status: "error"},
+	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+	summary := collector.Summary()
+	assert.Equal(t, 1, summary.Passed)
+	assert.Equal(t, 2, summary.Errored)
+	assert.True(t, summary.HasFailures())
+	assert.False(t, summary.HasInfrastructureFailure())
+	assert.Empty(t, summary.Infrastructure)
+	require.Len(t, summary.Errors, 2)
+	assert.Equal(t, "suite.test.gd", summary.Errors[0].Location.File)
+	assert.Equal(t, 12, summary.Errors[0].Location.Line)
+	assert.Equal(t, 24, summary.Errors[1].Location.Line)
+}
+
+func TestCollectorCombinesFrameworkAndInfrastructureErrorsInTotalCount(t *testing.T) {
+	t.Parallel()
+	collector := NewCollector()
+	require.NoError(t, collector.Emit(model.Event{
+		Type: model.EventWorkerError, Name: "worker.framework", Message: "hook misuse",
+	}))
+	require.NoError(t, collector.Emit(model.Event{
+		Type: model.EventWorkerError, Name: "worker.discovery", Message: "invalid provider",
+	}))
+	summary := collector.Summary()
+	assert.Equal(t, 2, summary.Errored)
+	assert.True(t, summary.HasFailures())
+	assert.True(t, summary.HasInfrastructureFailure())
+	assert.Len(t, summary.Errors, 1)
+	assert.Len(t, summary.Infrastructure, 1)
 }
 
 func TestCollectorUsesExplicitManifestOrderForConcurrentEvents(t *testing.T) {

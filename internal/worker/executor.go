@@ -174,6 +174,21 @@ func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink execu
 			event.ProtocolVersion = model.ProtocolVersion
 			event.Type = wireEvent.Kind
 			event.RunID = wireEvent.RunID
+			if event.Location != nil {
+				location := *event.Location
+				location.File = strings.TrimPrefix(location.File, "res://")
+				if location.File == "" {
+					event.Location = nil
+				} else {
+					if !validManifestPath(location.File) {
+						return fmt.Errorf(
+							"worker event contains invalid diagnostic path %q",
+							event.Location.File,
+						)
+					}
+					event.Location = &location
+				}
+			}
 			if err := sink.Emit(event); err != nil {
 				return err
 			}
