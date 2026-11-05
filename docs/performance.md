@@ -12,26 +12,25 @@ The initial objectives are below 5 ms for a ready-daemon client connection, belo
 
 ## Local reference run
 
-On 2026-11-04, `GDTEST_PERFORMANCE_SAMPLES=5 GDTEST_LATENCY_SAMPLES=30 scripts/benchmark` exercised the real daemon and Godot corpora on an Apple M3 Pro (`darwin/arm64`, Go 1.26.2, Godot 4.7.2 Cafecito). Latency rows use 30 samples and large-corpus rows use five:
+On 2026-11-05, `GDTEST_PERFORMANCE_SAMPLES=5 GDTEST_LATENCY_SAMPLES=30 scripts/benchmark` exercised the real daemon and Godot corpora on an Apple M3 Pro (`darwin/arm64`, Go 1.26.2, Godot 4.7.2 Cafecito). Latency rows use 30 samples and large-corpus rows use five:
 
 | Corpus | Items | Minimum | Median | p95 |
 | --- | ---: | ---: | ---: | ---: |
-| Ready-daemon client request | 1 | 0.054 ms | 0.096 ms | 0.340 ms |
-| Warm direct daemon/worker request | 1 | 26.9 ms | 34.4 ms | 35.1 ms |
-| Dynamic discovery | 10,000 | 353.4 ms | 354.3 ms | 364.4 ms |
-| Passing assertions | 10,000 | 19.6 ms | 20.7 ms | 20.8 ms |
-| Dynamic case execution | 10,000 | 924.6 ms | 959.2 ms | 969.0 ms |
+| Ready-daemon client request | 1 | 0.041 ms | 0.057 ms | 0.224 ms |
+| Warm direct daemon/worker request | 1 | 11.2 ms | 13.8 ms | 23.6 ms |
+| Warm complete Cobra CLI invocation | 1 | 25.9 ms | 27.9 ms | 34.5 ms |
+| Dynamic discovery | 10,000 | 256.2 ms | 258.0 ms | 260.9 ms |
+| Passing assertions | 10,000 | 17.2 ms | 20.8 ms | 22.1 ms |
+| Dynamic case execution | 10,000 | 700.5 ms | 712.4 ms | 719.0 ms |
 
 These are reference measurements, not portable thresholds. The corpus run also verifies every assertion count, every dynamic case start/finish pair, and every terminal status. It exposed and removed a quadratic dynamic-ID ordinal scan; ordinals are now tracked per source line in constant time.
 
-This reference run predates the full-CLI corpus, so the table deliberately does not present the direct request as an end-to-end command measurement. Add a `warm_single_file_cli` reference row only from a quiet host; a run made while unrelated compilers leave the machine at zero percent idle is useful functional evidence but not a latency baseline.
-
-A later complete verification run on the same machine passed every corpus but became heavily
+A prior complete verification run on the same machine passed every corpus but became heavily
 contended while unrelated Swift builds were active. It observed a full-CLI median/p95 of
 110.5/168.0 ms and a direct daemon/worker median/p95 of 55.5/132.0 ms; even the 10,000-case
 Godot corpora were roughly ten times slower than the quiet reference. These numbers prove the new
-path executes and disclose that full command latency has not been shown below the objective, but
-they are not substituted for the quiet-host baseline.
+path executes and disclose the effect of host contention; they are not substituted for the
+quiet-host baseline above, which meets the latency objectives for both direct and full-CLI runs.
 
 The same run's size sweeps showed proportional allocation growth for rich-event folding: 3,036 allocations at 1,000 events, 15,066 at 5,000, and 30,102 at 10,000. Serialized manifest bytes likewise grew proportionally, and a deterministic unit test guards the 1,000-to-10,000 encoded-size ratio. Timing samples remain observational because scheduler noise is unsuitable for a unit-test threshold.
 

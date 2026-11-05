@@ -60,15 +60,13 @@ Completed on 2026-11-05 for the current hardening batch:
   a release installation.
 - `GDTEST_PERFORMANCE_SAMPLES=5 GDTEST_LATENCY_SAMPLES=30 scripts/benchmark` passed the size
   sweeps, 64-session scheduler, real-Godot 10,000-assertion/10,000-dynamic-case corpora, and the
-  real local-daemon latency corpus. Ready-daemon median/p95 were 0.096/0.340 ms; the direct warm
-  daemon/worker request median/p95 were 34.4/35.1 ms, below the tracked 5 ms and 50/100 ms
-  objectives respectively. A separate full-CLI corpus now measures process startup, project and
+  real local-daemon latency corpus. Ready-daemon median/p95 were 0.057/0.224 ms; direct warm
+  daemon/worker median/p95 were 13.8/23.6 ms; and complete Cobra CLI median/p95 were 27.9/34.5 ms.
+  All are below the tracked 5 ms and 50/100 ms objectives. The full-CLI corpus measures process startup, project and
   configuration identity, both discovery phases, reporting, and the daemon/worker request rather
-  than presenting the direct request as end-to-end command latency. The complete corpus passed on
-  the current revision; under simultaneous unrelated Swift compiler saturation it observed
-  110.5/168.0 ms full-CLI median/p95, which is disclosed as a contended diagnostic rather than a
-  replacement for the quiet reference and does not claim that full command latency meets the
-  objective.
+  than presenting the direct request as end-to-end command latency. A prior run under unrelated
+  Swift compiler saturation observed 110.5/168.0 ms full-CLI median/p95 and remains disclosed as a
+  contended diagnostic rather than replacing the quiet reference.
 - The current migration regression fixture executes three real-Godot cases after rewriting nested
   `Vest.get_tree()` access and strict inherited-name conflicts.
 - Parsed GDScript AST artifacts are versioned by tool/parser identity and relative path plus source
