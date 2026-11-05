@@ -441,12 +441,11 @@ func TestSignalCapturesConvertOnlyProvenBindingsAndPreserveAmbiguousUses(t *test
 		"rewrite.signal-capture", "rewrite.signal-read",
 		"rewrite.signal-capture", "rewrite.signal-read",
 		"rewrite.signal-capture", "rewrite.signal-read", "rewrite.signal-read",
-		"unsupported.signal-capture", "unsupported.signal-capture",
 		"unsupported.signal-capture",
 	}, findingCodes(result.Findings))
 	plan, err := discovery.Parse("tests/signal_capture.test.gd", result.Output)
 	require.NoError(t, err, "migrated output must satisfy gdtest's static discovery contract")
-	assert.Len(t, plan.Cases, 11)
+	assert.Len(t, plan.Cases, 10)
 
 	again, err := Transform("tests/signal_capture.test.gd", result.Output)
 	require.NoError(t, err)

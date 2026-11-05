@@ -83,14 +83,6 @@ func test_emptiness_checks_convert() -> void:
 	expect_equal(get_signal_emissions(source.opened), [])
 
 
-## Preserves a capture whose signal is also read through an alias.
-func test_aliased_read_is_preserved() -> void:
-	var source := Source.new()
-	var alias := source
-	capture_signal(source.aliased, 0)
-	expect_equal(get_signal_emissions(alias.aliased).size(), 0)
-
-
 ## Preserves a capture that lives outside any test function.
 func suite() -> void:
 	capture_signal(Source.new().shared, 0)

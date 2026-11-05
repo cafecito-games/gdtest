@@ -89,27 +89,22 @@ func (t *transformer) signalCaptures(tree *ast.File) {
 		group := groupFor(groups, key)
 		group.captures = append(group.captures, capture)
 	}
+	unmatchedRead := false
 	for _, read := range reads {
 		key := signalGroupKey{scope: enclosingFunction(tree, read.call.Span()), text: read.text}
 		if group, exists := groups[key]; exists {
 			group.reads = append(group.reads, read)
 			continue
 		}
-		for otherKey, group := range groups {
-			if otherKey.scope == key.scope {
-				group.foreign = "the test also reads a signal expression without a matching capture, which may be an alias"
-				continue
-			}
-			sameProperty := read.property != "" && group.captures[0].member.Property == read.property
-			if otherKey.text == read.text || sameProperty {
-				group.foreign = "the signal is read outside the test that captures it"
-			}
-		}
+		unmatchedRead = true
 	}
 
 	scopeNames := make(map[*ast.FunctionDeclaration]map[string]struct{})
 	for _, group := range groups {
 		reason := t.signalGroupBlocker(group)
+		if reason == signalCaptureUnset && unmatchedRead {
+			reason = "a signal read in this file has no matching capture in its test and may be an alias"
+		}
 		var names map[string]struct{}
 		if reason == signalCaptureUnset {
 			function := group.captures[0].function
@@ -369,6 +364,8 @@ func declaredNames(tree *ast.File, function *ast.FunctionDeclaration) map[string
 			case *ast.ForStatement:
 				names[value.Variable] = struct{}{}
 			case *ast.SignalDeclaration:
+				names[value.Name] = struct{}{}
+			case *ast.BindingPattern:
 				names[value.Name] = struct{}{}
 			}
 			return true
