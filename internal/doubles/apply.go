@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/cafecito-games/gdtest/internal/config"
 )
@@ -166,6 +167,26 @@ func inspectOutput(path string) ([]byte, bool, error) {
 	return content, true, nil
 }
 
+// aliasesDesired reports whether owned names the same file as a desired path
+// that differs from it only in case, as happens on case-insensitive
+// filesystems. Removing such a file would delete the freshly written output.
+func (index *Index) aliasesDesired(owned string, desired map[string][]byte) bool {
+	ownedInfo, err := os.Lstat(filepath.Join(index.root, filepath.FromSlash(owned)))
+	if err != nil {
+		return false
+	}
+	for relative := range desired {
+		if relative == owned || !strings.EqualFold(relative, owned) {
+			continue
+		}
+		desiredInfo, err := os.Lstat(filepath.Join(index.root, filepath.FromSlash(relative)))
+		if err == nil && os.SameFile(ownedInfo, desiredInfo) {
+			return true
+		}
+	}
+	return false
+}
+
 func refusal(relative string) Diagnostic {
 	return Diagnostic{Path: relative, Message: "refusing to overwrite " + relative + ": missing gdtest generated-double marker"}
 }
@@ -177,6 +198,9 @@ func (index *Index) unexpectedOwned(desired map[string][]byte) ([]string, []Diag
 	var diagnostics []Diagnostic
 	for _, owned := range index.GeneratedScripts() {
 		if _, wanted := desired[owned.Path]; wanted {
+			continue
+		}
+		if index.aliasesDesired(owned.Path, desired) {
 			continue
 		}
 		for _, relative := range []string{owned.Path, owned.Path + uidSuffix} {

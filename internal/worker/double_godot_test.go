@@ -263,3 +263,40 @@ func lineContaining(t *testing.T, root, relative, snippet string) int {
 	require.Equal(t, 1, found, "snippet %q must occur exactly once in %s", snippet, relative)
 	return line
 }
+
+func TestGodotDoubleCallerUnderNestedAddonsDirectoryKeepsItsLocation(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot nested double location test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	relative := "fixtures/godot/api/nested/addons/gdtest/double_location.test.gd"
+	locationFile := parseFixture(t, root, relative)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "double-nested-location", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion,
+		RunID:           "double-nested-location",
+		Generation:      1,
+		Files:           []model.FilePlan{locationFile},
+	}
+	var diagnostics []model.Event
+	err = process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		if event.Type == model.EventAssertionFail {
+			diagnostics = append(diagnostics, event)
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	require.Len(t, diagnostics, 1)
+	diagnostic := diagnostics[0]
+	assert.Contains(t, diagnostic.Message, "unexpected call to Inventory.add")
+	require.NotNil(t, diagnostic.Location)
+	assert.Equal(t, relative, diagnostic.Location.File)
+	assert.Equal(t, lineContaining(t, root, relative, `inventory.add("ghost")`), diagnostic.Location.Line)
+}

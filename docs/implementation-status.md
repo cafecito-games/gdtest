@@ -306,3 +306,12 @@ ADR 0009.
     is still regenerated or removed: `TestGenerateDoublesCorruptedOwnedOutputIsRegeneratedAndRemovable`.
   - Outputs that differ only in case are rejected as duplicates, because they name one file on
     case-insensitive filesystems: `TestValidateTestDoublesRejectsInvalidEntries`.
+  - An owned output that is the same file as a case-variant configured output is never removed,
+    so a case-only rename on a case-insensitive filesystem keeps the new output:
+    `TestPrepareKeepsOwnedOutputThatAliasesCaseVariantDesiredOutput` and
+    `TestPrepareRemovesDistinctOwnedOutputDifferingOnlyInCase`.
+  - An unimplemented abstract method starting with `_` is refused instead of producing an
+    uninstantiable double: `TestAnalyzeRefusesUnimplementedAbstractPrivateMethod`.
+  - Caller locations skip only `res://addons/gdtest/`, so a user test under a nested
+    `addons/gdtest` directory keeps its line:
+    `TestGodotDoubleCallerUnderNestedAddonsDirectoryKeepsItsLocation`.

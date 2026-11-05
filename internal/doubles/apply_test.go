@@ -397,3 +397,47 @@ func temporaryFiles(t *testing.T, root string) []string {
 	require.NoError(t, err)
 	return temporaries
 }
+
+func TestPrepareKeepsOwnedOutputThatAliasesCaseVariantDesiredOutput(t *testing.T) {
+	t.Parallel()
+
+	root := writeProject(t, map[string]string{"src/inventory.gd": applySource})
+	lower := inventoryEntry()
+	plan, diagnostics := Prepare(root, applyProject(lower), "0.0.0-test")
+	require.Empty(t, diagnostics)
+	_, _, err := Write(root, plan)
+	require.NoError(t, err)
+	// A hard link gives two spellings one file, exactly as a case-insensitive
+	// filesystem does for paths that differ only in case.
+	for _, suffix := range []string{"", uidSuffix} {
+		require.NoError(t, os.Link(
+			filepath.Join(root, "doubles", "inventory_double.gd"+suffix),
+			filepath.Join(root, "doubles", "Inventory_double.gd"+suffix),
+		))
+	}
+	renamed := lower
+	renamed.Output = "doubles/Inventory_double.gd"
+
+	plan, diagnostics = Prepare(root, applyProject(renamed), "0.0.0-test")
+
+	require.Empty(t, diagnostics)
+	assert.Empty(t, plan.Unexpected)
+}
+
+func TestPrepareRemovesDistinctOwnedOutputDifferingOnlyInCase(t *testing.T) {
+	t.Parallel()
+
+	root := writeProject(t, map[string]string{"src/inventory.gd": applySource})
+	lower := inventoryEntry()
+	plan, diagnostics := Prepare(root, applyProject(lower), "0.0.0-test")
+	require.Empty(t, diagnostics)
+	_, _, err := Write(root, plan)
+	require.NoError(t, err)
+	renamed := lower
+	renamed.Output = "doubles/Inventory_double.gd"
+
+	plan, diagnostics = Prepare(root, applyProject(renamed), "0.0.0-test")
+
+	require.Empty(t, diagnostics)
+	assert.Equal(t, []string{"doubles/inventory_double.gd", "doubles/inventory_double.gd.uid"}, plan.Unexpected)
+}

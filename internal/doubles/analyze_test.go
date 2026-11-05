@@ -440,3 +440,29 @@ func TestAnalyzeAllowsOutputToKeepItsOwnClassName(t *testing.T) {
 	assert.Empty(t, diagnostics)
 	assert.Equal(t, "Inventory", model.ClassName)
 }
+
+func TestAnalyzeRefusesUnimplementedAbstractPrivateMethod(t *testing.T) {
+	t.Parallel()
+
+	_, diagnostics := analyzeEntry(t, map[string]string{
+		"src/base.gd":  "@abstract\nextends RefCounted\n\n@abstract\nfunc _resolve(value: int) -> int\n",
+		"src/child.gd": "@abstract\nextends \"res://src/base.gd\"\n\nfunc count() -> int:\n\treturn 0\n",
+	}, entryFor("child.gd"))
+
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, "src/base.gd", diagnostics[0].Path)
+	assert.Contains(t, diagnostics[0].Message, "abstract method _resolve cannot be doubled")
+}
+
+func TestAnalyzeAcceptsAbstractPrivateMethodImplementedNearer(t *testing.T) {
+	t.Parallel()
+
+	model, diagnostics := analyzeEntry(t, map[string]string{
+		"src/base.gd":  "@abstract\nextends RefCounted\n\n@abstract\nfunc _resolve(value: int) -> int\n",
+		"src/child.gd": "extends \"res://src/base.gd\"\n\nfunc _resolve(value: int) -> int:\n\treturn value\n\n\nfunc count() -> int:\n\treturn 0\n",
+	}, entryFor("child.gd"))
+
+	require.Empty(t, diagnostics)
+	require.Len(t, model.Methods, 1)
+	assert.Equal(t, "count", model.Methods[0].Name)
+}

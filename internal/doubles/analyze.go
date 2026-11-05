@@ -162,9 +162,17 @@ func (index *Index) checkClassName(entry config.TestDouble) []Diagnostic {
 // class names they generate, keyed by name.
 func (state *analysis) buildMethods() ([]Method, map[string]string) {
 	candidates := make(map[string][]candidate)
+	private := make(map[string]bool)
 	for _, owner := range state.chain {
 		for _, function := range owner.functions {
 			if strings.HasPrefix(function.Name, "_") {
+				// Private methods are inherited unchanged, so the nearest declaration
+				// must be concrete; otherwise the double would be uninstantiable.
+				if !private[function.Name] && function.Abstract {
+					state.report(owner.path, function.NameSpan, fmt.Sprintf(
+						"abstract method %s cannot be doubled because methods starting with _ are not generated", function.Name))
+				}
+				private[function.Name] = true
 				continue
 			}
 			candidates[function.Name] = append(candidates[function.Name], candidate{declaration: function, owner: owner})

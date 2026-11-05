@@ -177,7 +177,7 @@ func _caller_location() -> Dictionary[String, Variant]:
 		if not frame_value is Dictionary:
 			continue
 		var source: String = str(frame_value.get("source", ""))
-		if source.contains("/addons/gdtest/") or source == _double_path:
+		if source.begins_with("res://addons/gdtest/") or source == _double_path:
 			continue
 		return { "file": source, "line": int(frame_value.get("line", -1)) }
 	return { "file": _double_path, "line": -1 }

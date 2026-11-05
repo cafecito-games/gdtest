@@ -841,7 +841,7 @@ func _user_location() -> Dictionary[String, Variant]:
 	for frame_value: Variant in stack:
 		var frame: Dictionary[String, Variant] = _string_dictionary(frame_value)
 		var source: String = str(frame.get("source", ""))
-		if not source.contains("/addons/gdtest/"):
+		if not source.begins_with("res://addons/gdtest/"):
 			return { "file": source, "line": int(frame.get("line", -1)) }
 	return { "file": _gdtest_file, "line": -1 }
 
