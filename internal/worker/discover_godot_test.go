@@ -209,6 +209,51 @@ func TestGodotDynamicDiscoveryAndExactExecution(t *testing.T) {
 	assert.Contains(t, invalidMessages, "expect is only valid while a case is executing")
 }
 
+func TestGodotResetRestoresInitialAudioServerLayout(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot worker-reset test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	file := parseFixture(t, root, "fixtures/godot/api/worker_reset.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "worker-reset", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	runSelected := func(runID, method string) model.Event {
+		t.Helper()
+		id := file.Path + "::" + method
+		var finished model.Event
+		runErr := process.Run(ctx, model.TestPlan{
+			ProtocolVersion:  model.ProtocolVersion,
+			RunID:            runID,
+			Generation:       1,
+			SelectionApplied: true,
+			SelectedIDs:      []string{id},
+			Files:            []model.FilePlan{file},
+		}, executor.EventSinkFunc(func(event model.Event) error {
+			if event.Type == model.EventCaseFinished && event.TestID == id {
+				finished = event
+			}
+			return nil
+		}))
+		require.NoError(t, runErr)
+		return finished
+	}
+
+	scoped := runSelected("observe-worker-user-data", "test_user_data_is_worker_scoped")
+	assert.Equal(t, "pass", scoped.Status)
+	require.NoError(t, process.Reset(ctx))
+	mutated := runSelected("mutate-audio-layout", "test_mutates_audio_server_layout")
+	assert.Equal(t, "pass", mutated.Status)
+	require.NoError(t, process.Reset(ctx))
+	restored := runSelected("observe-restored-audio-layout", "test_audio_server_layout_matches_worker_startup")
+	assert.Equal(t, "pass", restored.Status)
+}
+
 func TestGodotOutcomeMessagesCrossTheProtocolBoundary(t *testing.T) {
 	if _, err := exec.LookPath("godot"); err != nil {
 		t.Skip("Godot outcome test skipped: godot is not on PATH")

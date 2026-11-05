@@ -82,7 +82,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, trigger Trigger) (Result, er
 			}
 			return Result{}, err
 		}
-		snapshot, err := generation.Build(ctx, r.root, paths)
+		snapshot, err := generation.BuildIncremental(ctx, r.root, paths, r.tracker.Snapshot())
 		if err == nil {
 			return Result{
 				Trigger: trigger, FullRescan: true,

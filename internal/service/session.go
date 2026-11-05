@@ -46,6 +46,15 @@ type DiscoverRequest struct {
 	WorkerIdleNS int64          `json:"worker_idle_timeout_ns,omitempty"`
 }
 
+// GenerationRequest reconciles and returns one project's current source generation
+// without starting or pinging a worker.
+type GenerationRequest struct {
+	SessionID    string `json:"session_id"`
+	Project      string `json:"project"`
+	Godot        string `json:"godot"`
+	WorkerIdleNS int64  `json:"worker_idle_timeout_ns,omitempty"`
+}
+
 // WarmRequest prepares one worker for a project generation.
 type WarmRequest struct {
 	SessionID    string `json:"session_id"`
@@ -184,16 +193,16 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		if err != nil {
 			return nil, err
 		}
+		submitted := time.Now()
+		if len(value.Plan.Files) > 1 {
+			return s.runFiles(ctx, entry, value, isolation, emit, submitted)
+		}
 		result, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
 		if err != nil {
 			return nil, fmt.Errorf("reconcile source before run: %w", err)
 		}
 		if err := requireCurrentGeneration(value.Plan.Generation, result.Update.Generation); err != nil {
 			return nil, err
-		}
-		submitted := time.Now()
-		if len(value.Plan.Files) > 1 {
-			return s.runFiles(ctx, entry, value, isolation, emit, submitted)
 		}
 		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, isolation, func(runCtx context.Context) (any, error) {
 			return s.run(runCtx, entry, value, isolation, emit, time.Since(submitted))
@@ -223,6 +232,34 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, scheduler.Reuse, func(runCtx context.Context) (any, error) {
 			return s.discover(runCtx, entry, value)
 		})
+	case "session.generation":
+		var value GenerationRequest
+		if err := decodeStrict(request.Payload, &value); err != nil {
+			return nil, err
+		}
+		if value.SessionID == "" || value.Project == "" || value.Godot == "" {
+			return nil, errors.New("generation needs session_id, project, and godot")
+		}
+		entry, err := s.get(value.SessionID, value.Project, value.Godot, value.WorkerIdleNS)
+		if err != nil {
+			return nil, err
+		}
+		result, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile source for generation: %w", err)
+		}
+		generation := result.Update.Generation
+		if generation == 0 && entry.source != nil {
+			generation = entry.source.Generation()
+		}
+		if generation == 0 {
+			generation = 1
+		}
+		entry.mu.Lock()
+		entry.lastUsed = time.Now().UTC()
+		entry.lifecycle.Touch(entry.lastUsed)
+		entry.mu.Unlock()
+		return map[string]any{"generation": generation}, nil
 	case "session.warm":
 		var value WarmRequest
 		if err := decodeStrict(request.Payload, &value); err != nil {
@@ -261,11 +298,26 @@ func (s *SessionService) runFiles(
 	submitted time.Time,
 ) (any, error) {
 	entry.mu.Lock()
-	s.discardWorker(entry)
-	entry.mu.Unlock()
+	defer entry.mu.Unlock()
+	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile source before multi-file run: %w", err)
+	}
+	if err := requireCurrentGeneration(request.Plan.Generation, latest.Update.Generation); err != nil {
+		return nil, err
+	}
+	if isolation == scheduler.Fresh ||
+		(request.WorkerMaxRuns > 0 && entry.workerRuns >= uint64(request.WorkerMaxRuns)) {
+		s.discardWorker(entry)
+	}
+	previousPrimary := entry.worker
+	workerLimit := s.maxWorkers
+	if workerLimit <= 0 {
+		workerLimit = 4
+	}
 	jobs := request.Jobs
-	if jobs <= 0 || jobs > s.maxWorkers {
-		jobs = s.maxWorkers
+	if jobs <= 0 || jobs > workerLimit {
+		jobs = workerLimit
 	}
 	jobs = min(jobs, len(request.Plan.Files))
 	var emitMu sync.Mutex
@@ -286,6 +338,37 @@ func (s *SessionService) runFiles(
 	}); err != nil {
 		return nil, err
 	}
+	var primary managedWorker
+	_, err = s.schedule(
+		ctx, request.SessionID, request.Plan.Generation,
+		scheduler.Interactive, isolation,
+		func(setupCtx context.Context) (any, error) {
+			var setupErr error
+			primary, setupErr = s.ensureWorker(setupCtx, entry, request.Plan.Generation)
+			return nil, setupErr
+		},
+	)
+	if err != nil {
+		_ = safeEmit(model.Event{
+			ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished,
+			RunID: request.Plan.RunID, Status: "error", Generation: request.Plan.Generation,
+		})
+		return nil, err
+	}
+	primaryReused := previousPrimary != nil && primary == previousPrimary
+	lanes := make([]*fileWorkerLane, jobs)
+	lanes[0] = &fileWorkerLane{
+		process: primary, primary: true,
+		workerRuns: entry.workerRuns, workerBytes: entry.workerBytes,
+	}
+	for index := 1; index < jobs; index++ {
+		lanes[index] = &fileWorkerLane{}
+	}
+	defer func() {
+		for _, lane := range lanes[1:] {
+			s.retireFileWorker(entry, lane)
+		}
+	}()
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type fileResult struct {
@@ -294,24 +377,27 @@ func (s *SessionService) runFiles(
 		err   error
 	}
 	results := make(chan fileResult, len(request.Plan.Files))
-	limit := make(chan struct{}, jobs)
+	available := make(chan *fileWorkerLane, len(lanes))
+	for _, lane := range lanes {
+		available <- lane
+	}
 	for index, file := range request.Plan.Files {
 		index, file := index, file
 		go func() {
+			var lane *fileWorkerLane
 			select {
-			case limit <- struct{}{}:
+			case lane = <-available:
 			case <-runCtx.Done():
 				results <- fileResult{index: index, err: runCtx.Err()}
 				return
 			}
-			defer func() { <-limit }()
 			fileRequest := request
 			fileRequest.Plan.Files = []model.FilePlan{file}
 			value, err := s.schedule(
 				runCtx, request.SessionID, request.Plan.Generation,
 				scheduler.Interactive, isolation,
 				func(fileCtx context.Context) (any, error) {
-					return s.runEphemeralFile(fileCtx, entry, fileRequest, safeEmit)
+					return s.runFileOnWorker(fileCtx, entry, lane, fileRequest, safeEmit)
 				},
 			)
 			result := fileResult{index: index, err: err}
@@ -320,17 +406,26 @@ func (s *SessionService) runFiles(
 			}
 			if err != nil {
 				cancel()
+			} else {
+				available <- lane
 			}
 			results <- result
 		}()
 	}
 	pids := make([]int, len(request.Plan.Files))
 	var joined error
+	succeeded := uint64(0)
 	for range request.Plan.Files {
 		result := <-results
 		pids[result.index] = result.pid
 		joined = errors.Join(joined, result.err)
+		if result.err == nil {
+			succeeded++
+		}
 	}
+	entry.runs += succeeded
+	entry.lastUsed = time.Now().UTC()
+	entry.lifecycle.Touch(entry.lastUsed)
 	latest, reconcileErr := s.reconcileSource(context.WithoutCancel(ctx), entry, sourcewatch.Filesystem)
 	joined = errors.Join(joined, reconcileErr)
 	currentGeneration := request.Plan.Generation
@@ -355,14 +450,24 @@ func (s *SessionService) runFiles(
 	}); emitErr != nil {
 		joined = errors.Join(joined, emitErr)
 	}
+	if joined != nil || isolation == scheduler.Recycle || isolation == scheduler.Fresh {
+		s.discardWorker(entry)
+	}
 	if joined == nil && request.WarmWorkers > 0 {
 		s.warmReplacement(entry, request.Plan.Generation)
 	}
 	return map[string]any{
 		"worker_pids": pids,
-		"reused":      false,
+		"reused":      primaryReused,
 		"timings_ns":  map[string]int64{"daemon_total": time.Since(submitted).Nanoseconds()},
 	}, joined
+}
+
+type fileWorkerLane struct {
+	process     managedWorker
+	primary     bool
+	workerRuns  uint64
+	workerBytes uint64
 }
 
 func (s *SessionService) warmReplacement(entry *session, generation uint64) {
@@ -380,12 +485,68 @@ func (s *SessionService) warmReplacement(entry *session, generation uint64) {
 	}()
 }
 
-func (s *SessionService) runEphemeralFile(
+func (s *SessionService) runFileOnWorker(
 	ctx context.Context,
 	entry *session,
+	lane *fileWorkerLane,
 	request RunRequest,
 	emit daemon.EmitFunc,
 ) (any, error) {
+	process, err := s.ensureFileWorker(ctx, entry, lane, request.Plan.Generation)
+	if err != nil {
+		return nil, err
+	}
+	tainted := false
+	sink := executor.EventSinkFunc(func(event model.Event) error {
+		switch event.Type {
+		case model.EventWorkerReady, model.EventRunStarted, model.EventRunFinished:
+			return nil
+		case model.EventWorkerTainted:
+			tainted = true
+			return emit(event)
+		default:
+			return emit(event)
+		}
+	})
+	if err := process.Run(ctx, request.Plan, sink); err != nil {
+		s.retireFileWorker(entry, lane)
+		return nil, err
+	}
+	if err := process.Reset(ctx); err != nil {
+		s.retireFileWorker(entry, lane)
+		return nil, fmt.Errorf("reset worker after file: %w", err)
+	}
+	lane.workerRuns++
+	if lane.primary {
+		entry.workerRuns++
+	}
+	memoryExceeded, memoryErr := s.recordFileWorkerMemory(entry, lane)
+	if tainted ||
+		(request.WorkerMaxRuns > 0 && lane.workerRuns >= uint64(request.WorkerMaxRuns)) ||
+		(s.memoryBudgetMB > 0 && (memoryErr != nil || memoryExceeded)) {
+		s.retireFileWorker(entry, lane)
+	}
+	return map[string]any{"worker_pid": process.PID()}, nil
+}
+
+func (s *SessionService) ensureFileWorker(
+	ctx context.Context,
+	entry *session,
+	lane *fileWorkerLane,
+	generation uint64,
+) (managedWorker, error) {
+	if lane.process != nil {
+		return lane.process, nil
+	}
+	if lane.primary {
+		process, err := s.ensureWorker(ctx, entry, generation)
+		if err == nil {
+			lane.process = process
+			lane.workerRuns = entry.workerRuns
+			lane.workerBytes = entry.workerBytes
+		}
+		return process, err
+	}
 	if err := s.reserveWorkerSlot(ctx, entry); err != nil {
 		return nil, err
 	}
@@ -397,35 +558,74 @@ func (s *SessionService) runEphemeralFile(
 	}
 	process, err := factory(ctx, worker.ProcessOptions{
 		Godot: entry.godot, Project: entry.project,
-		SessionID: entry.id, Generation: request.Plan.Generation,
+		SessionID: entry.id, Generation: generation,
 	})
 	if err != nil {
 		s.releaseWorkerSlot()
 		return nil, err
 	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = process.Shutdown(shutdownCtx)
-		cancel()
-		s.releaseWorkerSlot()
-	}()
-	sink := executor.EventSinkFunc(func(event model.Event) error {
-		switch event.Type {
-		case model.EventWorkerReady, model.EventRunStarted, model.EventRunFinished:
-			return nil
-		default:
-			return emit(event)
-		}
-	})
-	if err := process.Run(ctx, request.Plan, sink); err != nil {
-		return nil, err
+	lane.process = process
+	lane.workerRuns = 0
+	lane.workerBytes = 0
+	s.logLifecycle("worker_started", entry, process, "", map[string]any{"pooled": true})
+	return process, nil
+}
+
+func (s *SessionService) retireFileWorker(entry *session, lane *fileWorkerLane) {
+	if lane == nil || lane.process == nil {
+		return
 	}
-	entry.mu.Lock()
-	entry.runs++
-	entry.lastUsed = time.Now().UTC()
-	entry.lifecycle.Touch(entry.lastUsed)
-	entry.mu.Unlock()
-	return map[string]any{"worker_pid": process.PID()}, nil
+	if lane.primary {
+		if entry.worker == lane.process {
+			s.discardWorker(entry)
+		}
+	} else {
+		s.logLifecycle("worker_discarded", entry, lane.process, "", map[string]any{"pooled": true})
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = lane.process.Shutdown(shutdownCtx)
+		cancel()
+		s.mu.Lock()
+		if s.totalWorkerBytes >= lane.workerBytes {
+			s.totalWorkerBytes -= lane.workerBytes
+		} else {
+			s.totalWorkerBytes = 0
+		}
+		s.mu.Unlock()
+		s.releaseWorkerSlot()
+	}
+	lane.process = nil
+	lane.workerRuns = 0
+	lane.workerBytes = 0
+}
+
+func (s *SessionService) recordFileWorkerMemory(entry *session, lane *fileWorkerLane) (bool, error) {
+	if s.memoryBudgetMB <= 0 || lane.process == nil {
+		return false, nil
+	}
+	if lane.primary {
+		exceeded, err := s.recordWorkerMemory(entry)
+		lane.workerBytes = entry.workerBytes
+		return exceeded, err
+	}
+	memoryUsage := s.memoryUsage
+	if memoryUsage == nil {
+		memoryUsage = worker.ResidentMemoryBytes
+	}
+	resident, err := memoryUsage(lane.process.PID())
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	if s.totalWorkerBytes >= lane.workerBytes {
+		s.totalWorkerBytes -= lane.workerBytes
+	} else {
+		s.totalWorkerBytes = 0
+	}
+	lane.workerBytes = resident
+	s.totalWorkerBytes += resident
+	exceeded := s.totalWorkerBytes > uint64(s.memoryBudgetMB)*1024*1024
+	s.mu.Unlock()
+	return exceeded, nil
 }
 
 func (s *SessionService) discover(ctx context.Context, entry *session, request DiscoverRequest) (any, error) {
@@ -756,7 +956,7 @@ func (s *SessionService) reconcileSource(
 	s.logLifecycle(
 		"source_generation_advanced",
 		entry,
-		entry.worker,
+		nil,
 		"",
 		map[string]any{"generation": result.Update.Generation, "changes": len(result.Update.Changes)},
 	)

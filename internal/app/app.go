@@ -799,11 +799,10 @@ func doctor(ctx context.Context, project, godotOverride string, streams IO) erro
 	if godotOverride != "" {
 		projectConfig.Godot = godotOverride
 	}
-	godot, err := godotIdentity(ctx, projectConfig.Godot)
+	godotPath, godotVersion, err := godotDescription(ctx, projectConfig.Godot)
 	if err != nil {
 		return err
 	}
-	godotPath, godotVersion, _ := strings.Cut(godot, "\x00")
 	manifest, err := index.Discover(ctx, root, discovery.Options{Patterns: projectConfig.Tests, Exclude: projectConfig.Exclude})
 	if err != nil {
 		return err

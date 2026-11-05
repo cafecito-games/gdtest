@@ -29,6 +29,7 @@ var _shutdown_requested: bool = false
 var _serialization_usec: int = 0
 var _case_timeout_usec: int = DEFAULT_CASE_TIMEOUT_USEC
 var _abort_run_requested: bool = false
+var _initial_audio_bus_layout: AudioBusLayout = AudioServer.generate_bus_layout()
 
 
 func _initialize() -> void:
@@ -38,7 +39,6 @@ func _initialize() -> void:
 func _start() -> void:
 	var argument_error: String = _parse_arguments(OS.get_cmdline_user_args())
 	if not argument_error.is_empty():
-		# No protocol connection exists yet, so stderr is the only diagnostic channel.
 		# gdkit:ignore = no-engine-logging
 		printerr("gdtest worker: " + argument_error)
 		quit(2)
@@ -46,7 +46,6 @@ func _start() -> void:
 	_peer = StreamPeerTCP.new()
 	var connect_error: Error = _peer.connect_to_host(_host, _port)
 	if connect_error != OK:
-		# No protocol connection exists yet, so stderr is the only diagnostic channel.
 		# gdkit:ignore = no-engine-logging
 		printerr("gdtest worker: connect failed: " + error_string(connect_error))
 		quit(2)
@@ -55,7 +54,6 @@ func _start() -> void:
 		_peer.poll()
 		await process_frame
 	if _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
-		# No protocol connection exists yet, so stderr is the only diagnostic channel.
 		# gdkit:ignore = no-engine-logging
 		printerr("gdtest worker: daemon listener unavailable")
 		quit(2)
@@ -92,7 +90,6 @@ func _start() -> void:
 	quit(0)
 
 
-# Each command-line validation return identifies a distinct actionable startup error.
 # gdkit:ignore = max-returns
 func _parse_arguments(arguments: PackedStringArray) -> String:
 	var index: int = 0
@@ -117,6 +114,9 @@ func _parse_arguments(arguments: PackedStringArray) -> String:
 				_generation = value.to_int()
 			"--gdtest-worker-id":
 				_worker_id = value
+			"--gdtest-user-dir-name":
+				ProjectSettings.set_setting("application/config/use_custom_user_dir", true)
+				ProjectSettings.set_setting("application/config/custom_user_dir_name", value)
 			_:
 				return "unknown argument " + argument
 		index += 2
@@ -128,7 +128,6 @@ func _parse_arguments(arguments: PackedStringArray) -> String:
 		return "session identifier is missing"
 	if _worker_id.is_empty():
 		return "worker identifier is missing"
-	# The whole-function diagnostic is located on the final return.
 	# gdkit:ignore = max-returns
 	return ""
 
@@ -913,6 +912,7 @@ func _reset_command(command: Dictionary[String, Variant]) -> void:
 		return
 	_active_test = null
 	_active_case_id = ""
+	AudioServer.set_bus_layout(_initial_audio_bus_layout)
 	_send(
 			{
 				"version": Version.WORKER_PROTOCOL_VERSION,

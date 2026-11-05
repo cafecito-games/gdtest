@@ -371,6 +371,124 @@ func TestSessionServiceRejectsSessionIdentityRebinding(t *testing.T) {
 	}
 }
 
+func TestSessionServiceReportsGenerationWithoutCreatingWorker(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
+	created := 0
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		created++
+		return &fakeWorker{pid: 51, generation: options.Generation}, nil
+	})
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	generation := func(id string) uint64 {
+		payload, err := json.Marshal(GenerationRequest{
+			SessionID: "generation-session", Project: root, Godot: "godot",
+		})
+		require.NoError(t, err)
+		response, err := service.Handle(context.Background(), daemon.Request{
+			ID: id, Method: "session.generation", Payload: payload,
+		}, nil)
+		require.NoError(t, err)
+		values, ok := response.(map[string]any)
+		require.True(t, ok)
+		value, ok := values["generation"].(uint64)
+		require.True(t, ok)
+		return value
+	}
+
+	assert.Equal(t, uint64(1), generation("initial"))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "example.test.gd"),
+		[]byte("extends GDTest\nfunc test_value() -> void:\n\tpass\n"),
+		0o600,
+	))
+	assert.Equal(t, uint64(2), generation("changed"))
+	assert.Zero(t, created)
+	assert.Zero(t, service.WorkerCount())
+}
+
+func TestSessionServiceGenerationRequestIsStrict(t *testing.T) {
+	t.Parallel()
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		return &fakeWorker{pid: 52, generation: options.Generation}, nil
+	})
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	_, err := service.Handle(context.Background(), daemon.Request{
+		ID: "strict", Method: "session.generation",
+		Payload: json.RawMessage(`{"session_id":"session","project":"/project","godot":"godot","unexpected":true}`),
+	}, nil)
+	require.ErrorContains(t, err, `unknown field "unexpected"`)
+}
+
+func TestSessionServiceGenerationCanReconcileDuringActiveRun(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
+	started := make(chan struct{})
+	release := make(chan struct{})
+	process := &fakeWorker{pid: 53, generation: 1}
+	process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
+		close(started)
+		<-release
+		return sink.Emit(model.Event{
+			ProtocolVersion: model.ProtocolVersion,
+			Type:            model.EventRunFinished,
+			RunID:           plan.RunID,
+		})
+	}
+	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		require.NoError(t, service.Close(context.Background()))
+	})
+
+	runPayload, err := json.Marshal(RunRequest{
+		SessionID: "concurrent-generation", Project: root, Godot: "godot",
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "active-run",
+			Generation:      1,
+		},
+	})
+	require.NoError(t, err)
+	runDone := make(chan error, 1)
+	go func() {
+		_, runErr := service.Handle(context.Background(), daemon.Request{
+			ID: "run", Method: "session.run", Payload: runPayload,
+		}, func(any) error { return nil })
+		runDone <- runErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "active run did not start")
+	}
+
+	generationPayload, err := json.Marshal(GenerationRequest{
+		SessionID: "concurrent-generation", Project: root, Godot: "godot",
+	})
+	require.NoError(t, err)
+	generationDone := make(chan error, 1)
+	go func() {
+		_, generationErr := service.Handle(context.Background(), daemon.Request{
+			ID: "generation", Method: "session.generation", Payload: generationPayload,
+		}, nil)
+		generationDone <- generationErr
+	}()
+	close(release)
+	require.NoError(t, <-runDone)
+	require.NoError(t, <-generationDone)
+}
+
 func TestSessionServiceRejectsUnsafeOrIncompatiblePlans(t *testing.T) {
 	t.Parallel()
 
@@ -500,8 +618,12 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 					break
 				}
 			}
-			started <- struct{}{}
-			<-release
+			select {
+			case <-release:
+			default:
+				started <- struct{}{}
+				<-release
+			}
 			active.Add(-1)
 			id := plan.Files[0].Path + "::test"
 			if err := sink.Emit(model.Event{Type: model.EventCaseStarted, RunID: plan.RunID, TestID: id}); err != nil {
@@ -563,7 +685,167 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 	assert.Equal(t, 3, counts[model.EventCaseStarted])
 	assert.Equal(t, 3, counts[model.EventCaseFinished])
 	assert.Equal(t, 1, counts[model.EventRunFinished])
-	assert.Len(t, processes, 3)
+	require.Len(t, processes, 2)
+	assert.False(t, processes[0].closed.Load(), "the primary worker remains warm")
+	assert.True(t, processes[1].closed.Load(), "the additional pooled worker is released")
+	assert.Equal(t, 3, processes[0].runs+processes[1].runs)
+	assert.Equal(t, 3, processes[0].resets+processes[1].resets)
+
+	request.Plan.RunID = "multi-file-second"
+	payload, err = json.Marshal(request)
+	require.NoError(t, err)
+	response, err := service.Handle(context.Background(), daemon.Request{
+		ID: "request-second", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+	require.NoError(t, err)
+	values, ok := response.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, values["reused"])
+	require.Len(t, processes, 3, "the second command reuses the primary and creates only one extra lane")
+	assert.False(t, processes[0].closed.Load())
+	assert.True(t, processes[2].closed.Load())
+	assert.Equal(t, 6, processes[0].runs+processes[1].runs+processes[2].runs)
+	require.Len(t, service.List(), 1)
+	assert.Equal(t, uint64(6), service.List()[0].Runs)
+}
+
+func TestSessionServiceBootstrapsPrimaryBeforeStartingAdditionalWorkerLanes(t *testing.T) {
+	t.Parallel()
+
+	var factoryMu sync.Mutex
+	created := 0
+	primaryCreating := make(chan struct{})
+	releasePrimary := make(chan struct{})
+	extraCreated := make(chan struct{})
+	var extraOnce sync.Once
+	runsStarted := make(chan struct{}, 3)
+	releaseRuns := make(chan struct{})
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		factoryMu.Lock()
+		created++
+		ordinal := created
+		factoryMu.Unlock()
+		if ordinal == 1 {
+			close(primaryCreating)
+			<-releasePrimary
+		} else {
+			extraOnce.Do(func() { close(extraCreated) })
+		}
+		process := &fakeWorker{pid: 950 + ordinal, generation: options.Generation}
+		process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
+			runsStarted <- struct{}{}
+			<-releaseRuns
+			return sink.Emit(model.Event{
+				ProtocolVersion: model.ProtocolVersion,
+				Type:            model.EventRunFinished,
+				RunID:           plan.RunID,
+				Status:          "pass",
+			})
+		}
+		return process, nil
+	}, 3)
+	service.sourceFactory = nil
+	t.Cleanup(func() {
+		select {
+		case <-releasePrimary:
+		default:
+			close(releasePrimary)
+		}
+		select {
+		case <-releaseRuns:
+		default:
+			close(releaseRuns)
+		}
+		require.NoError(t, service.Close(context.Background()))
+	})
+
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "ordered-bootstrap", Project: "/project", Godot: "godot", Jobs: 3,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "ordered-bootstrap-run",
+			Generation:      1,
+			Files: []model.FilePlan{
+				{Path: "a.test.gd"},
+				{Path: "b.test.gd"},
+				{Path: "c.test.gd"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, handleErr := service.Handle(context.Background(), daemon.Request{
+			ID: "ordered-bootstrap-request", Method: "session.run", Payload: payload,
+		}, func(any) error { return nil })
+		done <- handleErr
+	}()
+
+	waitServiceSignal(t, primaryCreating)
+	select {
+	case <-extraCreated:
+		require.FailNow(t, "additional worker started before primary bootstrap completed")
+	default:
+	}
+	factoryMu.Lock()
+	assert.Equal(t, 1, created)
+	factoryMu.Unlock()
+	close(releasePrimary)
+	for range 3 {
+		waitServiceSignal(t, runsStarted)
+	}
+	factoryMu.Lock()
+	assert.Equal(t, 3, created)
+	factoryMu.Unlock()
+	close(releaseRuns)
+	require.NoError(t, <-done)
+}
+
+func TestSessionServiceMultiFileRunLimitCountsPerWorkerLane(t *testing.T) {
+	t.Parallel()
+
+	var processes []*fakeWorker
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 980 + len(processes), generation: options.Generation}
+		processes = append(processes, process)
+		return process, nil
+	}, 1)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "multi-file-run-limit", Project: "/project", Godot: "godot",
+		Jobs: 1, WorkerMaxRuns: 2,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "multi-file-run-limit",
+			Generation:      1,
+			Files: []model.FilePlan{
+				{Path: "a.test.gd"},
+				{Path: "b.test.gd"},
+				{Path: "c.test.gd"},
+				{Path: "d.test.gd"},
+				{Path: "e.test.gd"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	response, err := service.Handle(context.Background(), daemon.Request{
+		ID: "multi-file-run-limit-request", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+	require.NoError(t, err)
+
+	require.Len(t, processes, 3)
+	assert.Equal(t, []int{2, 2, 1}, []int{processes[0].runs, processes[1].runs, processes[2].runs})
+	assert.True(t, processes[0].closed.Load())
+	assert.True(t, processes[1].closed.Load())
+	assert.False(t, processes[2].closed.Load())
+	assert.Equal(t, 1, service.WorkerCount())
+	require.Len(t, service.List(), 1)
+	assert.Equal(t, uint64(5), service.List()[0].Runs)
+	values, ok := response.(map[string]any)
+	require.True(t, ok)
+	assert.ElementsMatch(t, []int{980, 980, 981, 981, 982}, values["worker_pids"])
 }
 
 func waitServiceSignal(t *testing.T, values <-chan struct{}) {

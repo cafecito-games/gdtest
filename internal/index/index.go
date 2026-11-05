@@ -52,7 +52,7 @@ func discoverWithStore(
 		}
 	}
 	sort.Strings(sources)
-	snapshot, err := generation.Build(ctx, root, sources)
+	snapshot, err := generation.BuildContent(ctx, root, sources)
 	if err != nil {
 		return discovery.Manifest{}, fmt.Errorf("fingerprint discovery inputs: %w", err)
 	}

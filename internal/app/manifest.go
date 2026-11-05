@@ -16,6 +16,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/dynamic"
 	"github.com/cafecito-games/gdtest/internal/generation"
 	"github.com/cafecito-games/gdtest/internal/model"
+	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/projectmeta"
 	"github.com/cafecito-games/gdtest/internal/selection"
 	"github.com/cafecito-games/gdtest/internal/service"
@@ -67,7 +68,7 @@ func completeManifest(
 	if err != nil {
 		return model.DiscoveryManifest{}, fmt.Errorf("encode dynamic discovery configuration: %w", err)
 	}
-	identity, err := godotIdentity(ctx, projectConfig.Godot)
+	identity, err := godotIdentity(projectConfig.Godot)
 	if err != nil {
 		return model.DiscoveryManifest{}, err
 	}
@@ -94,7 +95,7 @@ func completeManifest(
 	if err != nil {
 		return model.DiscoveryManifest{}, fmt.Errorf("enumerate dynamic discovery inputs: %w", err)
 	}
-	inputSnapshot, err := generation.Build(ctx, root, relevantPaths)
+	inputSnapshot, err := generation.BuildContent(ctx, root, relevantPaths)
 	if err != nil {
 		return model.DiscoveryManifest{}, fmt.Errorf("fingerprint dynamic discovery inputs: %w", err)
 	}
@@ -213,8 +214,8 @@ func daemonGeneration(
 	if err != nil {
 		return 0, err
 	}
-	response, err := daemonClient.Call(ctx, "session.warm", service.WarmRequest{
-		SessionID: sessionID, Project: root, Godot: godot, Generation: 1,
+	response, err := daemonClient.Call(ctx, "session.generation", service.GenerationRequest{
+		SessionID: sessionID, Project: root, Godot: godot,
 		WorkerIdleNS: workerIdleTimeout.Nanoseconds(),
 	}, nil)
 	if err != nil {
@@ -301,14 +302,22 @@ func selectCompletedManifest(
 	return result, nil
 }
 
-func godotIdentity(ctx context.Context, executable string) (string, error) {
+func godotIdentity(executable string) (string, error) {
+	identity, err := projectidentity.ExecutableIdentity(executable)
+	if err != nil {
+		return "", fmt.Errorf("identify Godot executable: %w", err)
+	}
+	return identity, nil
+}
+
+func godotDescription(ctx context.Context, executable string) (string, string, error) {
 	path, err := exec.LookPath(executable)
 	if err != nil {
-		return "", fmt.Errorf("godot executable %q was not found: %w", executable, err)
+		return "", "", fmt.Errorf("godot executable %q was not found: %w", executable, err)
 	}
 	path, err = filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve Godot executable: %w", err)
+		return "", "", fmt.Errorf("resolve Godot executable: %w", err)
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(path); resolveErr == nil {
 		path = resolved
@@ -317,9 +326,9 @@ func godotIdentity(ctx context.Context, executable string) (string, error) {
 	defer cancel()
 	output, err := exec.CommandContext(versionCtx, path, "--version").CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("identify Godot executable %q: %w: %s", path, err, strings.TrimSpace(string(output)))
+		return "", "", fmt.Errorf("identify Godot executable %q: %w: %s", path, err, strings.TrimSpace(string(output)))
 	}
-	return filepath.ToSlash(path) + "\x00" + strings.TrimSpace(string(output)), nil
+	return filepath.ToSlash(path), strings.TrimSpace(string(output)), nil
 }
 
 func validateOnlyMode(value string) error {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,34 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGodotIdentityDoesNotExecuteBinaryAndDescriptionDoes(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	executable := filepath.Join(root, "godot-test")
+	marker := filepath.Join(root, "executed")
+	script := "#!/bin/sh\nprintf executed > \"" + marker + "\"\nprintf '4.7.test\\n'\n"
+	require.NoError(t, os.WriteFile(executable, []byte(script), 0o700))
+
+	first, err := godotIdentity(executable)
+	require.NoError(t, err)
+	assert.NotEmpty(t, first)
+	_, err = os.Stat(marker)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	path, engineVersion, err := godotDescription(context.Background(), executable)
+	require.NoError(t, err)
+	canonicalExecutable, err := filepath.EvalSymlinks(executable)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.ToSlash(canonicalExecutable), path)
+	assert.Equal(t, "4.7.test", engineVersion)
+	require.FileExists(t, marker)
+
+	require.NoError(t, os.WriteFile(executable, []byte(script+"# changed\n"), 0o700))
+	second, err := godotIdentity(executable)
+	require.NoError(t, err)
+	assert.NotEqual(t, first, second)
+}
 
 func TestDiscoveryCandidatesResolveDynamicStableIDToOwningFile(t *testing.T) {
 	t.Parallel()

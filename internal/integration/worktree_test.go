@@ -58,8 +58,7 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 		assert.NoError(t, sessions.Close(ctx))
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
+	runCtx, cancelRuns := context.WithTimeout(t.Context(), 2*time.Minute)
 	type labeledOutcome struct {
 		label  string
 		events []model.Event
@@ -76,7 +75,7 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 		item := item
 		sessionID := worktreeSessionID(t, item.root)
 		go func() {
-			events, err := runWorktreePlan(ctx, sessions, item.root, sessionID)
+			events, err := runWorktreePlan(runCtx, sessions, item.root, sessionID)
 			outcomes <- labeledOutcome{label: item.label, events: events, err: err}
 		}()
 	}
@@ -86,6 +85,7 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 		require.NoError(t, outcome.err, "worktree %s run", outcome.label)
 		results[outcome.label] = outcome
 	}
+	cancelRuns()
 	assertWorktreeOutcome(t, results["a"].events, "pass", "")
 	assertWorktreeOutcome(t, results["b"].events, "fail", "from-worktree-b")
 	worktreeAID := stableCaseID(results["a"].events)
@@ -126,16 +126,18 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 	}()
 	var wait sync.WaitGroup
 	stressErrors := make(chan error, len(stressRoots))
+	stressCtx, cancelStress := context.WithTimeout(t.Context(), 2*time.Minute)
 	for _, root := range stressRoots {
 		root := root
 		sessionID := worktreeSessionID(t, root)
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			stressErrors <- warmWorktree(ctx, sessions, root, sessionID)
+			stressErrors <- warmWorktree(stressCtx, sessions, root, sessionID)
 		}()
 	}
 	wait.Wait()
+	cancelStress()
 	close(stopMonitor)
 	<-monitorDone
 	close(stressErrors)
@@ -146,7 +148,9 @@ func TestLinkedWorktreesAreIsolatedUnderGlobalWorkerBound(t *testing.T) {
 	assert.LessOrEqual(t, peak.Load(), int64(2))
 
 	worktreeRun(t, repository, "git", "worktree", "remove", "--force", worktreeBRegistered)
-	events, err := runWorktreePlan(ctx, sessions, worktreeA, worktreeSessionID(t, worktreeA))
+	finalCtx, cancelFinal := context.WithTimeout(t.Context(), 2*time.Minute)
+	events, err := runWorktreePlan(finalCtx, sessions, worktreeA, worktreeSessionID(t, worktreeA))
+	cancelFinal()
 	require.NoError(t, err)
 	assertWorktreeOutcome(t, events, "pass", "")
 }

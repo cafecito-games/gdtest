@@ -1,11 +1,14 @@
 package performance_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -119,6 +122,54 @@ func test_trivial() -> void:
 		})
 		logCorpusReport(t, "warm_single_file", 1, durations)
 	})
+
+	t.Run("warm full CLI", func(t *testing.T) {
+		if _, err := exec.LookPath("godot"); err != nil {
+			t.Skip("warm CLI performance skipped: godot is not on PATH")
+		}
+		_, sourceFile, _, ok := runtime.Caller(0)
+		require.True(t, ok)
+		repository := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", ".."))
+		binary := filepath.Join(t.TempDir(), "gdtest-performance")
+		build := exec.Command(
+			"go", "build", "-trimpath", "-buildvcs=false",
+			"-ldflags", "-X github.com/cafecito-games/gdtest/internal/version.Product=0.0.0-dev",
+			"-o", binary, "./cmd/gdtest",
+		)
+		build.Dir = repository
+		buildOutput, err := build.CombinedOutput()
+		require.NoErrorf(t, err, "build performance CLI:\n%s", buildOutput)
+
+		root := performanceProject(t)
+		writeCorpus(t, root, "tests/trivial.test.gd", `extends GDTest
+
+
+## Measures one complete warm command invocation.
+func test_trivial() -> void:
+	expect_true(true)
+`)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		warm := exec.CommandContext(ctx, binary, "warm", "--project", root)
+		warmOutput, err := warm.CombinedOutput()
+		defer func() {
+			stop := exec.Command(binary, "daemon", "stop")
+			stopOutput, stopErr := stop.CombinedOutput()
+			assert.NoErrorf(t, stopErr, "stop performance CLI daemon:\n%s", stopOutput)
+		}()
+		require.NoErrorf(t, err, "warm performance CLI:\n%s", warmOutput)
+
+		durations := sampleDurations(t, samples, func() {
+			command := exec.CommandContext(
+				ctx, binary, "run", "--project", root,
+				"tests/trivial.test.gd::test_trivial",
+			)
+			output, runErr := command.CombinedOutput()
+			require.NoErrorf(t, runErr, "run performance CLI:\n%s", output)
+			assert.True(t, bytes.Contains(output, []byte("1 passed")), string(output))
+		})
+		logCorpusReport(t, "warm_single_file_cli", 1, durations)
+	})
 }
 
 func latencySampleCount(t *testing.T) int {
@@ -174,7 +225,7 @@ ready:
 		case serveErr := <-done:
 			assert.NoError(t, serveErr)
 		case <-stopCtx.Done():
-			t.Errorf("performance daemon did not stop: %v", stopCtx.Err())
+			assert.Failf(t, "performance daemon did not stop", "%v", stopCtx.Err())
 		}
 	}
 	return daemonClient, stop

@@ -119,6 +119,46 @@ func TestBuildNormalizesAndContainsPaths(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestBuildIncrementalReusesOnlyDigestVerifiedStructuralState(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := filepath.Join(root, "subject.gd")
+	source := []byte("func value() -> int:\n\treturn 1\n")
+	require.NoError(t, os.WriteFile(path, source, 0o600))
+	contentDigest := digest(source)
+	previous := Snapshot{Files: map[string]FileState{
+		"subject.gd": {
+			Path: "subject.gd", ContentDigest: contentDigest,
+			StructuralDigest: "verified-reused-shape", Parsed: true,
+		},
+	}}
+
+	unchanged, err := BuildIncremental(context.Background(), root, []string{"subject.gd"}, previous)
+	require.NoError(t, err)
+	assert.Equal(t, previous.Files["subject.gd"], unchanged.Files["subject.gd"])
+
+	require.NoError(t, os.WriteFile(path, []byte("func value() -> String:\n\treturn \"changed\"\n"), 0o600))
+	changed, err := BuildIncremental(context.Background(), root, []string{"subject.gd"}, previous)
+	require.NoError(t, err)
+	assert.NotEqual(t, "verified-reused-shape", changed.Files["subject.gd"].StructuralDigest)
+	assert.NotEqual(t, contentDigest, changed.Files["subject.gd"].ContentDigest)
+}
+
+func TestBuildContentDoesNotParseGDScript(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "broken.gd"), []byte("func broken(:\n"), 0o600,
+	))
+
+	snapshot, err := BuildContent(context.Background(), root, []string{"broken.gd"})
+	require.NoError(t, err)
+	state := snapshot.Files["broken.gd"]
+	assert.False(t, state.Parsed)
+	assert.NotEmpty(t, state.ContentDigest)
+	assert.Equal(t, state.ContentDigest, state.StructuralDigest)
+}
+
 func TestSnapshotContentFingerprintIncludesEveryPathAndContent(t *testing.T) {
 	t.Parallel()
 

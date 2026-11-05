@@ -6,13 +6,20 @@ import (
 	"debug/buildinfo"
 	"encoding/hex"
 	"os"
+	"sync"
 )
 
 // Product is replaced with semantic release version through -ldflags.
 var Product = "0.0.0-dev"
 
+var cachedBuildID = sync.OnceValue(computeBuildID)
+
 // BuildID returns a stable identity for one executable's exact contents.
 func BuildID() string {
+	return cachedBuildID()
+}
+
+func computeBuildID() string {
 	executable, err := os.Executable()
 	if err == nil {
 		if data, readErr := os.ReadFile(executable); readErr == nil {

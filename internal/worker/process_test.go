@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -112,6 +113,22 @@ func TestPersistentProcessCrashNamesLastCase(t *testing.T) {
 	assert.Equal(t, "case-crash", crash.LastCase)
 }
 
+func TestPersistentProcessUsesAndCleansOpaqueUserDataDirectory(t *testing.T) {
+	t.Parallel()
+	process := startHelperProcess(t, 1)
+	assert.NotContains(t, process.userData, "session-test")
+	assert.DirExists(t, process.userData)
+	require.NoError(t, os.WriteFile(filepath.Join(process.userData, "sentinel"), []byte("owned"), 0o600))
+	shutdownProcess(t, process)
+	assert.NoDirExists(t, process.userData)
+
+	name, directory, err := workerUserData("../../unsafe", "worker-safe")
+	require.NoError(t, err)
+	assert.NotContains(t, name, "unsafe")
+	assert.NotContains(t, name, "..")
+	assert.Equal(t, "worker-safe", filepath.Base(directory))
+}
+
 func TestStartBootstrapsOnceThenRetriesBeforeReturningWorker(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -145,6 +162,7 @@ func TestStartFailureRetainsOnlyBoundedOutputTail(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	workerAttempts := 0
+	var userDataPaths []string
 	process, err := Start(context.Background(), ProcessOptions{
 		Project: root, SessionID: "startup-output", Generation: 1,
 		StartupTimeout: 2 * time.Second,
@@ -153,6 +171,12 @@ func TestStartFailureRetainsOnlyBoundedOutputTail(t *testing.T) {
 				return startupTestCommand("bootstrap-success", arguments)
 			}
 			workerAttempts++
+			argumentsByName := helperArguments(arguments)
+			dataRoot, rootErr := godotDataRoot()
+			require.NoError(t, rootErr)
+			userDataPaths = append(userDataPaths, filepath.Join(
+				dataRoot, filepath.FromSlash(argumentsByName["--gdtest-user-dir-name"]),
+			))
 			return startupTestCommand("startup-failure", arguments)
 		},
 	})
@@ -163,6 +187,9 @@ func TestStartFailureRetainsOnlyBoundedOutputTail(t *testing.T) {
 	assert.Contains(t, err.Error(), "ACTIONABLE-STARTUP-MARKER")
 	assert.NotContains(t, err.Error(), "DISCARDED-PREFIX")
 	assert.Less(t, len(err.Error()), startupOutputLimit+2048)
+	for _, userDataPath := range userDataPaths {
+		assert.NoDirExists(t, userDataPath)
+	}
 }
 
 func TestStartCancellationStopsBootstrapAndDoesNotRetryWorker(t *testing.T) {
@@ -380,7 +407,7 @@ func helperArguments(arguments []string) map[string]string {
 	result := make(map[string]string)
 	for index := 0; index+1 < len(arguments); index++ {
 		switch arguments[index] {
-		case "--path", "--gdtest-worker-port", "--gdtest-worker-token", "--gdtest-session", "--gdtest-generation", "--gdtest-worker-id":
+		case "--path", "--gdtest-worker-port", "--gdtest-worker-token", "--gdtest-session", "--gdtest-generation", "--gdtest-worker-id", "--gdtest-user-dir-name":
 			result[arguments[index]] = arguments[index+1]
 			index++
 		}

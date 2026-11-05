@@ -69,6 +69,35 @@ type Change struct {
 
 // Build reads explicit project-relative paths without following paths outside root.
 func Build(ctx context.Context, root string, paths []string) (Snapshot, error) {
+	return build(ctx, root, paths, Snapshot{}, true)
+}
+
+// BuildIncremental reads and hashes every explicit path, but reuses the parsed
+// structural state of files whose content digest is unchanged. The digest
+// comparison keeps reconciliation content-proven rather than trusting file
+// metadata or lossy filesystem notifications.
+func BuildIncremental(
+	ctx context.Context,
+	root string,
+	paths []string,
+	previous Snapshot,
+) (Snapshot, error) {
+	return build(ctx, root, paths, previous, true)
+}
+
+// BuildContent reads and hashes explicit paths without parsing GDScript. Use it
+// when callers need only ContentFingerprint and not change classification.
+func BuildContent(ctx context.Context, root string, paths []string) (Snapshot, error) {
+	return build(ctx, root, paths, Snapshot{}, false)
+}
+
+func build(
+	ctx context.Context,
+	root string,
+	paths []string,
+	previous Snapshot,
+	parse bool,
+) (Snapshot, error) {
 	root, err := canonicalRoot(root)
 	if err != nil {
 		return Snapshot{}, err
@@ -103,7 +132,18 @@ func Build(ctx context.Context, root string, paths []string) (Snapshot, error) {
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("read relevant source %s: %w", name, err)
 		}
-		snapshot.Files[name] = inspect(name, data)
+		contentDigest := digest(data)
+		if parse {
+			if old, ok := previous.Files[name]; ok && old.Path == name && old.ContentDigest == contentDigest {
+				snapshot.Files[name] = old
+				continue
+			}
+			snapshot.Files[name] = inspectWithDigest(name, data, contentDigest)
+			continue
+		}
+		snapshot.Files[name] = FileState{
+			Path: name, ContentDigest: contentDigest, StructuralDigest: contentDigest,
+		}
 	}
 	return snapshot, nil
 }
@@ -231,7 +271,11 @@ func (t *Tracker) Stamp(requestedGeneration uint64) Stamp {
 }
 
 func inspect(name string, data []byte) FileState {
-	state := FileState{Path: name, ContentDigest: digest(data)}
+	return inspectWithDigest(name, data, digest(data))
+}
+
+func inspectWithDigest(name string, data []byte, contentDigest string) FileState {
+	state := FileState{Path: name, ContentDigest: contentDigest}
 	if !strings.HasSuffix(strings.ToLower(name), ".gd") {
 		state.StructuralDigest = state.ContentDigest
 		return state

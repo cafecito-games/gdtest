@@ -3,14 +3,17 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +45,7 @@ type Process struct {
 	options  ProcessOptions
 	project  string
 	workerID string
+	userData string
 	cmd      *exec.Cmd
 	conn     net.Conn
 	encoder  *protocol.Encoder
@@ -66,6 +70,7 @@ type Process struct {
 	messages    chan processMessage
 	processDone chan struct{}
 	waitErr     error
+	cleanupErr  error
 	outputWait  sync.WaitGroup
 }
 
@@ -193,6 +198,25 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		return nil, err
 	}
 	workerID := "worker-" + token[:12]
+	userDataName, userDataPath, err := workerUserData(options.SessionID, workerID)
+	if err != nil {
+		return nil, &StartupError{
+			Stage: "user data isolation", Err: err, Project: project,
+		}
+	}
+	if err := os.MkdirAll(userDataPath, 0o700); err != nil {
+		return nil, &StartupError{
+			Stage:   "user data isolation",
+			Err:     fmt.Errorf("create isolated worker user data %s: %w", userDataPath, err),
+			Project: project,
+		}
+	}
+	cleanupOnFailure := true
+	defer func() {
+		if cleanupOnFailure {
+			_ = cleanupWorkerUserData(userDataPath)
+		}
+	}()
 	port := listener.Addr().(*net.TCPAddr).Port
 	args := []string{
 		"--headless", "--path", project,
@@ -202,6 +226,7 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		"--gdtest-session", options.SessionID,
 		"--gdtest-generation", strconv.FormatUint(options.Generation, 10),
 		"--gdtest-worker-id", workerID,
+		"--gdtest-user-dir-name", userDataName,
 	}
 	var command *exec.Cmd
 	if options.commandFactory != nil {
@@ -228,7 +253,7 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		}
 	}
 	p := &Process{
-		options: options, project: project, workerID: workerID, cmd: command,
+		options: options, project: project, workerID: workerID, userData: userDataPath, cmd: command,
 		generation: options.Generation,
 		messages:   make(chan processMessage, 256), processDone: make(chan struct{}),
 		caseCaptureEnd: make(map[string]chan struct{}), runtimeErrors: make(map[string][]runtimeDiagnostic),
@@ -257,11 +282,17 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 	go drainProcessOutput(&p.outputWait, stderr, stderrPipe)
 	go func() {
 		err := command.Wait()
+		cleanupErr := cleanupWorkerUserData(userDataPath)
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
 		p.stateMu.Lock()
 		p.waitErr = err
+		p.cleanupErr = cleanupErr
 		p.stateMu.Unlock()
 		close(p.processDone)
 	}()
+	cleanupOnFailure = false
 
 	connection, err := acceptProcess(ctx, listener, options.StartupTimeout, p.processDone)
 	if err != nil {
@@ -316,6 +347,53 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 	p.encoder = protocol.NewEncoder(connection)
 	go p.readLoop(decoder)
 	return p, nil
+}
+
+func workerUserData(sessionID, workerID string) (string, string, error) {
+	sessionDigest := sha256.Sum256([]byte(sessionID))
+	sessionName := fmt.Sprintf("%x", sessionDigest[:16])
+	relative := filepath.ToSlash(filepath.Join("gdtest", "workers", sessionName, workerID))
+	base, err := godotDataRoot()
+	if err != nil {
+		return "", "", err
+	}
+	return relative, filepath.Join(base, filepath.FromSlash(relative)), nil
+}
+
+func godotDataRoot() (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		if value := os.Getenv("APPDATA"); value != "" {
+			return value, nil
+		}
+	case "linux", "freebsd", "openbsd", "netbsd", "dragonfly":
+		if value := os.Getenv("XDG_DATA_HOME"); value != "" {
+			return value, nil
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user home for Godot data: %w", err)
+		}
+		return filepath.Join(home, ".local", "share"), nil
+	case "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user home for Godot data: %w", err)
+		}
+		return filepath.Join(home, "Library", "Application Support"), nil
+	}
+	return "", fmt.Errorf("isolated Godot user data is unsupported on %s", runtime.GOOS)
+}
+
+func cleanupWorkerUserData(directory string) error {
+	if directory == "" {
+		return nil
+	}
+	if err := os.RemoveAll(directory); err != nil {
+		return fmt.Errorf("remove isolated worker user data %s: %w", directory, err)
+	}
+	_ = os.Remove(filepath.Dir(directory))
+	return nil
 }
 
 func bootstrapProject(ctx context.Context, options ProcessOptions, project string) error {
@@ -838,7 +916,10 @@ func (p *Process) Shutdown(ctx context.Context) error {
 	case <-p.processDone:
 		_ = p.conn.Close()
 		p.outputWait.Wait()
-		return nil
+		p.stateMu.Lock()
+		cleanupErr := p.cleanupErr
+		p.stateMu.Unlock()
+		return cleanupErr
 	case <-ctx.Done():
 		p.killAndWait()
 		return ctx.Err()
