@@ -32,6 +32,7 @@ type fakeWorker struct {
 	runHook      func(model.TestPlan, executor.EventSink) error
 	discoverHook func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
 	resetErr     error
+	startupTime  map[string]int64
 }
 
 func (f *fakeWorker) Run(_ context.Context, plan model.TestPlan, sink executor.EventSink) error {
@@ -61,6 +62,11 @@ func (f *fakeWorker) Reload(_ context.Context, generation uint64) error {
 func (f *fakeWorker) Shutdown(context.Context) error { f.closed.Store(true); return nil }
 func (f *fakeWorker) PID() int                       { return f.pid }
 func (f *fakeWorker) Generation() uint64             { return f.generation }
+func (f *fakeWorker) TakeStartupTimings() map[string]int64 {
+	result := f.startupTime
+	f.startupTime = nil
+	return result
+}
 
 func TestSessionServiceReusesWorker(t *testing.T) {
 	t.Parallel()
@@ -1205,7 +1211,10 @@ func TestSessionServiceDiscoversWithReusedWorker(t *testing.T) {
 	t.Parallel()
 
 	created := 0
-	process := &fakeWorker{pid: 501, generation: 1}
+	process := &fakeWorker{
+		pid: 501, generation: 1,
+		startupTime: map[string]int64{"project_bootstrap_import": 1234},
+	}
 	process.discoverHook = func(_ context.Context, plan model.TestPlan) (model.DiscoveryManifest, error) {
 		return model.DiscoveryManifest{
 			ProtocolVersion:    model.ProtocolVersion,
@@ -1242,10 +1251,16 @@ func TestSessionServiceDiscoversWithReusedWorker(t *testing.T) {
 			ID: request.Plan.RunID, Method: "session.discover", Payload: payload,
 		}, nil)
 		require.NoError(t, err)
-		manifest, ok := value.(model.DiscoveryManifest)
+		response, ok := value.(DiscoverResponse)
 		require.True(t, ok)
+		manifest := response.Manifest
 		require.Len(t, manifest.Files, 1)
 		assert.Equal(t, "tests/example.test.gd::dynamic@4:0[value]", manifest.Files[0].Cases[0].ID)
+		if index == 0 {
+			assert.EqualValues(t, 1234, response.TimingsNS["project_bootstrap_import"])
+		} else {
+			assert.NotContains(t, response.TimingsNS, "project_bootstrap_import")
+		}
 	}
 	assert.Equal(t, 1, created)
 	assert.Equal(t, 2, process.discovers)
@@ -1284,9 +1299,9 @@ func TestSessionServiceDiscoveryRejectsStaleGenerationAndReplacesWorker(t *testi
 		if err != nil {
 			return model.DiscoveryManifest{}, err
 		}
-		manifest, ok := value.(model.DiscoveryManifest)
+		response, ok := value.(DiscoverResponse)
 		require.True(t, ok)
-		return manifest, nil
+		return response.Manifest, nil
 	}
 
 	manifest, err := discover("initial", 1)

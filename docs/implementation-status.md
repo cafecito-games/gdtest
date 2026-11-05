@@ -13,7 +13,7 @@ blocked release work.
 | 3. Worktrees and scheduler | Verified | Canonical Git worktree identity, isolated sessions, fair bounded scheduling, four isolation policies, per-file concurrency, global worker bound, LRU/idle/run/age/memory recycling, and multi-worktree stress coverage. Each process has opaque private `user://` storage removed on exit; memory measurement failure conservatively recycles the worker. See ADR 0006. |
 | 4. Discovery and generations | Verified with ADR | Static and dynamic discovery, stable IDs/locations, selectors, dependency analysis, reusable parsed-AST/static/dependency/dynamic artifacts, authoritative reconciliation, stale events, and watch mode are implemented. Any source-generation change replaces the worker instead of attempting unverifiable in-process reload; see ADR 0005. Real Godot generation and dynamic-discovery tests pass. |
 | 5. Selection and migration | Verified | Engine-completed selection, dynamic-only files, path/directory/glob/name/focus selectors, conservative affected selection, and gdparser-span Vest migration with atomic writes and precise unsupported-context findings. Nested-class scope, nested SceneTree access, inherited-name warning annotations, migration goldens, a mechanically migrated real-Godot fixture, and the complete 682-file Uzir migration audit pass. |
-| 6. Hardening and packaging | In progress | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, pinned Linux Godot end-to-end CI, and the specified performance corpora are implemented and verified. The remaining completion work is the final requirement-by-requirement audit and any gaps it exposes; Windows is explicitly deferred in ADR 0004. |
+| 6. Hardening and packaging | Locally verified; external releases pending | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, pinned Linux Godot end-to-end CI, profiling, supported-engine validation, and the specified performance corpora are implemented and verified. Publishing the prerequisite gpm and gdtest releases remains prohibited external work; Windows is explicitly deferred in ADR 0004. |
 
 All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 
@@ -51,6 +51,24 @@ Completed on 2026-11-05 for the current hardening batch:
 - `gdkit uid check --minimum-version 0.10.0 .` selected 27 files.
 - `scripts/check` passed, including golangci-lint (0 issues), the complete race suite, vet, build,
   all strict gdkit gates, and deliberate gate-failure fixtures.
+- Worker handshakes now require numeric Godot 4.7 major/minor identity after the authenticated
+  runtime/protocol handshake. Focused race tests reject Godot 4.6, 5.0, and malformed version
+  fields, while the complete real-Godot suite passes on 4.7.2.
+- Fresh-checkout bootstrap/import has its own one-shot `project_bootstrap_import` timing. Daemon
+  and foreground discovery propagate it without replaying stale startup time from a reused worker
+  or dynamic-discovery cache hit; the real fresh-checkout integration test requires the phase.
+- `GDTEST_PROFILE_BENCHTIME=1x scripts/profile <temporary-directory>` produced valid CPU and heap
+  profiles, the retained symbolizing test binary, environment and benchmark records, and top-30
+  summaries for every specified synthetic performance corpus.
+- The release workflow passes `actionlint`, runs the canonical source/race/real-engine/gdkit gate
+  before packaging, and grants release-write permission only to the dependent packaging job.
+- `scripts/package-addon 0.0.0-completion-audit` and
+  `scripts/test-package-addon 0.0.0-completion-audit` passed after the final hardening changes,
+  including byte-for-byte reproducibility, exact slice contents, repeat-install cleanliness,
+  host-only/default/all-platform scratch installs, and an installed 4.7.2 worker handshake.
+- A read-only release audit on 2026-11-05 found no `cafecito-games/gdtest` GitHub releases and
+  confirmed gpm v0.5.1 remains the latest published gpm release. Thus acceptance criteria 1 and
+  14 require only the prohibited publication of the already verified local release changes.
 - `scripts/package-addon 0.0.0-hardening` and `scripts/test-package-addon 0.0.0-hardening` passed
   with reproducible core/macOS/Linux slices, exact selected-tree reassembly, version handshakes,
   clean first Godot import, and host-only/default/all-platform scratch installs.

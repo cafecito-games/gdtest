@@ -2,6 +2,13 @@
 
 Run `scripts/benchmark` from a quiet machine. It prints UTC time, operating system, CPU architecture, Go version, scheduler width, and Godot version before five samples of every Go benchmark. It then measures 30 ready-daemon and warm trivial-file requests and executes the 10,000-assertion and 10,000-dynamic-case corpora through persistent workers. Each report is emitted as a `gdtest_performance` JSON record with sample count, minimum, median, p95, and maximum nanoseconds. Set `GDTEST_PERFORMANCE_SAMPLES` to change the large-corpus default of five or `GDTEST_LATENCY_SAMPLES` to change the latency default of 30.
 
+For allocation or CPU investigation, run `scripts/profile [output-directory]`. It profiles the
+1,000-file parser, 10,000-case serialization, 10,000 rich-failure fold, 64-session scheduler, and
+deep-suite serialization corpora together. The ignored output directory receives the raw CPU and
+heap profiles, the retained test executable required to symbolize them, environment metadata,
+benchmark output, and deterministic top-30 text summaries. Set `GDTEST_PROFILE_BENCHTIME` to
+change the default one-second profile sample.
+
 The committed corpora cover 10,000 passing assertions, 10,000 dynamically registered and executed cases, 1,000 independently parsed test files, 32 nested dynamic suites, 10,000 failures with nested rich values, and 64 path-neutral project-session plans. Size-swept Go benchmarks expose scaling at 1,000, 5,000, and 10,000 cases/failures. The scheduler benchmark submits all 64 sessions through a four-slot global bound. Real multi-worktree worker-bound stress remains in the race-enabled integration suite.
 
 The benchmark harness discards one warm-up operation per Godot corpus, so worker startup and first import are not included in its distributions. These large-corpus measurements characterize assertion, registration, event-streaming, and folding behavior; they are not the small-file latency objective.

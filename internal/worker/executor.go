@@ -236,6 +236,14 @@ func verifyHandshake(
 		hello.GodotVersion["minor"] == nil || hello.GodotVersion["build"] == nil {
 		return errors.New("worker handshake has incomplete Godot version/build identity")
 	}
+	major, majorOK := hello.GodotVersion["major"].(float64)
+	minor, minorOK := hello.GodotVersion["minor"].(float64)
+	if !majorOK || !minorOK || major != 4 || minor != 7 {
+		return fmt.Errorf(
+			"worker Godot version %v.%v is unsupported; gdtest requires Godot 4.7",
+			hello.GodotVersion["major"], hello.GodotVersion["minor"],
+		)
+	}
 	required := []string{"run", "discover", "ping", "cancel", "reload", "reset", "shutdown"}
 	capabilities := make(map[string]struct{}, len(hello.Capabilities))
 	for _, capability := range hello.Capabilities {

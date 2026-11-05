@@ -1,6 +1,6 @@
 # Getting started
 
-After installing with gpm, the runtime is `res://addons/gdtest/` and the host executable is selected by the project-local `addons/gdtest/gdtest` launcher. The executable and runtime reject version-mismatched handshakes.
+After installing with gpm, the runtime is `res://addons/gdtest/` and the host executable is selected by the project-local `addons/gdtest/gdtest` launcher. The executable and runtime reject version-mismatched handshakes, and workers reject engines outside the supported Godot 4.7 minor.
 
 Create `tests/math.test.gd`:
 
@@ -61,6 +61,6 @@ Useful commands:
 ./addons/gdtest/gdtest daemon logs
 ```
 
-Exit codes are 0 for success, 1 for test failures, 2 for usage/discovery/infrastructure errors, and 130 for cancellation. `--json` emits immutable events followed by summary and timing records. Human reports show source-located failures as they arrive.
+Exit codes are 0 for success, 1 for test failures, 2 for usage/discovery/infrastructure errors, and 130 for cancellation. `--json` emits immutable events followed by summary and timing records. `--verbose` prints phase timings, including a distinct `project_bootstrap_import` phase when a fresh checkout needs its initial Godot import. Human reports show source-located failures as they arrive.
 
 The full public API, actual-first assertion order, outcomes, hook behavior, stable-ID encoding, focus behavior, and deliberately absent Vest APIs are defined by [api-spec.md](../api-spec.md).

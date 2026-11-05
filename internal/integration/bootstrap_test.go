@@ -38,11 +38,13 @@ func TestFreshCheckoutBootstrapsWithoutExternalGodotImport(t *testing.T) {
 	defer cancel()
 	var output, diagnostics bytes.Buffer
 	code := app.Run(ctx, []string{
-		"run", "--no-daemon", "--project", root, "tests/fresh.test.gd",
+		"run", "--no-daemon", "--verbose", "--project", root, "tests/fresh.test.gd",
 	}, app.IO{Out: &output, Err: &diagnostics})
 
 	require.Equal(t, app.ExitOK, code, "output:\n%s\ndiagnostics:\n%s", output.String(), diagnostics.String())
 	assert.Contains(t, output.String(), "1 passed")
+	assert.Contains(t, diagnostics.String(), "gdtest: timing project_bootstrap_import=",
+		"fresh-checkout import must be a distinct observable phase")
 	_, err = os.Stat(filepath.Join(root, ".godot"))
 	assert.NoError(t, err, "worker startup should establish the fresh project's Godot cache")
 }

@@ -53,6 +53,7 @@ type Process struct {
 	opMu       sync.Mutex
 	writeMu    sync.Mutex
 	stateMu    sync.Mutex
+	startupMu  sync.Mutex
 	closed     bool
 	runID      string
 	lastCase   string
@@ -71,6 +72,7 @@ type Process struct {
 	processDone chan struct{}
 	waitErr     error
 	cleanupErr  error
+	startupTime map[string]int64
 	outputWait  sync.WaitGroup
 }
 
@@ -175,14 +177,33 @@ func Start(ctx context.Context, options ProcessOptions) (*Process, error) {
 	if ctx.Err() != nil || !errors.As(err, &startup) || !startup.retryable {
 		return nil, err
 	}
+	bootstrapStarted := time.Now()
 	if bootstrapErr := bootstrapProject(ctx, options, project); bootstrapErr != nil {
 		return nil, errors.Join(err, fmt.Errorf("godot project bootstrap failed: %w", bootstrapErr))
 	}
+	bootstrapDuration := time.Since(bootstrapStarted)
 	process, retryErr := startOnce(ctx, options, project)
 	if retryErr != nil {
 		return nil, fmt.Errorf("worker startup still failed after one headless import/bootstrap attempt: %w", retryErr)
 	}
+	process.startupTime = map[string]int64{"project_bootstrap_import": bootstrapDuration.Nanoseconds()}
 	return process, nil
+}
+
+// TakeStartupTimings returns one worker's unreported startup phases exactly
+// once. Reused workers return no stale bootstrap time on later operations.
+func (p *Process) TakeStartupTimings() map[string]int64 {
+	p.startupMu.Lock()
+	defer p.startupMu.Unlock()
+	if len(p.startupTime) == 0 {
+		return nil
+	}
+	result := make(map[string]int64, len(p.startupTime))
+	for name, duration := range p.startupTime {
+		result[name] = duration
+	}
+	p.startupTime = nil
+	return result
 }
 
 func startOnce(ctx context.Context, options ProcessOptions, project string) (*Process, error) {

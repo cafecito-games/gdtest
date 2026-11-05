@@ -26,6 +26,10 @@ scripts/package-addon <version>
 scripts/test-package-addon <version>
 ```
 
+The tag and manual release workflow makes the canonical `scripts/check` job a prerequisite of
+packaging. Only the packaging job receives release-write permission, and it cannot upload or
+publish artifacts after a failed source, race, real-engine, or gdkit gate.
+
 The Linux CI jobs install the exact stock Godot 4.7.2 release asset through
 `scripts/install-godot-linux-ci`. The script pins separate SHA-256 identities for x86-64 and
 arm64 and rejects an unexpected engine version. Consequently, the canonical race suite executes

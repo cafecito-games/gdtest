@@ -46,6 +46,13 @@ type DiscoverRequest struct {
 	WorkerIdleNS int64          `json:"worker_idle_timeout_ns,omitempty"`
 }
 
+// DiscoverResponse separates engine discovery from worker startup and the
+// optional clean-checkout import/bootstrap phase.
+type DiscoverResponse struct {
+	Manifest  model.DiscoveryManifest `json:"manifest"`
+	TimingsNS map[string]int64        `json:"timings_ns,omitempty"`
+}
+
 // GenerationRequest reconciles and returns one project's current source generation
 // without starting or pinging a worker.
 type GenerationRequest struct {
@@ -73,6 +80,10 @@ type managedWorker interface {
 	Shutdown(context.Context) error
 	PID() int
 	Generation() uint64
+}
+
+type startupTimingWorker interface {
+	TakeStartupTimings() map[string]int64
 }
 
 type workerFactory func(context.Context, worker.ProcessOptions) (managedWorker, error)
@@ -516,6 +527,7 @@ func (s *SessionService) runFileOnWorker(
 	if err != nil {
 		return nil, err
 	}
+	mergeStartupTimings(timings, process)
 	tainted := false
 	sink := executor.EventSinkFunc(func(event model.Event) error {
 		switch event.Type {
@@ -665,20 +677,29 @@ func (s *SessionService) recordFileWorkerMemory(entry *session, lane *fileWorker
 }
 
 func (s *SessionService) discover(ctx context.Context, entry *session, request DiscoverRequest) (any, error) {
+	started := time.Now()
+	timings := make(map[string]int64)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
+	reconcileStarted := time.Now()
 	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Filesystem)
+	timings["generation_reconcile"] = time.Since(reconcileStarted).Nanoseconds()
 	if err != nil {
 		return nil, fmt.Errorf("reconcile source at discovery start: %w", err)
 	}
 	if err := requireCurrentGeneration(request.Plan.Generation, latest.Update.Generation); err != nil {
 		return nil, err
 	}
+	workerStarted := time.Now()
 	process, err := s.ensureWorker(ctx, entry, request.Plan.Generation)
+	timings["worker_acquisition_startup"] = time.Since(workerStarted).Nanoseconds()
 	if err != nil {
 		return nil, err
 	}
+	mergeStartupTimings(timings, process)
+	discoveryStarted := time.Now()
 	manifest, err := process.Discover(ctx, request.Plan)
+	timings["engine_discovery"] = time.Since(discoveryStarted).Nanoseconds()
 	if err != nil {
 		s.logLifecycle("discovery_failed", entry, process, request.Plan.RunID, map[string]any{"error": err.Error()})
 		s.discardWorker(entry)
@@ -687,15 +708,18 @@ func (s *SessionService) discover(ctx context.Context, entry *session, request D
 	s.logLifecycle("discovery_finished", entry, process, request.Plan.RunID, nil)
 	entry.lastUsed = time.Now().UTC()
 	entry.lifecycle.Touch(entry.lastUsed)
+	resetStarted := time.Now()
 	if err := process.Reset(ctx); err != nil {
 		s.discardWorker(entry)
 		return nil, fmt.Errorf("reset worker after discovery: %w", err)
 	}
+	timings["worker_reset"] = time.Since(resetStarted).Nanoseconds()
 	memoryExceeded, memoryErr := s.recordWorkerMemory(entry)
 	if s.memoryBudgetMB > 0 && (memoryErr != nil || memoryExceeded) {
 		s.recycleWorker(entry)
 	}
-	return manifest, nil
+	timings["daemon_discovery_total"] = time.Since(started).Nanoseconds()
+	return DiscoverResponse{Manifest: manifest, TimingsNS: timings}, nil
 }
 
 func (s *SessionService) schedule(
@@ -758,6 +782,7 @@ func (s *SessionService) run(
 	if err != nil {
 		return nil, err
 	}
+	mergeStartupTimings(timings, process)
 	tainted := false
 	s.logLifecycle("run_started", entry, process, request.Plan.RunID, nil)
 	sink := executor.EventSinkFunc(func(event model.Event) error {
@@ -851,6 +876,18 @@ func mergeWorkerTimings(timings map[string]int64, metadata map[string]any) {
 		}
 		if valid && microseconds >= 0 {
 			timings[name] = microseconds * int64(time.Microsecond)
+		}
+	}
+}
+
+func mergeStartupTimings(timings map[string]int64, process managedWorker) {
+	provider, ok := process.(startupTimingWorker)
+	if !ok {
+		return
+	}
+	for name, duration := range provider.TakeStartupTimings() {
+		if duration >= 0 {
+			timings[name] = duration
 		}
 	}
 }

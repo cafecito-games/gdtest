@@ -41,6 +41,21 @@ func completeManifest(
 	noDaemon bool,
 	streams IO,
 ) (model.DiscoveryManifest, error) {
+	return completeManifestWithTimings(
+		ctx, root, projectConfig, static, sessionID, noDaemon, streams, nil,
+	)
+}
+
+func completeManifestWithTimings(
+	ctx context.Context,
+	root string,
+	projectConfig config.Project,
+	static discovery.Manifest,
+	sessionID string,
+	noDaemon bool,
+	streams IO,
+	timings map[string]time.Duration,
+) (model.DiscoveryManifest, error) {
 	if len(static.Files) == 0 {
 		return model.DiscoveryManifest{
 			ProtocolVersion: model.ProtocolVersion, Generation: 1,
@@ -72,14 +87,23 @@ func completeManifest(
 	if err != nil {
 		return model.DiscoveryManifest{}, err
 	}
+	var discoveryTimings map[string]time.Duration
 	compute := func(computeCtx context.Context) (model.DiscoveryManifest, error) {
+		var manifest model.DiscoveryManifest
+		var computeTimings map[string]time.Duration
+		var computeErr error
 		if noDaemon {
-			return discoverForeground(computeCtx, root, projectConfig.Godot, plan, streams)
+			manifest, computeTimings, computeErr = discoverForeground(
+				computeCtx, root, projectConfig.Godot, plan, streams,
+			)
+		} else {
+			manifest, computeTimings, computeErr = discoverDaemon(
+				computeCtx, sessionID, root, projectConfig.Godot,
+				time.Duration(projectConfig.WorkerIdleTimeout), plan,
+			)
 		}
-		return discoverDaemon(
-			computeCtx, sessionID, root, projectConfig.Godot,
-			time.Duration(projectConfig.WorkerIdleTimeout), plan,
-		)
+		discoveryTimings = computeTimings
+		return manifest, computeErr
 	}
 	if !noDaemon {
 		generation, generationErr := daemonGeneration(
@@ -108,11 +132,16 @@ func completeManifest(
 	}
 	store, err := cache.Default(version.BuildID())
 	if err != nil {
-		return compute(ctx)
+		manifest, computeErr := compute(ctx)
+		mergeDiscoveryTimings(timings, discoveryTimings)
+		return manifest, computeErr
 	}
-	manifest, _, err := dynamic.LoadOrCompute(ctx, store, cacheIdentity, compute)
+	manifest, hit, err := dynamic.LoadOrCompute(ctx, store, cacheIdentity, compute)
 	if err != nil {
 		return model.DiscoveryManifest{}, err
+	}
+	if !hit {
+		mergeDiscoveryTimings(timings, discoveryTimings)
 	}
 	if len(manifest.Errors) > 0 {
 		return model.DiscoveryManifest{}, &manifestErrors{errors: manifest.Errors}
@@ -161,20 +190,27 @@ func discoverForeground(
 	godot string,
 	plan model.TestPlan,
 	streams IO,
-) (model.DiscoveryManifest, error) {
+) (model.DiscoveryManifest, map[string]time.Duration, error) {
+	timings := make(map[string]time.Duration)
+	workerStarted := time.Now()
 	process, err := worker.Start(ctx, worker.ProcessOptions{
 		Godot: godot, Project: root, SessionID: "foreground-discovery-" + newID(),
 		Generation: plan.Generation, Stdout: streams.Err, Stderr: streams.Err,
 	})
+	timings["worker_acquisition_startup"] = time.Since(workerStarted)
 	if err != nil {
-		return model.DiscoveryManifest{}, err
+		return model.DiscoveryManifest{}, timings, err
 	}
+	mergeNanosecondTimings(timings, process.TakeStartupTimings())
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = process.Shutdown(shutdownCtx)
 	}()
-	return process.Discover(ctx, plan)
+	discoveryStarted := time.Now()
+	manifest, err := process.Discover(ctx, plan)
+	timings["engine_discovery"] = time.Since(discoveryStarted)
+	return manifest, timings, err
 }
 
 func discoverDaemon(
@@ -184,23 +220,42 @@ func discoverDaemon(
 	godot string,
 	workerIdleTimeout time.Duration,
 	plan model.TestPlan,
-) (model.DiscoveryManifest, error) {
+) (model.DiscoveryManifest, map[string]time.Duration, error) {
 	daemonClient, err := compatibleClient(true)
 	if err != nil {
-		return model.DiscoveryManifest{}, err
+		return model.DiscoveryManifest{}, nil, err
 	}
 	response, err := daemonClient.Call(ctx, "session.discover", service.DiscoverRequest{
 		SessionID: sessionID, Project: root, Godot: godot, Plan: plan,
 		WorkerIdleNS: workerIdleTimeout.Nanoseconds(),
 	}, nil)
 	if err != nil {
-		return model.DiscoveryManifest{}, err
+		return model.DiscoveryManifest{}, nil, err
 	}
-	var manifest model.DiscoveryManifest
-	if err := json.Unmarshal(response, &manifest); err != nil {
-		return model.DiscoveryManifest{}, fmt.Errorf("decode daemon discovery manifest: %w", err)
+	var discovered service.DiscoverResponse
+	if err := json.Unmarshal(response, &discovered); err != nil {
+		return model.DiscoveryManifest{}, nil, fmt.Errorf("decode daemon discovery response: %w", err)
 	}
-	return manifest, nil
+	timings := make(map[string]time.Duration, len(discovered.TimingsNS))
+	mergeNanosecondTimings(timings, discovered.TimingsNS)
+	return discovered.Manifest, timings, nil
+}
+
+func mergeDiscoveryTimings(destination, source map[string]time.Duration) {
+	if destination == nil {
+		return
+	}
+	for name, duration := range source {
+		destination[name] = duration
+	}
+}
+
+func mergeNanosecondTimings(destination map[string]time.Duration, source map[string]int64) {
+	for name, nanoseconds := range source {
+		if nanoseconds >= 0 {
+			destination[name] = time.Duration(nanoseconds)
+		}
+	}
 }
 
 func daemonGeneration(

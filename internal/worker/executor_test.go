@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -91,6 +92,45 @@ func TestVerifyHandshakeRejectsIncompleteCapabilitiesAndEngineIdentity(t *testin
 				protocol.NewDecoder(&stream, 4096), "secret", project, "session-1", "worker-1", 4,
 			)
 			require.ErrorContains(t, err, test.want)
+		})
+	}
+}
+
+func TestVerifyHandshakeRejectsUnsupportedGodotVersion(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	for _, test := range []struct {
+		name         string
+		godotVersion map[string]any
+	}{
+		{name: "older minor", godotVersion: map[string]any{"major": 4, "minor": 6, "build": "official"}},
+		{name: "newer major", godotVersion: map[string]any{"major": 5, "minor": 0, "build": "official"}},
+		{name: "non-numeric minor", godotVersion: map[string]any{"major": 4, "minor": "7", "build": "official"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			payload, err := json.Marshal(handshake{
+				RuntimeVersion: version.Product,
+				WorkerID:       "worker-1",
+				ProjectPath:    project,
+				SessionID:      "session-1",
+				Generation:     4,
+				GodotVersion:   test.godotVersion,
+				Capabilities:   testCapabilities(),
+			})
+			require.NoError(t, err)
+			var stream bytes.Buffer
+			require.NoError(t, protocol.NewEncoder(&stream).Encode(protocol.Envelope{
+				Version: protocol.Version, Type: "hello", Token: "secret", Payload: payload,
+			}))
+			err = verifyHandshake(
+				protocol.NewDecoder(&stream, 4096), "secret", project, "session-1", "worker-1", 4,
+			)
+			require.EqualError(t, err, fmt.Sprintf(
+				"worker Godot version %v.%v is unsupported; gdtest requires Godot 4.7",
+				test.godotVersion["major"], test.godotVersion["minor"],
+			))
 		})
 	}
 }

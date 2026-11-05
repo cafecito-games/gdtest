@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Capture repeatable CPU and heap profiles for gdtest's synthetic Go corpora.
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+out_dir="${1:-$repo_root/build/profiles}"
+if [ $# -gt 1 ]; then
+	echo "usage: scripts/profile [OUTPUT_DIRECTORY]" >&2
+	exit 2
+fi
+
+mkdir -p "$out_dir"
+out_dir=$(cd "$out_dir" && pwd)
+benchmark_time="${GDTEST_PROFILE_BENCHTIME:-1s}"
+case "$benchmark_time" in
+	*[!0-9a-zA-Z.]* | "")
+		echo "GDTEST_PROFILE_BENCHTIME must be a non-empty Go duration or iteration count" >&2
+		exit 2
+		;;
+esac
+
+{
+	echo "utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+	uname -a
+	go version
+	go env GOOS GOARCH GOMAXPROCS
+} >"$out_dir/environment.txt"
+
+cd "$repo_root"
+go test -run '^$' -bench . \
+	-benchtime "$benchmark_time" -count 1 \
+	-cpuprofile "$out_dir/cpu.pprof" \
+	-memprofile "$out_dir/heap.pprof" \
+	-o "$out_dir/performance.test" \
+	./internal/performance | tee "$out_dir/benchmarks.txt"
+
+go tool pprof -top -nodecount=30 "$out_dir/cpu.pprof" >"$out_dir/cpu-top.txt"
+go tool pprof -top -nodecount=30 -sample_index=inuse_space \
+	"$out_dir/heap.pprof" >"$out_dir/heap-top.txt"
+
+echo "gdtest profiles written to $out_dir"

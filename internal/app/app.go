@@ -516,8 +516,8 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		return ExitError
 	}
 	dynamicStarted := time.Now()
-	completedManifest, err := completeManifest(
-		ctx, root, projectConfig, discoveryManifest, sessionID, options.noDaemon, streams,
+	completedManifest, err := completeManifestWithTimings(
+		ctx, root, projectConfig, discoveryManifest, sessionID, options.noDaemon, streams, timings,
 	)
 	if err != nil {
 		if isStaleGenerationError(err) && options.staleRetry == 0 {
@@ -665,18 +665,25 @@ func executePlan(
 ) (map[string]time.Duration, error) {
 	started := time.Now()
 	if noDaemon {
+		timings := make(map[string]time.Duration)
+		workerStarted := time.Now()
 		process, err := worker.Start(ctx, worker.ProcessOptions{
 			Godot: godot, Project: root, SessionID: "foreground-" + newID(),
 			Generation: plan.Generation,
 		})
+		timings["worker_acquisition_startup"] = time.Since(workerStarted)
 		if err != nil {
 			return nil, err
 		}
+		mergeNanosecondTimings(timings, process.TakeStartupTimings())
+		executionStarted := time.Now()
 		runErr := process.Run(ctx, plan, sink)
+		timings["foreground_worker_execution"] = time.Since(executionStarted)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		shutdownErr := process.Shutdown(shutdownCtx)
 		cancel()
-		return map[string]time.Duration{"foreground_worker_execution": time.Since(started)}, errors.Join(runErr, shutdownErr)
+		timings["foreground_total"] = time.Since(started)
+		return timings, errors.Join(runErr, shutdownErr)
 	}
 	daemonClient, err := compatibleClient(true)
 	if err != nil {

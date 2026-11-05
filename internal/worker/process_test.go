@@ -154,6 +154,9 @@ func TestStartBootstrapsOnceThenRetriesBeforeReturningWorker(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, workerAttempts)
 	assert.Equal(t, 1, bootstrapAttempts)
+	startupTimings := process.TakeStartupTimings()
+	assert.Positive(t, startupTimings["project_bootstrap_import"])
+	assert.Empty(t, process.TakeStartupTimings(), "startup timings must be reported only once")
 	require.NoError(t, process.Ping(context.Background()))
 	shutdownProcess(t, process)
 }
