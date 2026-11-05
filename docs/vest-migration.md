@@ -108,6 +108,33 @@ func test_reports_changed_values() -> void:
 
 Disconnect explicitly, because a native connection does not follow the case lifecycle.
 
+### Callback probes and cross-source call ordering
+
+When production code takes an injected `Callable` (`on_complete`, `on_error`, retry, or progress callback) with zero through eight arguments, replace ad-hoc local capture arrays or counters with `callback_probe(argument_count)`. See `api-spec.md` section 14.9 for the full contract.
+
+```gdscript
+func test_checkout_notifies_completion_after_stock_and_signal() -> void:
+	var inventory: InventoryDouble = InventoryDouble.new(double_context(), 3)
+	inventory.gdtest.add.then_return(true)
+	var checkout: CheckoutFlow = CheckoutFlow.new(inventory, get_tree())
+	var stages: GDTestSignalProbe = watch_signal(checkout.stage_reached)
+	var on_complete: GDTestCallbackProbe = callback_probe(2)
+	var on_error: GDTestCallbackProbe = callback_probe(1)
+	checkout.purchase_async("pear", 1, on_complete.callback(), on_error.callback())
+	expect_true(await on_complete.wait_until_count(1, 1.0))
+	expect_equal(on_complete.arguments_at(0), ["pear", 1])
+	expect_equal(on_error.invocation_count(), 0)
+	expect_true(stages.emissions()[0].sequence < inventory.gdtest.add.calls()[0].sequence)
+	expect_true(inventory.gdtest.add.calls()[0].sequence < on_complete.invocations()[0].sequence)
+```
+
+Key rules when converting callback tests by hand:
+
+- Pass the exact expected arity (`0..8`) to `callback_probe(argument_count)` and pass `probe.callback()` into the system under test.
+- Use `await probe.wait_until_count(count, timeout_seconds)` instead of polling loops when a callback arrives asynchronously.
+- Callback probes record `void` notifications and do not stub return values; if the injected `Callable` must compute and return a value to the caller, pass a typed local `Callable` or generated double method (`then_answer`) instead.
+- Every callback probe closes automatically at the end of its case, detaching the closure from the test instance so retained project references cannot leak into later cases on persistent workers.
+
 ### Lifecycle signals
 
 Replace `on_begin`, `on_case_begin`, and similar lifecycle signals with the matching hooks described in `api-spec.md` section 8. Hooks run in a fixed order, so do not depend on signal connection order.

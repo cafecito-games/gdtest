@@ -174,7 +174,10 @@ extends GDTest
 
 ## Verifies the gpm-installed runtime and host executable handshake.
 func test_packaged_handshake() -> void:
-	expect_true(true)
+	var probe: GDTestCallbackProbe = callback_probe(1)
+	probe.callback().call("ready")
+	expect_equal(probe.invocation_count(), 1)
+	expect_equal(probe.arguments_at(0), ["ready"])
 EOF
 	import_output=$(godot --headless --editor --path "$host_project" --quit 2>&1) \
 		|| fail "Godot could not import the packaged addon:$'\n'$import_output"

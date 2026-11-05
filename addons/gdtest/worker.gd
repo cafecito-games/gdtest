@@ -7,6 +7,8 @@ const Version: GDScript = preload("res://addons/gdtest/version.gd")
 const CaseTask: GDScript = preload("res://addons/gdtest/worker_case_task.gd")
 ## Internal benchmark command runner.
 const BenchmarkRunner: GDScript = preload("res://addons/gdtest/worker_benchmark_runner.gd")
+## Internal shared probe ledger tracking bounded late callback diagnostics.
+const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
 ## Hard upper bound for one JSONL protocol message.
 const MAX_MESSAGE_BYTES: int = 16777216
 ## Default external deadline for one case including its hooks.
@@ -291,6 +293,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 	if _cancel_requested:
 		totals["canceled"] += 1
 	var execution_usec: int = Time.get_ticks_usec() - execution_started_usec
+	var late_callback_invocations: int = ProbeLedger.take_late_call_count()
 	_send_event(
 			"run_finished",
 			Protocol.run_finished(
@@ -299,7 +302,8 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 					Time.get_ticks_usec() - started_usec,
 					preparation_usec,
 					execution_usec,
-					_serialization_usec
+					_serialization_usec,
+					late_callback_invocations
 			)
 	)
 	_finish_run_state()
@@ -413,22 +417,20 @@ func _prepare_file(
 		await instance.callv(&"suite", [])
 	await instance._gdtest_finish_registration()
 	var manifest: Dictionary[String, Variant] = instance._gdtest_manifest()
-	var discovery_errors: Array[Variant] = manifest.get("errors", [])
+	var discovery_errors: Array[Variant] = instance._gdtest_drain_discovery_errors()
 	var cases: Array[Variant] = _planned_cases(file_plan, instance, manifest, discovery_errors)
 	if instance.has_method("before_case") and instance.has_method("before_each"):
 		discovery_errors.append({ "message": "before_case and before_each cannot both be defined" })
 	if instance.has_method("after_case") and instance.has_method("after_each"):
 		discovery_errors.append({ "message": "after_case and after_each cannot both be defined" })
 	var suite_name: String = await _suite_name(instance, script, path, discovery_errors)
-	for index: int in range(discovery_errors.size()):
-		var discovery_error: Variant = discovery_errors[index]
-		var normalized: Dictionary[String, Variant] = Protocol.discovery_error(
-				discovery_error,
-				path
-		)
-		discovery_errors[index] = normalized
-		if emit_errors:
+	discovery_errors.append_array(instance._gdtest_drain_discovery_errors())
+	discovery_errors = Protocol.discovery_errors(discovery_errors, path)
+	if emit_errors:
+		for normalized: Variant in discovery_errors:
 			_send_discovery_error(normalized, path)
+	else:
+		instance._gdtest_release_outside_probes()
 	prepared["instance"] = instance
 	prepared["cases"] = cases
 	prepared["errors"] = discovery_errors
@@ -524,6 +526,13 @@ func _run_prepared_file(
 			await _call_optional(instance, &"after_suite", [open_suites[index]])
 		await _call_optional(instance, &"after_suite", [root_info])
 		await _call_optional(instance, &"after_all", [])
+	for hook_error: Variant in Protocol.discovery_errors(
+			instance._gdtest_drain_discovery_errors(),
+			path
+	):
+		_send_discovery_error(hook_error, path)
+		totals["error"] += 1
+	instance._gdtest_release_outside_probes()
 	_send_event(
 			"suite_finished",
 			{ "id": root_info.id, "status": Protocol.aggregate_status(totals), "counts": totals }
@@ -621,7 +630,7 @@ func _expand_method_case(
 				continue
 			named_rows[parameter_name] = rows[key]
 			names.append(parameter_name)
-		names.sort_custom(_utf8_less)
+		names.sort_custom(Protocol.utf8_less)
 		for parameter_name: String in names:
 			_append_parameter_row(
 					planned,
@@ -763,16 +772,6 @@ func _argument_matches(value: Variant, argument: Dictionary[String, Variant]) ->
 	if value == null and expected_type == TYPE_OBJECT:
 		return true
 	return typeof(value) == expected_type
-
-
-func _utf8_less(left: String, right: String) -> bool:
-	var left_bytes: PackedByteArray = left.to_utf8_buffer()
-	var right_bytes: PackedByteArray = right.to_utf8_buffer()
-	var shared_size: int = mini(left_bytes.size(), right_bytes.size())
-	for index: int in range(shared_size):
-		if left_bytes[index] != right_bytes[index]:
-			return left_bytes[index] < right_bytes[index]
-	return left_bytes.size() < right_bytes.size()
 
 
 func _suite_infos(value: Variant) -> Array[GDTestSuiteInfo]:

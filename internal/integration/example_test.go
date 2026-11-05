@@ -32,6 +32,7 @@ func TestDocumentedBasicExampleExecutes(t *testing.T) {
 		"math.test.gd",
 		"math.bench.gd",
 		"signal_probe.test.gd",
+		"callback_probe.test.gd",
 		"inventory.gd",
 		"shop.gd",
 		"inventory_double.test.gd",
@@ -49,7 +50,7 @@ func TestDocumentedBasicExampleExecutes(t *testing.T) {
 		"run", "--no-daemon", "--project", root,
 	}, app.IO{Out: &output, Err: &diagnostics})
 	require.Equal(t, app.ExitOK, code, "output:\n%s\ndiagnostics:\n%s", output.String(), diagnostics.String())
-	assert.Contains(t, output.String(), "10 passed")
+	assert.Contains(t, output.String(), "12 passed")
 
 	output.Reset()
 	diagnostics.Reset()

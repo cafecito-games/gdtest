@@ -579,6 +579,7 @@ func (s *SessionService) runFileOnWorker(
 			return nil
 		case model.EventRunFinished:
 			mergeWorkerTimings(timings, event.Metadata)
+			s.logLateCallbackInvocations(entry, process, request.Plan.RunID, event.Metadata)
 			return nil
 		case model.EventWorkerTainted:
 			tainted = true
@@ -835,6 +836,7 @@ func (s *SessionService) run(
 		}
 		if event.Type == model.EventRunFinished {
 			mergeWorkerTimings(timings, event.Metadata)
+			s.logLateCallbackInvocations(entry, process, request.Plan.RunID, event.Metadata)
 			if _, reconcileErr := s.reconcileSource(ctx, entry, sourcewatch.Filesystem); reconcileErr != nil {
 				return fmt.Errorf("reconcile source after run: %w", reconcileErr)
 			}
@@ -998,6 +1000,43 @@ func mergeWorkerTimings(timings map[string]int64, metadata map[string]any) {
 			timings[name] = microseconds * int64(time.Microsecond)
 		}
 	}
+}
+
+func (s *SessionService) logLateCallbackInvocations(
+	entry *session,
+	process managedWorker,
+	runID string,
+	metadata map[string]any,
+) {
+	raw, exists := metadata["late_callback_invocations"]
+	if !exists {
+		return
+	}
+	var count int64
+	switch value := raw.(type) {
+	case float64:
+		count = int64(value)
+	case int:
+		count = int64(value)
+	case int64:
+		count = value
+	case uint64:
+		if value <= uint64(^uint64(0)>>1) {
+			count = int64(value)
+		}
+	default:
+		return
+	}
+	if count <= 0 {
+		return
+	}
+	s.logLifecycle(
+		"worker_late_callbacks",
+		entry,
+		process,
+		runID,
+		map[string]any{"late_callback_invocations": count},
+	)
 }
 
 func mergeStartupTimings(timings map[string]int64, process managedWorker) {
@@ -1283,7 +1322,7 @@ func lifecycleLogLevel(event string) string {
 		return "error"
 	}
 	switch event {
-	case "discovery_finished", "worker_reused":
+	case "discovery_finished", "worker_reused", "worker_late_callbacks":
 		return "debug"
 	default:
 		return "info"

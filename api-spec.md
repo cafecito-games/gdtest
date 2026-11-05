@@ -794,10 +794,11 @@ method that GDScript cannot override with a zero-argument signature; see
 
 Each invocation is a `GDTestInvocation` with two read-only members:
 
-- `sequence: int` is the one-based position of the emission within its case.
-  Sequence numbers increase monotonically across every probe in one case.
-- `arguments: Array[Variant]` is a defensive copy of the emitted arguments in
-  signal parameter order.
+- `sequence: int` is the one-based position of the invocation within its case.
+  Sequence numbers increase monotonically across every signal probe, callback
+  probe, and generated test double in one case.
+- `arguments: Array[Variant]` is a defensive copy of the recorded arguments in
+  parameter order.
 
 Probes belong to the case that created them. gdtest disconnects every probe
 after the case's `after_case` or `after_each` hook and before the case result
@@ -1087,6 +1088,75 @@ min, median, p95, and max. Timing deltas are informational and never become corr
 `GDTestBenchmark.get_tree()` and `sleep()` support asynchronous setup and benchmark bodies. The
 benchmark base has no assertion API: correctness belongs in `GDTest` tests.
 
+### 14.9 Callback probes
+
+`callback_probe(argument_count: int = 0) -> GDTestCallbackProbe` creates a
+case-scoped recorder for an injected `Callable` parameter, such as an
+`on_complete`, `on_error`, retry, or progress handler. Callbacks with zero
+through eight arguments are supported, and calls are recorded synchronously
+before returning to the caller. Like `watch_signal`, the probe never invents an
+assertion on its own; tests assert on its recorded invocations with the ordinary
+`expect_*` methods.
+
+```gdscript
+func test_awaits_injected_completion_callback() -> void:
+	var inventory: Inventory = Inventory.new(3)
+	var checkout: CheckoutFlow = CheckoutFlow.new(inventory, get_tree())
+	var on_complete: GDTestCallbackProbe = callback_probe(2)
+	var on_error: GDTestCallbackProbe = callback_probe(1)
+	checkout.purchase_async("apple", 2, on_complete.callback(), on_error.callback())
+	expect_true(await on_complete.wait_until_count(1, 1.0))
+	expect_equal(on_complete.arguments_at(0), ["apple", 2])
+	expect_equal(on_error.invocation_count(), 0)
+```
+
+Public members on `GDTestCallbackProbe`:
+
+- `callback() -> Callable` returns an exact-arity `Callable` accepting
+  `argument_count` `Variant` arguments, or an invalid `Callable()` when the
+  probe was requested outside an active case or with an unsupported arity.
+- `invocation_count() -> int` returns the number of invocations recorded while
+  the probe was open.
+- `invocations() -> Array[GDTestInvocation]` returns a defensive copy of every
+  recorded invocation in call order. Each `GDTestInvocation` carries its
+  one-based case `sequence` and a defensive snapshot of `arguments`.
+- `arguments_at(index: int) -> Array[Variant]` returns a defensive copy of the
+  arguments recorded at `index`. An index outside the recorded range reports a
+  source-located framework error and returns an empty array.
+- `wait_until_count(count: int, timeout_seconds: float = 0.0) -> bool` suspends
+  until at least `count` invocations are recorded and returns `true`. It returns
+  `false` when `timeout_seconds` expires or the probe closes first. A timeout of
+  `0.0` has no internal deadline; the active case's external runner timeout
+  remains authoritative. A negative `count`, or a `timeout_seconds` that is
+  negative or not finite, reports a source-located framework error and returns
+  `false` without waiting or mutating recorded invocations.
+- `close() -> void` closes the probe. Repeated calls have no further effect, and
+  invocations recorded before closing remain readable.
+- `is_closed() -> bool` returns whether the probe is closed or was created in an
+  inert state.
+
+Signal probes (`watch_signal`), callback probes (`callback_probe`), and
+generated test doubles (`double_context`) created in the same case share one
+monotonic one-based sequence allocator, so tests can assert relative ordering
+across emitted signals, injected callbacks, and dependency calls through
+`GDTestInvocation.sequence`.
+
+gdtest closes every callback probe automatically after the case's `after_case`
+or `after_each` hook and before finalizing the case result, including timed-out
+and canceled cases. Closing detaches the returned `Callable` from the `GDTest`
+instance, `SceneTree`, and probe ledger so retained project references cannot
+keep completed test suites alive on persistent workers. Invoking a closed
+callback mutates no probe state, emits no cross-case failure or output, and
+increments only a bounded worker-level diagnostic counter reported at debug log
+severity. Requesting `callback_probe` outside an executing case reports a
+source-located discovery or framework error and returns a closed inert probe; an
+`argument_count` outside `0..8` reports a source-located framework error and
+returns a closed probe with an invalid `Callable()`.
+
+The runnable example in `examples/basic/callback_probe.test.gd` exercises both
+asynchronous completion/error callbacks and cross-source sequence ordering with
+`watch_signal` and `InventoryDouble`.
+
 ## 15. Case status and precedence
 
 Public case statuses are:
@@ -1166,6 +1236,7 @@ The following names/patterns are reserved by gdtest:
 
 - `suite`
 - `get_suite_name`
+- `callback_probe`, the test method that creates a case-scoped callback recorder.
 - `double_context`, the test method that returns a case's double context.
 - `gdtest` and `GDTestControls`, the controller member and class that generated
   test doubles expose.

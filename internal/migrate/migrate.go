@@ -223,7 +223,7 @@ var gdtestInheritedNames = map[string]struct{}{
 	"expect_not_approx": {}, "expect_null": {}, "expect_not_null": {}, "expect_empty": {},
 	"expect_not_empty": {}, "expect_contains": {}, "expect_does_not_contain": {},
 	"ok": {}, "fail": {}, "skip": {}, "todo": {}, "message": {}, "get_tree": {}, "sleep": {},
-	"until": {}, "time": {}, "watch_signal": {},
+	"until": {}, "time": {}, "watch_signal": {}, "callback_probe": {}, "double_context": {},
 	// GDTest is RefCounted, unlike VestTest's Object base.
 	"reference": {}, "unreference": {}, "get_reference_count": {},
 }
