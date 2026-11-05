@@ -541,3 +541,26 @@ func test_lambda_parameter() -> void:
 	assert.NotContains(t, string(result.Output), "var changed_probe :=")
 	assert.Contains(t, findingCodes(result.Findings), "unsupported.inherited-name-conflict")
 }
+
+func TestSignalCapturesPreserveShadowedOwnersAndNegativeIndexes(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func test_lambda_shadows_owner() -> void:
+	var source := Source.new()
+	capture_signal(source.changed, 1)
+	var check := func(source: Variant) -> void:
+		expect_equal(get_signal_emissions(source.changed).size(), 1)
+	check.call(null)
+
+func test_negative_index() -> void:
+	var source := Source.new()
+	capture_signal(source.changed, 1)
+	expect_equal(get_signal_emissions(source.changed)[-1][0], 1)
+`)
+	result, err := Transform("tests/shadow_index.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.Contains(t, string(result.Output), "get_signal_emissions(source.changed)[-1][0]")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}

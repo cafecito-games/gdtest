@@ -202,19 +202,32 @@ func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Nod
 		read.kind = signalReadCount
 		read.node = outer
 	case *ast.SubscriptExpression:
-		if parent.Object != ast.Expression(call) {
+		if parent.Object != ast.Expression(call) || !nonNegativeIntegerLiteral(parent.Index) {
 			return read
 		}
 		read.kind = signalReadArgumentsAt
 		read.node = parent
 		read.indexes = []ast.Expression{parent.Index}
 		if outer, ok := parents[parent].(*ast.SubscriptExpression); ok && outer.Object == ast.Expression(parent) {
+			if !nonNegativeIntegerLiteral(outer.Index) {
+				read.kind = signalReadUnsupported
+				read.node = call
+				read.indexes = nil
+				return read
+			}
 			read.kind = signalReadNestedArgument
 			read.node = outer
 			read.indexes = []ast.Expression{parent.Index, outer.Index}
 		}
 	}
 	return read
+}
+
+// nonNegativeIntegerLiteral accepts only indexes whose meaning is identical in GDScript
+// and arguments_at: GDScript counts a negative index from the end, which the probe rejects.
+func nonNegativeIntegerLiteral(expression ast.Expression) bool {
+	literal, ok := expression.(*ast.Literal)
+	return ok && literal.Kind == ast.IntegerLiteral && !strings.HasPrefix(literal.Raw, "-")
 }
 
 // isEmptinessCheck reports whether the read is the subject of expect_empty,
@@ -265,6 +278,9 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 	if reassigns(capture.function, owner) {
 		return "the signal owner is reassigned inside the test function"
 	}
+	if redeclares(capture.function, owner) {
+		return "the signal owner name is redeclared inside the test function"
+	}
 	for _, read := range group.reads {
 		if t.overlapsRewrite(read.node.Span()) {
 			return "the signal read overlaps another migration rewrite"
@@ -291,6 +307,29 @@ func (t *transformer) overlapsRewrite(span token.Span) bool {
 		}
 	}
 	return false
+}
+
+// redeclares reports a lambda parameter, loop variable, or second declaration that
+// shadows the owner name, which would make an identically spelled read resolve elsewhere.
+func redeclares(function *ast.FunctionDeclaration, name string) bool {
+	declarations := 0
+	shadowed := false
+	ast.Inspect(function, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.VariableDeclaration:
+			if value.Name == name {
+				declarations++
+			}
+		case *ast.LambdaExpression:
+			for _, parameter := range value.Parameters {
+				shadowed = shadowed || parameter.Name == name
+			}
+		case *ast.ForStatement:
+			shadowed = shadowed || value.Variable == name
+		}
+		return true
+	})
+	return shadowed || declarations > 1
 }
 
 func reassigns(function *ast.FunctionDeclaration, name string) bool {
