@@ -46,8 +46,11 @@ The migrator preserves a capture and reports a precise finding when it cannot pr
 persistent or class-level captures, captures nested in a conditional block, owners reassigned inside
 the test, signals also read through an alias, repeated captures of one signal within one test,
 non-literal counts, captures inside helper functions that are not `test_` functions, local aliases of
-a read result, and whole-list comparisons with non-empty expected values. Migrated probes are
-disconnected automatically when each case ends.
+a read result, and whole-list comparisons with non-empty expected values. Because a read that lacks a
+matching capture may be an alias the migrator cannot see, one such read anywhere in a file keeps every
+signal in that file as written. Files that declare their own `capture_signal`, `get_signal_emissions`,
+or `watch_signal` function are left alone for signal migration. Migrated probes are disconnected
+automatically when each case ends.
 
 For a preserved capture, signal behavior remains testable with native Godot connections. For example, a one-argument
 capture can be migrated explicitly without adding a framework API:
