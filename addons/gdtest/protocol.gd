@@ -523,13 +523,15 @@ static func case_started(
 	}
 
 
-## Serializes one worker_tainted event payload when a case times out or is canceled.
+## Serializes one worker_tainted event payload when a case times out or a run is canceled.
 static func worker_tainted(case_id: String, timed_out: bool) -> Dictionary[String, Variant]:
-	return {
-		"test_id": case_id,
+	var payload: Dictionary[String, Variant] = {
 		"message": "case timeout" if timed_out else "case cancellation",
 		"metadata": { "reason": "case_timeout" if timed_out else "canceled" },
 	}
+	if not case_id.is_empty():
+		payload["test_id"] = case_id
+	return payload
 
 
 ## Serializes one terminal case event and retains framework-error diagnostics.

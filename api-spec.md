@@ -1291,8 +1291,8 @@ func test_autofrees_case_node_attached_to_tree() -> void:
 | Where `autofree` is called | Owning scope | Freed |
 |---|---|---|
 | Case body, `before_case`, `after_case`, `before_each`, `after_each` | `case` | After the case's closing hook |
-| `before_suite`, `after_suite` (root or nested) | `suite` | After the matching `after_suite` |
-| `before_all`, `after_all` | `file` | After `after_all` |
+| `before_suite` (root or nested) | `suite` | After the matching `after_suite` |
+| `before_all` | `file` | After `after_all` |
 
 Registering the same node more than once in the same scope has no additional
 effect. If a node is registered in more than one open scope, the narrowest
@@ -1302,9 +1302,11 @@ closing scope.
 Calling `autofree(null)` or passing a freed instance reports a source-located
 error and registers nothing. Calling `autofree` during discovery or
 registration (`script.new()` member initializers, `suite()`, `define()`
-callbacks, `*__cases()` providers, or `get_suite_name()`), during scope
-teardown, or outside an active file, suite, or case scope reports a
-source-located discovery or framework error and registers nothing.
+callbacks, `*__cases()` providers, or `get_suite_name()`), during suite or
+file closing hooks (`after_suite` or `after_all`), during node deletion or
+teardown callbacks (`_exit_tree()` or `NOTIFICATION_PREDELETE`), or outside an
+active file, suite, or case scope reports a source-located discovery or
+framework error and registers nothing.
 
 #### End-of-scope teardown and leak detection
 

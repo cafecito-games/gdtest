@@ -222,7 +222,14 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		_finish_run_state()
 		return
 	var plan: Dictionary[String, Variant] = _dict(plan_value)
-	_leak_tracker = LeakTracker.create(self, plan, _send_event, _is_run_aborted, _call_hook)
+	_leak_tracker = LeakTracker.create(
+			self,
+			plan,
+			_send_event,
+			_is_run_aborted,
+			_call_hook,
+			_drain_framework_errors
+	)
 	var case_timeout_ns: int = int(plan.get("case_timeout_ns", 0))
 	if case_timeout_ns <= 0:
 		_case_timeout_usec = DEFAULT_CASE_TIMEOUT_USEC
@@ -271,6 +278,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 			break
 	if _cancel_requested:
 		totals["canceled"] += 1
+		_taint_canceled_run()
 	var execution_usec: int = Time.get_ticks_usec() - execution_started_usec
 	var late_callback_invocations: int = ProbeLedger.take_late_call_count()
 	_send_event(
@@ -474,8 +482,7 @@ func _run_prepared_file(
 				cases,
 				path,
 				totals,
-				_run_case,
-				_drain_framework_errors
+				_run_case
 		)
 	totals["error"] += _drain_framework_errors(instance, path)
 	instance._gdtest_dispose()
@@ -765,7 +772,8 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	while not task.finished and not _cancel_requested and Time.get_ticks_usec() < deadline_usec:
 		_poll_messages()
 		await process_frame
-	var timed_out: bool = not task.finished and not _cancel_requested
+	var case_canceled: bool = _cancel_requested
+	var timed_out: bool = not task.finished and not case_canceled
 	if timed_out:
 		instance._gdtest_record_error_at(
 				"case timed out after %.3f seconds" % (float(_case_timeout_usec) / 1000000.0),
@@ -773,12 +781,11 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 				info.line
 		)
 	var result: Dictionary[String, Variant]
-	if not task.finished or _cancel_requested:
+	if not task.finished or case_canceled:
 		task.finish_capture()
-		if not task.finished:
-			_abort_run_requested = true
-			_shutdown_requested = true
-			_send_event("worker_tainted", Protocol.worker_tainted(case_id, timed_out))
+		_abort_run_requested = true
+		_shutdown_requested = true
+		_send_event("worker_tainted", Protocol.worker_tainted(case_id, timed_out))
 		result = instance._gdtest_end_case_aborted()
 		_leak_tracker.pop_without_check()
 	else:
@@ -786,7 +793,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 				_leak_tracker.check_case_scope.bind(instance, case_id, path, info.line)
 		)
 		task.finish_capture()
-	var status: String = "canceled" if _cancel_requested else str(result.get("status", "error"))
+	var status: String = "canceled" if case_canceled else str(result.get("status", "error"))
 	_send_event(
 			"case_finished",
 			Protocol.case_finished(
@@ -801,6 +808,13 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	)
 	_active_case_id = ""
 	return status
+
+
+func _taint_canceled_run() -> void:
+	if _shutdown_requested:
+		return
+	_shutdown_requested = true
+	_send_event("worker_tainted", Protocol.worker_tainted("", false))
 
 
 func _is_run_aborted() -> bool:

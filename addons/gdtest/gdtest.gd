@@ -549,10 +549,12 @@ func _gdtest_begin_case() -> void:
 
 
 func _gdtest_end_case(leak_checker: Callable = Callable()) -> Dictionary[String, Variant]:
+	_gdtest_autofree.begin_closing()
 	_gdtest_release_case_probes()
 	await _gdtest_autofree.release_and_drain(_gdtest_tree)
 	if leak_checker.is_valid():
 		leak_checker.call()
+	_gdtest_autofree.end_closing()
 	_gdtest_case_active = false
 	return _gdtest_case_result()
 

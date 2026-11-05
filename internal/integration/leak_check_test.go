@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -309,11 +310,6 @@ func before_all() -> void:
 	get_tree().root.add_child(_file_fixture)
 
 
-func after_all() -> void:
-	var closing_file_node: Node = autofree(Node.new())
-	closing_file_node.name = "AfterAllNode"
-
-
 func before_suite(suite_info: GDTestSuiteInfo) -> void:
 	if suite_info.name == "alpha":
 		_suite_fixture = autofree(Node.new())
@@ -322,12 +318,6 @@ func before_suite(suite_info: GDTestSuiteInfo) -> void:
 		_narrowed_node = autofree(Node.new())
 		_narrowed_node.name = "NarrowedFromSuite"
 		get_tree().root.add_child(_narrowed_node)
-
-
-func after_suite(suite_info: GDTestSuiteInfo) -> void:
-	if suite_info.name == "alpha":
-		var after_suite_node: Node = autofree(Node.new())
-		after_suite_node.name = "AfterSuiteNode"
 
 
 func before_case(case_info: GDTestCaseInfo) -> void:
@@ -744,6 +734,332 @@ func test_parameterized__cases() -> Array:
 		combined := output + "\n" + diagnostics
 		assert.Contains(t, combined, "autofree is only valid while a test file, suite, or case scope is executing")
 		assert.Contains(t, combined, "discovery_misuse.test.gd:3")
+	})
+
+	t.Run("autofree in after_suite after_all and node predelete teardown reports framework errors and registers nothing", func(t *testing.T) {
+		markerPath := filepath.ToSlash(filepath.Join(t.TempDir(), "unregistered_survivors.txt"))
+		source := fmt.Sprintf(`extends GDTest
+
+
+class PredeleteMisuseNode:
+	extends Node
+
+	var owner_test: GDTest
+	var spawned_ids: Array[int]
+
+
+	func _init(owner_value: GDTest, target_ids: Array[int]) -> void:
+		owner_test = owner_value
+		spawned_ids = target_ids
+
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE and owner_test != null:
+			var late_node: Node = Node.new()
+			spawned_ids.append(late_node.get_instance_id())
+			owner_test.autofree(late_node)
+
+
+var _spawned_ids: Array[int] = []
+
+
+func suite() -> void:
+	define(
+			"teardown_suite",
+			func() -> void:
+				test(
+						"case predelete autofree errors the case without registering in outer scopes",
+						func() -> void:
+							autofree(PredeleteMisuseNode.new(self, _spawned_ids))
+							expect_true(true)
+				)
+	)
+
+
+func before_suite(suite_info: GDTestSuiteInfo) -> void:
+	if suite_info.name == "teardown_suite":
+		autofree(PredeleteMisuseNode.new(self, _spawned_ids))
+
+
+func after_suite(suite_info: GDTestSuiteInfo) -> void:
+	if suite_info.name == "teardown_suite":
+		var suite_closing_node: Node = Node.new()
+		_spawned_ids.append(suite_closing_node.get_instance_id())
+		autofree(suite_closing_node)
+
+
+func after_all() -> void:
+	var file_closing_node: Node = Node.new()
+	_spawned_ids.append(file_closing_node.get_instance_id())
+	autofree(file_closing_node)
+	var alive_count: int = 0
+	for instance_id: int in _spawned_ids:
+		if is_instance_id_valid(instance_id):
+			alive_count += 1
+			var resolved: Object = instance_from_id(instance_id)
+			if resolved != null:
+				resolved.free()
+	var handle: FileAccess = FileAccess.open(%q, FileAccess.WRITE)
+	if handle != null:
+		handle.store_string(str(alive_count))
+		handle.close()
+`, markerPath)
+
+		root := setupTempGodotProject(
+			t,
+			"",
+			`{"leak_check": {"policy": "off"}}`,
+			map[string]string{"teardown_misuse.test.gd": source},
+		)
+		predeleteLine := lineContaining(t, root, "teardown_misuse.test.gd", "owner_test.autofree(late_node)")
+		afterSuiteLine := lineContaining(t, root, "teardown_misuse.test.gd", "autofree(suite_closing_node)")
+		afterAllLine := lineContaining(t, root, "teardown_misuse.test.gd", "autofree(file_closing_node)")
+
+		code, events, diagnostics := runCLIJSON(t, root)
+		require.Equal(t, app.ExitFailures, code, "diagnostics:\n%s", diagnostics)
+
+		var caseFinished decodedJSONEvent
+		var frameworkErrors []decodedJSONEvent
+		for _, event := range events {
+			if event.Type == string(model.EventCaseFinished) {
+				caseFinished = event
+			}
+			if event.Type == string(model.EventWorkerError) && event.Name == "worker.framework" {
+				frameworkErrors = append(frameworkErrors, event)
+			}
+		}
+
+		assert.Equal(t, "error", caseFinished.Status)
+		assert.Contains(t, caseFinished.Message, "autofree is only valid while a test file, suite, or case scope is executing")
+		require.NotNil(t, caseFinished.Location)
+		assert.Equal(t, predeleteLine, caseFinished.Location.Line)
+
+		require.Len(t, frameworkErrors, 3, "expected errors from after_suite, suite predelete, and after_all")
+		errorLines := []int{
+			frameworkErrors[0].Location.Line,
+			frameworkErrors[1].Location.Line,
+			frameworkErrors[2].Location.Line,
+		}
+		assert.Equal(t, []int{afterSuiteLine, predeleteLine, afterAllLine}, errorLines)
+
+		aliveBytes, err := os.ReadFile(filepath.FromSlash(markerPath))
+		require.NoError(t, err)
+		assert.Equal(t, "4", string(aliveBytes), "none of the rejected teardown autofree nodes may be freed by outer scopes")
+	})
+
+	t.Run("mid-case cancellation and teardown-drain cancellation preserve scope atomicity and taint worker", func(t *testing.T) {
+		midCancelMarker := filepath.ToSlash(filepath.Join(t.TempDir(), "mid_cancel_freed.txt"))
+		midCancelListener, err := net.Listen("tcp4", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer func() { _ = midCancelListener.Close() }()
+		midCancelPort := midCancelListener.Addr().(*net.TCPAddr).Port
+
+		midCancelSource := fmt.Sprintf(`extends GDTest
+
+
+class MarkerNode:
+	extends Node
+
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE:
+			var handle: FileAccess = FileAccess.open(%q, FileAccess.WRITE)
+			if handle != null:
+				handle.store_string("freed")
+				handle.close()
+
+
+func test_canceled_while_suspended() -> void:
+	autofree(MarkerNode.new())
+	var leaked: Node = Node.new()
+	leaked.name = "CanceledCaseLeak"
+	var sync_peer: StreamPeerTCP = StreamPeerTCP.new()
+	sync_peer.connect_to_host("127.0.0.1", %d)
+	while sync_peer.get_status() == StreamPeerTCP.STATUS_CONNECTING:
+		sync_peer.poll()
+		await get_tree().process_frame
+	await sleep(5.0)
+`, midCancelMarker, midCancelPort)
+
+		drainFileMarker := filepath.ToSlash(filepath.Join(t.TempDir(), "drain_file_freed.txt"))
+		drainListener, err := net.Listen("tcp4", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer func() { _ = drainListener.Close() }()
+		drainPort := drainListener.Addr().(*net.TCPAddr).Port
+
+		drainSource := fmt.Sprintf(`extends GDTest
+
+
+class FileMarkerNode:
+	extends Node
+
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE:
+			var handle: FileAccess = FileAccess.open(%q, FileAccess.WRITE)
+			if handle != null:
+				handle.store_string("freed")
+				handle.close()
+
+
+class DrainSyncNode:
+	extends Node
+
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE:
+			var sync_peer: StreamPeerTCP = StreamPeerTCP.new()
+			sync_peer.connect_to_host("127.0.0.1", %d)
+			var deadline_msec: int = Time.get_ticks_msec() + 2000
+			while sync_peer.get_status() == StreamPeerTCP.STATUS_CONNECTING and Time.get_ticks_msec() < deadline_msec:
+				sync_peer.poll()
+				OS.delay_usec(1000)
+			while sync_peer.get_status() == StreamPeerTCP.STATUS_CONNECTED and sync_peer.get_available_bytes() == 0 and Time.get_ticks_msec() < deadline_msec:
+				sync_peer.poll()
+				OS.delay_usec(1000)
+			sync_peer.disconnect_from_host()
+
+
+func before_all() -> void:
+	autofree(FileMarkerNode.new())
+
+
+func test_first_completes_before_cancel_in_drain() -> void:
+	await get_tree().process_frame
+	autofree(DrainSyncNode.new())
+	var leaked: Node = Node.new()
+	leaked.name = "CompletedCaseLeak"
+	expect_true(true)
+
+
+func test_second_never_runs() -> void:
+	expect_true(true)
+`, drainFileMarker, drainPort)
+
+		root := setupTempGodotProject(t, "", "", map[string]string{
+			"mid_cancel.test.gd":   midCancelSource,
+			"drain_cancel.test.gd": drainSource,
+		})
+		midCancelPlan, err := discovery.Parse("mid_cancel.test.gd", []byte(midCancelSource))
+		require.NoError(t, err)
+		drainPlan, err := discovery.Parse("drain_cancel.test.gd", []byte(drainSource))
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		midProcess, err := worker.Start(ctx, worker.ProcessOptions{
+			Godot:       "godot",
+			Project:     root,
+			SessionID:   "mid-cancel-leak-skip",
+			Generation:  1,
+			CancelGrace: 5 * time.Second,
+		})
+		require.NoError(t, err)
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer shutdownCancel()
+			assert.NoError(t, midProcess.Shutdown(shutdownCtx))
+		}()
+
+		midRunCtx, midRunCancel := context.WithCancel(ctx)
+		go func() {
+			connection, acceptErr := midCancelListener.Accept()
+			if acceptErr == nil {
+				_ = connection.Close()
+				midRunCancel()
+			}
+		}()
+
+		var midTainted bool
+		var midLeakEmitted bool
+		var midCaseStatus string
+		midErr := midProcess.Run(midRunCtx, model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "mid-cancel-run",
+			Generation:      1,
+			LeakCheck:       model.LeakCheck{Policy: "fail"},
+			Files:           []model.FilePlan{midCancelPlan},
+		}, executor.EventSinkFunc(func(event model.Event) error {
+			if event.Type == model.EventWorkerTainted {
+				midTainted = true
+			}
+			if (event.Type == model.EventAssertionFail || event.Type == model.EventCaseWarning) && event.Assertion == "leak" {
+				midLeakEmitted = true
+			}
+			if event.Type == model.EventCaseFinished {
+				midCaseStatus = event.Status
+			}
+			return nil
+		}))
+		require.ErrorIs(t, midErr, context.Canceled)
+		assert.True(t, midTainted)
+		assert.Equal(t, "canceled", midCaseStatus)
+		assert.False(t, midLeakEmitted, "canceled case must skip leak check")
+		_, midStatErr := os.Stat(filepath.FromSlash(midCancelMarker))
+		assert.ErrorIs(t, midStatErr, os.ErrNotExist, "canceled case must skip autofree release")
+
+		drainProcess, err := worker.Start(ctx, worker.ProcessOptions{
+			Godot:       "godot",
+			Project:     root,
+			SessionID:   "drain-cancel-atomicity",
+			Generation:  1,
+			CancelGrace: 5 * time.Second,
+		})
+		require.NoError(t, err)
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer shutdownCancel()
+			assert.NoError(t, drainProcess.Shutdown(shutdownCtx))
+		}()
+
+		go func() {
+			connection, acceptErr := drainListener.Accept()
+			if acceptErr == nil {
+				_ = drainProcess.Cancel(context.Background(), "drain-cancel-run")
+				_, _ = connection.Write([]byte("1"))
+				_ = connection.Close()
+			}
+		}()
+
+		var drainTainted bool
+		drainLeakTests := make([]string, 0, 1)
+		drainCaseStatuses := make(map[string]string)
+		drainRunStatus := ""
+		drainErr := drainProcess.Run(ctx, model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "drain-cancel-run",
+			Generation:      1,
+			LeakCheck:       model.LeakCheck{Policy: "fail"},
+			Files:           []model.FilePlan{drainPlan},
+		}, executor.EventSinkFunc(func(event model.Event) error {
+			if event.Type == model.EventWorkerTainted {
+				drainTainted = true
+			}
+			if event.Type == model.EventAssertionFail && event.Assertion == "leak" {
+				drainLeakTests = append(drainLeakTests, event.TestID)
+			}
+			if event.Type == model.EventCaseFinished {
+				drainCaseStatuses[event.TestID] = event.Status
+			}
+			if event.Type == model.EventRunFinished {
+				drainRunStatus = event.Status
+			}
+			return nil
+		}))
+		require.NoError(t, drainErr)
+		assert.Equal(
+			t,
+			"fail",
+			drainCaseStatuses["drain_cancel.test.gd::test_first_completes_before_cancel_in_drain"],
+			"completed case must keep its finalized status rather than turning into canceled during frame drain",
+		)
+		assert.NotContains(t, drainCaseStatuses, "drain_cancel.test.gd::test_second_never_runs")
+		assert.Equal(t, []string{"drain_cancel.test.gd::test_first_completes_before_cancel_in_drain"}, drainLeakTests)
+		assert.Equal(t, "canceled", drainRunStatus)
+		assert.True(t, drainTainted, "worker must taint when cancellation aborts enclosing file cleanup")
+		_, drainStatErr := os.Stat(filepath.FromSlash(drainFileMarker))
+		assert.ErrorIs(t, drainStatErr, os.ErrNotExist, "enclosing file scope must skip autofree release after cancel")
 	})
 
 	t.Run("timed-out case skips autofree release and leak check", func(t *testing.T) {

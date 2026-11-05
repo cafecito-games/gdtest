@@ -14,6 +14,7 @@ var _tree: SceneTree
 var _emit_event: Callable
 var _is_aborted: Callable
 var _call_hook: Callable
+var _drain_errors: Callable
 
 
 class _ScopeBaseline:
@@ -111,13 +112,15 @@ static func create(
 		plan: Dictionary[String, Variant],
 		emit_event: Callable,
 		is_aborted: Callable,
-		call_hook: Callable
+		call_hook: Callable,
+		drain_errors: Callable = Callable()
 ) -> RefCounted:
 	var tracker := from_plan(plan)
 	tracker._tree = tree
 	tracker._emit_event = emit_event
 	tracker._is_aborted = is_aborted
 	tracker._call_hook = call_hook
+	tracker._drain_errors = drain_errors
 	return tracker
 
 
@@ -178,14 +181,13 @@ func execute_file_lifecycle(
 		cases: Array[Variant],
 		path: String,
 		totals: Dictionary[String, int],
-		run_case: Callable,
-		drain_errors: Callable
+		run_case: Callable
 ) -> void:
 	open_scope(instance)
 	if await _call_hook.call(instance, &"before_all", [], path, totals):
 		open_scope(instance)
 		if await _call_hook.call(instance, &"before_suite", [root_info], path, totals):
-			await _execute_suite_cases(instance, cases, path, totals, run_case, drain_errors)
+			await _execute_suite_cases(instance, cases, path, totals, run_case)
 		await close_suite_scope(instance, root_info, path, totals)
 	await close_file_scope(instance, path, root_info.line, totals)
 
@@ -195,8 +197,7 @@ func _execute_suite_cases(
 		cases: Array[Variant],
 		path: String,
 		totals: Dictionary[String, int],
-		run_case: Callable,
-		drain_errors: Callable
+		run_case: Callable
 ) -> void:
 	var open_suites: Array[GDTestSuiteInfo] = []
 	var blocked_suite_depth: int = -1
@@ -228,7 +229,8 @@ func _execute_suite_cases(
 			continue
 		var status: String = await run_case.call(instance, path, case_plan)
 		totals[status] = totals.get(status, 0) + 1
-		totals["error"] += int(drain_errors.call(instance, path))
+		if _drain_errors.is_valid():
+			totals["error"] += int(_drain_errors.call(instance, path))
 	for index: int in range(open_suites.size() - 1, -1, -1):
 		await close_suite_scope(instance, open_suites[index], path, totals)
 
@@ -257,10 +259,13 @@ func close_suite_scope(
 		path: String,
 		totals: Dictionary[String, int]
 ) -> void:
+	var registry: RefCounted = instance._gdtest_autofree_registry()
+	registry.begin_closing()
 	await _call_hook.call(instance, &"after_suite", [suite_info], path, totals)
 	var subject: String = "`before_suite`/`after_suite` of suite `%s`" % suite_info.name
 	var suite_file: String = suite_info.file if not suite_info.file.is_empty() else path
 	await _close_non_case_scope(instance, subject, suite_file, suite_info.line, totals)
+	registry.end_closing()
 
 
 ## Runs `after_all`, releases file `autofree` registrations, and checks file leaks.
@@ -270,8 +275,11 @@ func close_file_scope(
 		line: int,
 		totals: Dictionary[String, int]
 ) -> void:
+	var registry: RefCounted = instance._gdtest_autofree_registry()
+	registry.begin_closing()
 	await _call_hook.call(instance, &"after_all", [], path, totals)
 	await _close_non_case_scope(instance, "`before_all`/`after_all`", path, line, totals)
+	registry.end_closing()
 
 
 func _close_non_case_scope(
@@ -285,9 +293,8 @@ func _close_non_case_scope(
 		abort_scope(instance)
 		return
 	await instance._gdtest_autofree_registry().release_and_drain(_tree)
-	if _is_aborted.is_valid() and bool(_is_aborted.call()):
-		pop_without_check()
-		return
+	if _drain_errors.is_valid():
+		totals["error"] += int(_drain_errors.call(instance, path))
 	var report: Dictionary[String, Variant] = finish_scope(
 			_tree.root if _tree != null else null,
 			subject
@@ -304,16 +311,12 @@ func _close_non_case_scope(
 	if _policy == "fail":
 		totals["fail"] = totals.get("fail", 0) + 1
 		_emit_event.call("assertion_failed", Protocol.assertion_failed("", diagnostic))
-		return
-	if _policy == "warn":
+	elif _policy == "warn":
 		_emit_event.call("case_warning", Protocol.case_warning("", diagnostic))
 
 
 ## Evaluates the completed case scope and records or emits its configured leak diagnostic.
 func check_case_scope(instance: GDTest, case_id: String, path: String, line: int) -> void:
-	if _is_aborted.is_valid() and bool(_is_aborted.call()):
-		pop_without_check()
-		return
 	var report: Dictionary[String, Variant] = finish_scope(
 			_tree.root if _tree != null else null,
 			""
@@ -323,8 +326,7 @@ func check_case_scope(instance: GDTest, case_id: String, path: String, line: int
 	if _policy == "fail":
 		var metadata: Dictionary[String, Variant] = Protocol.string_dictionary(report["metadata"])
 		instance._gdtest_record_leak_failure(str(report["message"]), path, line, metadata)
-		return
-	if _policy == "warn":
+	elif _policy == "warn":
 		var diagnostic: Dictionary[String, Variant] = {
 			"assertion": "leak",
 			"message": report["message"],
