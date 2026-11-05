@@ -107,3 +107,8 @@ process-output classifier parses — that prefix is a shared contract.
 - Do not hand-edit `addons.lock` or `.gpm-state.toml`.
 - Package doc comments state each package's single responsibility; keep them
   accurate when responsibilities move.
+- The Vest migrator (`internal/migrate`) is feature-frozen. Do not add new
+  conversions for Vest APIs. Fix defects in existing conversions with
+  regression coverage. Document new gdtest APIs in `api-spec.md` with a
+  runnable example, and add a manual recipe to `docs/vest-migration.md`, so an
+  agent can convert the code by hand from documentation.

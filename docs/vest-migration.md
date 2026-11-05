@@ -71,3 +71,55 @@ Keep a small project-local recorder when many preserved fixtures need the same z
 pattern. This is intentionally an application helper rather than a gdtest v1 compatibility API.
 
 Dynamic tests, async tests, and supported focus markers continue to work when they use APIs covered by the gdtest runtime. Project-specific wrappers and configuration still require review; in particular, replace Vest CLI invocations in local scripts and CI with `gdtest run` after the migrated suite passes.
+
+## Converting preserved constructs by hand
+
+Anything the migrator reports and preserves can be converted by hand. Each recipe below names the gdtest API to use. The authoritative contract for every API is in `api-spec.md`.
+
+### Signal captures
+
+`watch_signal` replaces `capture_signal` once the signal is known. The probe infers arity from Godot, so drop the count argument.
+
+| Vest | gdtest |
+| --- | --- |
+| `capture_signal(owner.signal_name, n)` | `var probe: GDTestSignalProbe = watch_signal(owner.signal_name)` |
+| `get_signal_emissions(owner.signal_name).size()` | `probe.emission_count()` |
+| `get_signal_emissions(owner.signal_name)[i]` | `probe.arguments_at(i)` |
+| `get_signal_emissions(owner.signal_name)[i][j]` | `probe.arguments_at(i)[j]` |
+| `expect_empty(get_signal_emissions(...))` | `expect_empty(probe.emissions())` |
+| Wait for a later emission | `await probe.wait_until_count(n, timeout_seconds)` |
+
+Keep the probe in the test that creates it. Probes are disconnected when the case ends, so do not store one in a class member or reuse it in another test. If one test needs the whole argument list of a signal in a non-trivial shape, use `probe.emissions()` and compare each invocation's `arguments` explicitly. Do not wrap the list in a helper that outlives the case. Signals with more than eight arguments are not supported by the probe; test them with a native connection in a project-local helper.
+
+### Native connections for anything else
+
+When a capture cannot move to a probe, connect with Godot directly and record into a local array inside the test. This is always valid:
+
+```gdscript
+func test_reports_changed_values() -> void:
+	var recorded: Array[Variant] = []
+	var recorder: Callable = func(value: Variant) -> void:
+		recorded.append(value)
+	subject.changed.connect(recorder)
+	subject.change()
+	subject.changed.disconnect(recorder)
+	expect_equal(recorded, [subject.value])
+```
+
+Disconnect explicitly, because a native connection does not follow the case lifecycle.
+
+### Lifecycle signals
+
+Replace `on_begin`, `on_case_begin`, and similar lifecycle signals with the matching hooks described in `api-spec.md` section 8. Hooks run in a fixed order, so do not depend on signal connection order.
+
+### Fluent assertions
+
+Replace each chained matcher with one direct `expect_*` call with the same actual-first argument order. For multi-matcher chains, write one `expect_*` per matcher.
+
+### Runtime mocks and benchmarks
+
+gdtest has no runtime mock generator or benchmark API in v1. Replace a mock with a small hand-written fake class in the test file, and move benchmarks out of the gdtest suite.
+
+### Vest.timeout
+
+Remove `Vest.timeout` and pass explicit `timeout_seconds` to `until` or `wait_until_count`, or rely on the case timeout set in `gdtest.json`.
