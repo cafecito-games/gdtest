@@ -37,7 +37,7 @@ func TestDaemonPerformanceObjectives(t *testing.T) {
 		durations := sampleDurations(t, samples, func() {
 			response, err := daemonClient.Status(context.Background())
 			require.NoError(t, err)
-			assert.Contains(t, string(response), `"protocol":1`)
+			assert.Contains(t, string(response), fmt.Sprintf(`"protocol":%d`, daemon.ProtocolVersion))
 		})
 		logCorpusReport(t, "client_ready_daemon", 1, durations)
 	})

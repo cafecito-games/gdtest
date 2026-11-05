@@ -27,7 +27,7 @@ func _validate_handshake() -> String:
 	if messages.size() != 1:
 		return "worker handshake fixture must contain exactly one message"
 	var message: Dictionary[String, Variant] = messages[0]
-	if int(message.get("version", -1)) != 2 or str(message.get("type", "")) != "hello":
+	if int(message.get("version", -1)) != 3 or str(message.get("type", "")) != "hello":
 		return "worker handshake fixture has an invalid envelope"
 	if str(message.get("token", "")).is_empty():
 		return "worker handshake fixture has no authentication token"
@@ -58,6 +58,7 @@ func _validate_events() -> String:
 	var expected_kinds: Array[String] = [
 		"run_started",
 		"case_started",
+		"case_warning",
 		"case_finished",
 		"run_finished",
 	]
@@ -65,7 +66,7 @@ func _validate_events() -> String:
 		return "run event fixture has the wrong message count"
 	for index: int in range(messages.size()):
 		var message: Dictionary[String, Variant] = messages[index]
-		if int(message.get("version", -1)) != 2 or str(message.get("type", "")) != "event":
+		if int(message.get("version", -1)) != 3 or str(message.get("type", "")) != "event":
 			return "run event fixture has an invalid envelope at row %d" % [index + 1]
 		if str(message.get("request_id", "")) != "run-1":
 			return "run event fixture request identity changed at row %d" % [index + 1]
@@ -101,7 +102,7 @@ func _validate_benchmark_events() -> String:
 		return "benchmark event fixture has the wrong message count"
 	for index: int in range(messages.size()):
 		var message: Dictionary[String, Variant] = messages[index]
-		if int(message.get("version", -1)) != 2 or str(message.get("type", "")) != "event":
+		if int(message.get("version", -1)) != 3 or str(message.get("type", "")) != "event":
 			return "benchmark event fixture has an invalid envelope"
 		var payload: Dictionary[String, Variant] = _string_dictionary(message.get("payload", {}))
 		if str(payload.get("kind", "")) != expected_kinds[index]:

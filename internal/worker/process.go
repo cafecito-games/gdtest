@@ -1350,6 +1350,9 @@ func validateWorkerPlan(plan model.TestPlan) error {
 	if plan.CaseTimeout < 0 {
 		return errors.New("test plan case timeout cannot be negative")
 	}
+	if err := plan.LeakCheck.Validate(); err != nil {
+		return fmt.Errorf("test plan has invalid leak_check: %w", err)
+	}
 	for _, file := range plan.Files {
 		if !validManifestPath(file.Path) {
 			return fmt.Errorf("test plan has invalid project-relative path %q", file.Path)

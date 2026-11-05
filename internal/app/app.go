@@ -611,8 +611,9 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 	plan := model.TestPlan{
 		ProtocolVersion: model.ProtocolVersion, RunID: newID(),
 		Generation: completedManifest.Generation, ContentFingerprint: staticManifest.ContentFingerprint,
-		OnlyMode: projectConfig.OnlyMode, SelectionApplied: true,
-		SelectedIDs: append([]string(nil), selected.ids...), Files: discoveryManifest.Files,
+		OnlyMode: projectConfig.OnlyMode, LeakCheck: projectConfig.LeakCheck.ToModel(),
+		SelectionApplied: true, SelectedIDs: append([]string(nil), selected.ids...),
+		Files: discoveryManifest.Files,
 	}
 	collector := results.NewCollectorWithOrder(selected.ids)
 	var eventReporter executor.EventSink

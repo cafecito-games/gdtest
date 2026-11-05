@@ -472,3 +472,54 @@ asynchronous `wait_until_count` handling across `GDTestSignalProbe` and `GDTestC
   ordered, source-located framework error reporting across `before_all`, `before_suite`,
   `after_suite`, `after_all`, and in-case registration misuse in foreground, JSONL, and multi-file
   session runs.
+
+## Scoped autofree and node leak detection
+
+Implements `GDTest.autofree(node: Node) -> Node`, end-of-scope `queue_free()` drainage, post-scope
+orphan and whole-`SceneTree` stray node leak detection, `gdtest.json` `leak_check` configuration,
+`case_warning` events, and protocol version 3 from issue #15 (`api-spec.md` section 14.10, `spec.md`
+sections 9 and 11, and ADR 0010).
+
+- **Default policy behavior change (pre-1.0):** `leak_check.policy` defaults to `"fail"` when
+  `leak_check` or `policy` is omitted from `gdtest.json`. Existing projects whose tests leave
+  unparented `Node` orphans or stray `SceneTree` children behind at the end of a case, suite, or
+  file scope now fail with source-located `assertion: "leak"` diagnostics unless nodes are
+  registered with `autofree(...)`, freed before scope teardown, exempted in `leak_check.ignore`, or
+  configured with `"policy": "warn"` / `"policy": "off"`.
+- **Runtime and protocol (`addons/gdtest/autofree_registry.gd`,
+  `addons/gdtest/worker_leak_tracker.gd`, `addons/gdtest/gdtest.gd`, `addons/gdtest/worker.gd`,
+  `addons/gdtest/protocol.gd`, `addons/gdtest/version.gd`):**
+  - `AutofreeRegistry` tracks registered `Node` instance IDs across stacked `file`, `suite`, and
+    `case` scopes with narrowest-scope-wins ownership, reverse-order `Object.free()` release
+    skipping parent-covered descendants, and a teardown closing guard.
+  - `worker_leak_tracker.gd` captures `Node.get_orphan_node_ids()` and full `SceneTree.root`
+    (`get_children(true)`) baselines per scope, absorbs inner-scope survivors into open ancestors
+    to avoid double-reporting, matches all four `ignore` forms across whole subtrees, collapses
+    remaining leaks to subtree roots with `descendants` counts, sorts deterministically by UTF-8
+    path/class/name plus instance ID, and caps `metadata.leaks` at 20 with `metadata.omitted`.
+  - Timed-out and canceled scopes skip `autofree` release, the one-frame `process_frame` drain, and
+    the leak check while preserving synchronous worker tainting.
+  - Both client/daemon and daemon/worker JSONL protocols advance to version 3; protocol fixtures in
+    `fixtures/protocol/*.jsonl` round-trip at version 3.
+- **Go configuration, plan/cache identity, folding, reporting, and migration (`internal/model`,
+  `internal/config`, `internal/app`, `internal/service`, `internal/worker`, `internal/results`,
+  `internal/reporter`, `internal/migrate`):**
+  - `config.LeakCheck` strictly decodes `policy` and `ignore`, rejecting unknown keys, `null` or
+    non-object values, duplicate entries, non-`res://...gd` paths, and invalid identifiers with exit
+    code `2`.
+  - `TestPlan.LeakCheck` remains backend-neutral and participates in plan validation and dynamic
+    discovery configuration cache identity.
+  - `results.Collector` and `reporter.Terminal` fold and render both `case_warning` (`WARN ...`,
+    exit `0`) and empty-`test_id` suite/file leak failures (`FAIL (<file>:<line>): ...`, exit `1`).
+  - `internal/migrate` adds `autofree` to `gdtestInheritedNames` while keeping Vest API conversions
+    feature-frozen; `docs/vest-migration.md` documents the manual `autofree` conversion recipe.
+- **Verification:**
+  - `examples/basic/autofree.test.gd` exercises suite-scoped and case-scoped `autofree` plus
+    `queue_free()` drainage (`TestDocumentedBasicExampleExecutes` asserts `16 passed`).
+  - `internal/integration/leak_check_test.go` verifies orphan, stray, collapsed-subtree, and
+    autoload leaks, `queue_free()` drainage, `autofree` across all hook/case scopes, reverse
+    ordering, deduplication, narrowest-scope-wins, `error > fail` status precedence, all four
+    `ignore` forms, `warn` and `off` policies, suite/file hook attribution, the 20-entry cap,
+    discovery/case misuse diagnostics, timeout skip, and persistent-worker PID isolation.
+  - `scripts/check`, `scripts/package-addon 0.0.0-issue-15`, `scripts/test-package-addon
+    0.0.0-issue-15`, and `scripts/benchmark` pass (with overhead recorded in `docs/performance.md`).

@@ -215,3 +215,42 @@ func close() -> bool:
 func _on_deadline_expired(deadline_state: Dictionary[String, bool]) -> void:
 	deadline_state["expired"] = true
 	state_changed.emit()
+
+
+## Percent-encodes one stable identifier component using RFC 3986 unreserved bytes.
+static func encode_component(value: Variant) -> String:
+	var bytes: PackedByteArray = str(value).to_utf8_buffer()
+	var result: String = ""
+	for byte: int in bytes:
+		var character: String = String.chr(byte)
+		if (
+				byte >= 65 and byte <= 90
+				or byte >= 97 and byte <= 122
+				or byte >= 48 and byte <= 57
+				or character in ["-", ".", "_", "~"]
+		):
+			result += character
+		else:
+			result += "%%%02X" % byte
+	return result
+
+
+## Orders two strings lexicographically by raw UTF-8 bytes.
+static func utf8_less(left: String, right: String) -> bool:
+	var left_bytes: PackedByteArray = left.to_utf8_buffer()
+	var right_bytes: PackedByteArray = right.to_utf8_buffer()
+	var shared_size: int = mini(left_bytes.size(), right_bytes.size())
+	for index: int in range(shared_size):
+		if left_bytes[index] != right_bytes[index]:
+			return left_bytes[index] < right_bytes[index]
+	return left_bytes.size() < right_bytes.size()
+
+
+## Converts an untyped Dictionary Variant into a string-keyed dictionary.
+static func string_dictionary(value: Variant) -> Dictionary[String, Variant]:
+	var result: Dictionary[String, Variant] = {}
+	if not value is Dictionary:
+		return result
+	for key: Variant in value:
+		result[str(key)] = value[key]
+	return result

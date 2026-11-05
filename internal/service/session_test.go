@@ -769,6 +769,14 @@ func TestSessionServiceRejectsUnsafeOrIncompatiblePlans(t *testing.T) {
 			},
 			want: "path must be normalized",
 		},
+		{
+			name: "leak check policy",
+			plan: model.TestPlan{
+				ProtocolVersion: model.ProtocolVersion, RunID: "run", Generation: 1,
+				LeakCheck: model.LeakCheck{Policy: "strict"},
+			},
+			want: `leak_check.policy "strict" must be fail, warn, or off`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

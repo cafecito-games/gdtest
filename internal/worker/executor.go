@@ -38,6 +38,9 @@ type GodotExecutor struct {
 
 // Run starts one authenticated worker, streams one plan, then shuts it down.
 func (e *GodotExecutor) Run(ctx context.Context, plan model.TestPlan, sink executor.EventSink) error {
+	if err := validateWorkerPlan(plan); err != nil {
+		return err
+	}
 	project, err := canonicalProjectPath(e.Project)
 	if err != nil {
 		return fmt.Errorf("canonicalize project: %w", err)

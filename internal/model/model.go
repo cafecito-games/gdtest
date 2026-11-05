@@ -3,11 +3,81 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
+	"path"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 )
 
 // ProtocolVersion is the serialized plan and event schema version.
-const ProtocolVersion = 2
+const ProtocolVersion = 3
+
+var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// LeakCheck carries backend-neutral post-scope node leak policy and exemptions.
+type LeakCheck struct {
+	Policy string   `json:"policy,omitempty"`
+	Ignore []string `json:"ignore,omitempty"`
+}
+
+// Validate rejects unsupported leak policies and non-neutral or duplicate ignore entries.
+func (l LeakCheck) Validate() error {
+	switch l.Policy {
+	case "", "fail", "warn", "off":
+	default:
+		return fmt.Errorf("leak_check.policy %q must be fail, warn, or off", l.Policy)
+	}
+	seen := make(map[string]int, len(l.Ignore))
+	for index, entry := range l.Ignore {
+		if err := ValidateLeakIgnoreEntry(index, entry); err != nil {
+			return err
+		}
+		if first, exists := seen[entry]; exists {
+			return fmt.Errorf("leak_check.ignore[%d]: %q duplicates leak_check.ignore[%d]", index, entry, first)
+		}
+		seen[entry] = index
+	}
+	return nil
+}
+
+// ValidateLeakIgnoreEntry checks that one allowlist entry is a clean res://.gd
+// path or a valid GDScript identifier, never an absolute or worktree path.
+func ValidateLeakIgnoreEntry(index int, entry string) error {
+	location := fmt.Sprintf("leak_check.ignore[%d]", index)
+	if entry == "" {
+		return fmt.Errorf("%s: must not be empty", location)
+	}
+	if strings.HasPrefix(entry, "res://") {
+		if strings.TrimSpace(entry) != entry {
+			return fmt.Errorf("%s: %q must not begin or end with whitespace", location, entry)
+		}
+		if strings.ContainsFunc(entry, func(character rune) bool {
+			return character == '"' || character < 0x20 || character == 0x7f
+		}) {
+			return fmt.Errorf("%s: %q must not contain a double quote or control character", location, entry)
+		}
+		if strings.Contains(entry, `\`) {
+			return fmt.Errorf("%s: %q must use forward slashes", location, entry)
+		}
+		relative := strings.TrimPrefix(entry, "res://")
+		if relative == "" || strings.HasPrefix(relative, "/") {
+			return fmt.Errorf("%s: %q must be a clean res:// script path", location, entry)
+		}
+		if path.Clean(relative) != relative || relative == "." || slices.Contains(strings.Split(relative, "/"), "..") {
+			return fmt.Errorf("%s: %q must be a clean res:// script path without parent segments", location, entry)
+		}
+		if !strings.HasSuffix(relative, ".gd") || path.Base(relative) == ".gd" {
+			return fmt.Errorf("%s: %q must name a .gd script", location, entry)
+		}
+		return nil
+	}
+	if !identifierPattern.MatchString(entry) {
+		return fmt.Errorf("%s: %q must be a res://.gd path or a valid GDScript identifier", location, entry)
+	}
+	return nil
+}
 
 // TestPlan is independent of absolute worktree paths and concrete executors.
 type TestPlan struct {
@@ -17,6 +87,7 @@ type TestPlan struct {
 	CaseTimeout        time.Duration `json:"case_timeout_ns,omitempty"`
 	ContentFingerprint string        `json:"content_fingerprint,omitempty"`
 	OnlyMode           string        `json:"only_mode,omitempty"`
+	LeakCheck          LeakCheck     `json:"leak_check,omitzero"`
 	SelectionApplied   bool          `json:"selection_applied,omitempty"`
 	SelectedIDs        []string      `json:"selected_ids,omitempty"`
 	Files              []FilePlan    `json:"files"`
@@ -108,6 +179,7 @@ const (
 	EventSuiteStarted  EventType = "suite_started"
 	EventCaseStarted   EventType = "case_started"
 	EventAssertionFail EventType = "assertion_failed"
+	EventCaseWarning   EventType = "case_warning"
 	EventOutput        EventType = "output"
 	EventCaseFinished  EventType = "case_finished"
 	EventSuiteFinished EventType = "suite_finished"

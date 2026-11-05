@@ -17,6 +17,7 @@ type CaseResult struct {
 	File       string          `json:"file,omitempty"`
 	Line       int             `json:"line,omitempty"`
 	Failures   []model.Event   `json:"failures,omitempty"`
+	Warnings   []model.Event   `json:"warnings,omitempty"`
 	Output     []model.Event   `json:"output,omitempty"`
 	Assertions int             `json:"assertions,omitempty"`
 	Messages   []string        `json:"messages,omitempty"`
@@ -26,6 +27,8 @@ type CaseResult struct {
 // Summary is a deterministic folded run result.
 type Summary struct {
 	Cases          []CaseResult    `json:"cases"`
+	Failures       []model.Event   `json:"failures,omitempty"`
+	Warnings       []model.Event   `json:"warnings,omitempty"`
 	Errors         []model.Event   `json:"errors,omitempty"`
 	Infrastructure []model.Event   `json:"infrastructure,omitempty"`
 	Passed         int             `json:"passed"`
@@ -60,6 +63,8 @@ type Collector struct {
 	stale          bool
 	started        bool
 	ended          bool
+	failures       []model.Event
+	warnings       []model.Event
 	errors         []model.Event
 	infrastructure []model.Event
 	runStatus      string
@@ -99,8 +104,19 @@ func (c *Collector) Emit(event model.Event) error {
 		c.cases[event.TestID] = &CaseResult{ID: event.TestID, Name: event.Name}
 		c.order = append(c.order, event.TestID)
 	case model.EventAssertionFail:
-		result := c.ensureCase(event.TestID)
-		result.Failures = append(result.Failures, event)
+		if event.TestID == "" {
+			c.failures = append(c.failures, event)
+		} else {
+			result := c.ensureCase(event.TestID)
+			result.Failures = append(result.Failures, event)
+		}
+	case model.EventCaseWarning:
+		if event.TestID == "" {
+			c.warnings = append(c.warnings, event)
+		} else {
+			result := c.ensureCase(event.TestID)
+			result.Warnings = append(result.Warnings, event)
+		}
 	case model.EventOutput:
 		result := c.ensureCase(event.TestID)
 		result.Output = append(result.Output, event)
@@ -172,7 +188,10 @@ func (c *Collector) Summary() Summary {
 	}
 	summary := Summary{
 		Cases:          make([]CaseResult, 0, len(ids)),
+		Failures:       append([]model.Event(nil), c.failures...),
+		Warnings:       append([]model.Event(nil), c.warnings...),
 		Errors:         append([]model.Event(nil), c.errors...),
+		Failed:         len(c.failures),
 		Stale:          c.stale,
 		Infrastructure: append([]model.Event(nil), c.infrastructure...),
 		Errored:        len(c.infrastructure) + len(c.errors),
@@ -180,6 +199,7 @@ func (c *Collector) Summary() Summary {
 	for _, id := range ids {
 		result := *c.cases[id]
 		result.Failures = append([]model.Event(nil), result.Failures...)
+		result.Warnings = append([]model.Event(nil), result.Warnings...)
 		result.Output = append([]model.Event(nil), result.Output...)
 		result.Messages = append([]string(nil), result.Messages...)
 		result.Outcomes = append([]model.Outcome(nil), result.Outcomes...)
@@ -203,6 +223,9 @@ func (c *Collector) Summary() Summary {
 	}
 	if summary.Errored == 0 && c.runStatus == "error" {
 		summary.Errored = 1
+	}
+	if summary.Failed == 0 && summary.Errored == 0 && c.runStatus == "fail" {
+		summary.Failed = 1
 	}
 	if c.runStatus == "canceled" && summary.Canceled == 0 {
 		summary.Canceled = 1

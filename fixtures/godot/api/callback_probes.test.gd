@@ -239,10 +239,11 @@ func test_closed_callable_does_not_retain_test_instance_or_probe() -> void:
 	var retained: Callable = probe.callback()
 	var weak_test: WeakRef = weakref(isolated)
 	var weak_probe: WeakRef = weakref(probe)
-	var summary: Dictionary[String, Variant] = isolated._gdtest_end_case()
+	var summary: Dictionary[String, Variant] = await isolated._gdtest_end_case()
 	expect_equal(summary["status"], "void")
 	probe = null
 	isolated = null
+	await sleep(0.0)
 	expect_null(weak_probe.get_ref())
 	expect_null(weak_test.get_ref())
 	expect_true(retained.is_valid())

@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/cafecito-games/gdtest/internal/model"
 )
 
 // Filename is the optional project configuration file.
@@ -52,7 +54,75 @@ type Project struct {
 	WorkerIdleTimeout Duration     `json:"worker_idle_timeout"`
 	WorkerMaxRuns     int          `json:"worker_max_runs"`
 	OnlyMode          string       `json:"only_mode"`
+	LeakCheck         LeakCheck    `json:"leak_check"`
 	TestDoubles       []TestDouble `json:"test_doubles"`
+}
+
+// LeakCheck configures post-scope node leak detection and exemptions.
+type LeakCheck struct {
+	Policy string   `json:"policy"`
+	Ignore []string `json:"ignore,omitempty"`
+}
+
+// ToModel returns a backend-neutral copy of the leak configuration.
+func (l LeakCheck) ToModel() model.LeakCheck {
+	var ignore []string
+	if l.Ignore != nil {
+		ignore = append([]string(nil), l.Ignore...)
+	}
+	return model.LeakCheck{Policy: l.Policy, Ignore: ignore}
+}
+
+// UnmarshalJSON strictly decodes leak_check, defaulting policy to "fail" only
+// when the policy field is omitted while rejecting null or non-object values.
+func (l *LeakCheck) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("leak_check must be an object")
+	}
+	var raw struct {
+		Policy json.RawMessage `json:"policy"`
+		Ignore json.RawMessage `json:"ignore"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("unexpected content after leak_check")
+	}
+	policy := "fail"
+	if len(raw.Policy) > 0 {
+		policyBytes := bytes.TrimSpace(raw.Policy)
+		if bytes.Equal(policyBytes, []byte("null")) {
+			return errors.New("leak_check.policy must be a string")
+		}
+		if err := json.Unmarshal(policyBytes, &policy); err != nil {
+			return errors.New("leak_check.policy must be a string")
+		}
+	}
+	var ignore []string
+	if len(raw.Ignore) > 0 {
+		ignoreBytes := bytes.TrimSpace(raw.Ignore)
+		if bytes.Equal(ignoreBytes, []byte("null")) {
+			return errors.New("leak_check.ignore must be an array")
+		}
+		var rawEntries []*string
+		if err := json.Unmarshal(ignoreBytes, &rawEntries); err != nil {
+			return errors.New("leak_check.ignore must be an array of strings")
+		}
+		ignore = make([]string, len(rawEntries))
+		for index, entry := range rawEntries {
+			if entry == nil {
+				return fmt.Errorf("leak_check.ignore[%d]: must be a string", index)
+			}
+			ignore[index] = *entry
+		}
+	}
+	*l = LeakCheck{Policy: policy, Ignore: ignore}
+	return nil
 }
 
 // TestDouble requests a generated typed test double of one project script.
@@ -79,6 +149,7 @@ func Defaults() Project {
 		WorkerIdleTimeout: Duration(2 * time.Minute),
 		WorkerMaxRuns:     100,
 		OnlyMode:          "auto",
+		LeakCheck:         LeakCheck{Policy: "fail"},
 	}
 }
 
@@ -147,7 +218,19 @@ func (c Project) Validate() error {
 	default:
 		return fmt.Errorf("only_mode %q must be auto, ignore, require, or forbid", c.OnlyMode)
 	}
+	if err := validateLeakCheck(c.LeakCheck); err != nil {
+		return err
+	}
 	return validateTestDoubles(c.TestDoubles)
+}
+
+func validateLeakCheck(leakCheck LeakCheck) error {
+	switch leakCheck.Policy {
+	case "fail", "warn", "off":
+	default:
+		return fmt.Errorf("leak_check.policy %q must be fail, warn, or off", leakCheck.Policy)
+	}
+	return leakCheck.ToModel().Validate()
 }
 
 func validateTestDoubles(doubles []TestDouble) error {
