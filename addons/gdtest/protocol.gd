@@ -78,6 +78,57 @@ static func empty_totals() -> Dictionary[String, int]:
 	return { "pass": 0, "fail": 0, "error": 0, "skip": 0, "todo": 0, "void": 0, "canceled": 0 }
 
 
+## Builds a versioned response envelope for one worker command reply.
+static func response_envelope(
+		message_type: String,
+		request_id: String,
+		payload: Dictionary[String, Variant]
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": message_type,
+		"request_id": request_id,
+		"payload": payload,
+	}
+
+
+## Builds a versioned pong envelope for a worker liveness check.
+static func pong_envelope(
+		request_id: String,
+		worker_id: String,
+		generation: int
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": "pong",
+		"request_id": request_id,
+		"payload": { "worker_id": worker_id, "generation": generation },
+	}
+
+
+## Builds a generation acknowledgement envelope for reload and reset commands.
+static func generation_ack(
+		message_type: String,
+		request_id: String,
+		generation: int
+) -> Dictionary[String, Variant]:
+	return {
+		"version": Version.WORKER_PROTOCOL_VERSION,
+		"type": message_type,
+		"request_id": request_id,
+		"generation": generation,
+	}
+
+
+## Builds a worker_error event payload for a named worker or protocol error code.
+static func worker_error(
+		code: String,
+		text: String,
+		test_id: String
+) -> Dictionary[String, Variant]:
+	return { "name": code, "message": text, "test_id": test_id, "metadata": { "code": code } }
+
+
 ## Decodes one JSON Lines object or returns an empty dictionary.
 static func decode_line(line: String) -> Dictionary[String, Variant]:
 	if not _json_nesting_within_limit(line):
@@ -431,6 +482,29 @@ static func run_finished(
 		"counts": counts,
 		"duration_ns": duration_usec * 1000,
 		"metadata": metadata,
+	}
+
+
+## Serializes one case_started event payload.
+static func case_started(
+		case_id: String,
+		case_name: String,
+		path: String,
+		line: int
+) -> Dictionary[String, Variant]:
+	return {
+		"test_id": case_id,
+		"name": case_name,
+		"location": { "file": path.trim_prefix("res://"), "line": line },
+	}
+
+
+## Serializes one worker_tainted event payload when a case times out or is canceled.
+static func worker_tainted(case_id: String, timed_out: bool) -> Dictionary[String, Variant]:
+	return {
+		"test_id": case_id,
+		"message": "case timeout" if timed_out else "case cancellation",
+		"metadata": { "reason": "case_timeout" if timed_out else "canceled" },
 	}
 
 

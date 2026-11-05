@@ -154,12 +154,11 @@ func _dispatch(message: Dictionary[String, Variant]) -> void:
 	match message_type:
 		"ping":
 			_send(
-					{
-						"version": Version.WORKER_PROTOCOL_VERSION,
-						"type": "pong",
-						"request_id": str(message.get("request_id", "")),
-						"payload": { "worker_id": _worker_id, "generation": _generation },
-					}
+					Protocol.pong_envelope(
+							str(message.get("request_id", "")),
+							_worker_id,
+							_generation
+					)
 			)
 		"run", "bench":
 			if _running:
@@ -333,14 +332,7 @@ func _discover_command(command: Dictionary[String, Variant]) -> void:
 			_generation,
 			str(plan.get("content_fingerprint", ""))
 	)
-	_send(
-			{
-				"version": Version.WORKER_PROTOCOL_VERSION,
-				"type": "discover_finished",
-				"request_id": _request_id,
-				"payload": manifest,
-			}
-	)
+	_send(Protocol.response_envelope("discover_finished", _request_id, manifest))
 	_finish_run_state()
 
 
@@ -475,9 +467,33 @@ func _run_prepared_file(
 			{ "id": root_info.id, "name": root_info.name, "file": path.trim_prefix("res://") }
 	)
 	if not cases.is_empty():
-		await _call_hook(instance, &"before_all", [], path, totals)
-		await _call_hook(instance, &"before_suite", [root_info], path, totals)
+		await _execute_file_lifecycle(instance, root_info, cases, path, totals)
+	totals["error"] += _drain_framework_errors(instance, path)
+	instance._gdtest_dispose()
+	_send_event(
+			"suite_finished",
+			{ "id": root_info.id, "status": Protocol.aggregate_status(totals), "counts": totals }
+	)
+	_active_test = null
+	return totals
+
+
+func _execute_file_lifecycle(
+		instance: GDTest,
+		root_info: GDTestSuiteInfo,
+		cases: Array[Variant],
+		path: String,
+		totals: Dictionary[String, int]
+) -> void:
+	if not await _call_hook(instance, &"before_all", [], path, totals):
+		await _call_hook(instance, &"after_all", [], path, totals)
+		return
+	if not await _call_hook(instance, &"before_suite", [root_info], path, totals):
+		await _call_hook(instance, &"after_suite", [root_info], path, totals)
+		await _call_hook(instance, &"after_all", [], path, totals)
+		return
 	var open_suites: Array[GDTestSuiteInfo] = []
+	var blocked_suite_depth: int = -1
 	for case_value: Variant in cases:
 		if _cancel_requested or _abort_run_requested:
 			break
@@ -487,25 +503,29 @@ func _run_prepared_file(
 		for index: int in range(open_suites.size() - 1, common_count - 1, -1):
 			await _call_hook(instance, &"after_suite", [open_suites[index]], path, totals)
 		open_suites.resize(common_count)
-		for index: int in range(common_count, desired_suites.size()):
-			await _call_hook(instance, &"before_suite", [desired_suites[index]], path, totals)
-			open_suites.append(desired_suites[index])
+		if blocked_suite_depth >= common_count:
+			blocked_suite_depth = -1
+		if blocked_suite_depth < 0:
+			for index: int in range(common_count, desired_suites.size()):
+				open_suites.append(desired_suites[index])
+				if not await _call_hook(
+						instance,
+						&"before_suite",
+						[desired_suites[index]],
+						path,
+						totals
+				):
+					blocked_suite_depth = index
+					break
+		if blocked_suite_depth >= 0:
+			continue
 		var status: String = await _run_case(instance, path, case_plan)
 		totals[status] = totals.get(status, 0) + 1
 		totals["error"] += _drain_framework_errors(instance, path)
-	if not cases.is_empty():
-		for index: int in range(open_suites.size() - 1, -1, -1):
-			await _call_hook(instance, &"after_suite", [open_suites[index]], path, totals)
-		await _call_hook(instance, &"after_suite", [root_info], path, totals)
-		await _call_hook(instance, &"after_all", [], path, totals)
-	totals["error"] += _drain_framework_errors(instance, path)
-	instance._gdtest_dispose()
-	_send_event(
-			"suite_finished",
-			{ "id": root_info.id, "status": Protocol.aggregate_status(totals), "counts": totals }
-	)
-	_active_test = null
-	return totals
+	for index: int in range(open_suites.size() - 1, -1, -1):
+		await _call_hook(instance, &"after_suite", [open_suites[index]], path, totals)
+	await _call_hook(instance, &"after_suite", [root_info], path, totals)
+	await _call_hook(instance, &"after_all", [], path, totals)
 
 
 func _release_skipped_prepared_files(
@@ -793,14 +813,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 			bool(case_plan.get("is_only", false))
 	)
 	_active_case_id = case_id
-	_send_event(
-			"case_started",
-			{
-				"test_id": case_id,
-				"name": case_name,
-				"location": { "file": path.trim_prefix("res://"), "line": info.line },
-			}
-	)
+	_send_event("case_started", Protocol.case_started(case_id, case_name, path, info.line))
 	instance._gdtest_begin_case()
 	var started_usec: int = Time.get_ticks_usec()
 	var task: RefCounted = CaseTask.new()
@@ -820,14 +833,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 		task.finish_capture()
 		_abort_run_requested = true
 		_shutdown_requested = true
-		_send_event(
-				"worker_tainted",
-				{
-					"test_id": case_id,
-					"message": "case timeout" if timed_out else "case cancellation",
-					"metadata": { "reason": "case_timeout" if timed_out else "canceled" },
-				}
-		)
+		_send_event("worker_tainted", Protocol.worker_tainted(case_id, timed_out))
 	var result: Dictionary[String, Variant] = instance._gdtest_end_case()
 	var status: String = "canceled" if _cancel_requested else str(result.get("status", "error"))
 	_send_event(
@@ -852,9 +858,11 @@ func _call_hook(
 		arguments: Array[Variant],
 		path: String,
 		totals: Dictionary[String, int]
-) -> void:
+) -> bool:
 	await _call_optional(instance, method, arguments)
-	totals["error"] += _drain_framework_errors(instance, path)
+	var error_count: int = _drain_framework_errors(instance, path)
+	totals["error"] += error_count
+	return error_count == 0
 
 
 func _call_optional(instance: Object, method: StringName, arguments: Array[Variant]) -> void:
@@ -902,12 +910,11 @@ func _reload_command(command: Dictionary[String, Variant]) -> void:
 		return
 	_generation = requested_generation
 	_send(
-			{
-				"version": Version.WORKER_PROTOCOL_VERSION,
-				"type": "reload_finished",
-				"request_id": str(command.get("request_id", "")),
-				"generation": _generation,
-			}
+			Protocol.generation_ack(
+					"reload_finished",
+					str(command.get("request_id", "")),
+					_generation
+			)
 	)
 
 
@@ -919,12 +926,11 @@ func _reset_command(command: Dictionary[String, Variant]) -> void:
 	_active_case_id = ""
 	AudioServer.set_bus_layout(_initial_audio_bus_layout)
 	_send(
-			{
-				"version": Version.WORKER_PROTOCOL_VERSION,
-				"type": "reset_finished",
-				"request_id": str(command.get("request_id", "")),
-				"generation": _generation,
-			}
+			Protocol.generation_ack(
+					"reset_finished",
+					str(command.get("request_id", "")),
+					_generation
+			)
 	)
 
 
@@ -945,15 +951,7 @@ func _send_event(event_type: String, data: Dictionary[String, Variant]) -> void:
 
 
 func _send_worker_error(code: String, text: String) -> void:
-	_send_event(
-			"worker_error",
-			{
-				"name": code,
-				"message": text,
-				"test_id": _active_case_id,
-				"metadata": { "code": code },
-			}
-	)
+	_send_event("worker_error", Protocol.worker_error(code, text, _active_case_id))
 
 
 func _send_discovery_error(value: Variant, default_file: String) -> void:

@@ -385,7 +385,8 @@ asynchronous `wait_until_count` handling across `GDTestSignalProbe` and `GDTestC
     `fixtures/godot/api/callback_probe_suite_hook.test.gd`: outside-case creation in providers,
     member initializers, and suite hooks returns a closed inert probe with an invalid `Callable()`,
     reporting source-located `worker.discovery` diagnostics during `Discover` and `worker.framework`
-    diagnostics during suite-hook `Run`.
+    diagnostics during suite-hook `Run` while skipping the affected suite body and attempting
+    cleanup hooks.
   - `fixtures/godot/api/callback_probe_leak.test.gd` and
     `fixtures/godot/api/callback_probe_timeout.test.gd`: retained callbacks invoked >1,024 times in
     later cases and subsequent runs on the same persistent worker PID pass with bounded
@@ -403,7 +404,7 @@ asynchronous `wait_until_count` handling across `GDTestSignalProbe` and `GDTestC
 ## Post-Discovery Framework Error Reporting
 
 - Runtime drainage and lifecycle cleanup (`addons/gdtest/gdtest.gd`, `addons/gdtest/protocol.gd`,
-  `addons/gdtest/worker.gd`):
+  `addons/gdtest/worker.gd`, `addons/gdtest/worker_case_task.gd`):
   - `_require_registration` routes through `_record_framework_error` so calling `define`, `test`,
     or `test_each` inside an active case marks that case `error` with a source-located `framework`
     diagnostic instead of appending silently to `_gdtest_discovery_errors`.
@@ -412,6 +413,10 @@ asynchronous `wait_until_count` handling across `GDTestSignalProbe` and `GDTestC
     after each case, and before `suite_finished`, emitting source-located `worker.framework`
     `worker_error` events with normalized project-relative paths (no `res://` prefix) and counting
     each error in the file and run totals.
+  - Framework errors in `before_all`, root or nested `before_suite`, and `before_case` /
+    `before_each` prevent the affected file, suite, or case body from running while still
+    attempting applicable cleanup hooks (`after_case`, `after_suite`, `after_all`) per `api-spec.md`
+    section 8.
   - `GDTest._gdtest_dispose()` clears dynamic registration closures and probe contexts after
     discovery, normal execution, and skipped prepared files so `RefCounted` suites leave zero
     leaked `ObjectDB` instances on worker exit.

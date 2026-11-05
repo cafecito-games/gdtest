@@ -598,6 +598,10 @@ func _gdtest_end_case() -> Dictionary[String, Variant]:
 	}
 
 
+func _gdtest_has_error() -> bool:
+	return _gdtest_status == "error"
+
+
 func _gdtest_record_error(text: String) -> void:
 	var location: Dictionary[String, Variant] = _user_location()
 	_gdtest_record_error_at(

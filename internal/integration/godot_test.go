@@ -317,7 +317,7 @@ func TestExecutionHookMisuseReportsSourceLocatedFrameworkErrorsAndExitsFailures(
 	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	relative := "fixtures/godot/api/hook_misuse.test.gd"
-	beforeAllLine := lineContaining(t, root, relative, `expect_true(true, "before_all assertion")`)
+	beforeSuiteLine := lineContaining(t, root, relative, `expect_true(true, "blocked before_suite assertion")`)
 	afterAllLine := lineContaining(t, root, relative, `fail("after_all explicit fail")`)
 	defineInCaseLine := lineContaining(t, root, relative, `define("illegal suite"`)
 
@@ -333,7 +333,7 @@ func TestExecutionHookMisuseReportsSourceLocatedFrameworkErrorsAndExitsFailures(
 		assert.Contains(
 			t,
 			output.String(),
-			fmt.Sprintf("ERROR worker.framework (%s:%d): expect is only valid while a case is executing", relative, beforeAllLine),
+			fmt.Sprintf("ERROR worker.framework (%s:%d): expect is only valid while a case is executing", relative, beforeSuiteLine),
 		)
 		assert.Contains(
 			t,
@@ -345,7 +345,7 @@ func TestExecutionHookMisuseReportsSourceLocatedFrameworkErrorsAndExitsFailures(
 			output.String(),
 			fmt.Sprintf("(%s:%d): define is only valid during suite registration", relative, defineInCaseLine),
 		)
-		assert.Contains(t, output.String(), "2 passed, 0 failed, 11 errors, 0 skipped, 0 todo, 0 void, 0 canceled")
+		assert.Contains(t, output.String(), "2 passed, 0 failed, 12 errors, 0 skipped, 0 todo, 0 void, 0 canceled")
 	})
 
 	t.Run("foreground json", func(t *testing.T) {
@@ -383,7 +383,7 @@ func TestExecutionHookMisuseReportsSourceLocatedFrameworkErrorsAndExitsFailures(
 		}
 		require.NotNil(t, summary)
 		assert.Equal(t, 2, summary.Passed)
-		assert.Equal(t, 11, summary.Errored)
+		assert.Equal(t, 12, summary.Errored)
 		assert.Len(t, summary.Errors, 10)
 		assert.Empty(t, summary.Infrastructure)
 	})
@@ -451,7 +451,7 @@ func TestExecutionHookMisuseReportsSourceLocatedFrameworkErrorsAndExitsFailures(
 		require.NoError(t, err)
 		assert.Equal(t, "error", runFinished.Status)
 		summary := collector.Summary()
-		assert.Equal(t, 3, summary.Passed)
+		assert.Equal(t, 2, summary.Passed)
 		assert.Equal(t, 1, summary.Errored)
 		assert.Len(t, summary.Errors, 1)
 		assert.Empty(t, summary.Infrastructure)
