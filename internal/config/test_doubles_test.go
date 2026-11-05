@@ -119,6 +119,16 @@ func TestValidateTestDoublesRejectsInvalidEntries(t *testing.T) {
 			want:    "test_doubles[0].output: must not be under addons/gdtest/",
 		},
 		{
+			name:    "output under runtime spelled in another case",
+			doubles: `[{"source": "src/a.gd", "output": "Addons/GDTest/a_double.gd"}]`,
+			want:    "test_doubles[0].output: must not be under addons/gdtest/",
+		},
+		{
+			name:    "godot segment spelled in another case",
+			doubles: `[{"source": "src/a.gd", "output": "doubles/.GODOT/a.gd"}]`,
+			want:    `test_doubles[0].output: "doubles/.GODOT/a.gd" must not contain a .godot or .git segment`,
+		},
+		{
 			name: "duplicate source",
 			doubles: `[{"source": "src/a.gd", "output": "doubles/a.gd"},
 				{"source": "src/a.gd", "output": "doubles/b.gd"}]`,

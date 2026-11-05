@@ -604,3 +604,28 @@ func mustGenerate(t *testing.T, root string) int {
 	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
 	return exitCode
 }
+
+func TestGenerateDoublesOutputThroughDirectorySymlinkStaysOwned(t *testing.T) {
+	t.Parallel()
+
+	configuration := `{"test_doubles":[{"source":"src/inventory.gd","output":"alias/inventory_double.gd","class_name":"InventoryDouble"}]}`
+	root := writeGenerateProject(t, configuration, map[string]string{"src/inventory.gd": inventorySource})
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "real"), 0o755))
+	require.NoError(t, os.Symlink("real", filepath.Join(root, "alias")))
+	require.Equal(t, ExitOK, mustGenerate(t, root))
+	script := filepath.Join(root, "real", "inventory_double.gd")
+	before, err := os.Stat(script)
+	require.NoError(t, err)
+
+	exitCode, stdout, stderr := runGenerate(t, "--check", "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stdout: %s\nstderr: %s", stdout, stderr)
+
+	exitCode, stdout, stderr = runGenerate(t, "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr: %s", stderr)
+	assert.Equal(t, "0 file(s) written; 0 file(s) removed\n", stdout)
+	assert.FileExists(t, filepath.Join(root, "real", "inventory_double.gd"))
+	assert.FileExists(t, filepath.Join(root, "real", "inventory_double.gd.uid"))
+	after, err := os.Stat(script)
+	require.NoError(t, err)
+	assert.Equal(t, before.ModTime(), after.ModTime())
+}

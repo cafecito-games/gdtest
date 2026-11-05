@@ -156,7 +156,7 @@ func validateTestDoubles(doubles []TestDouble) error {
 		if err := validateDoubleProjectPath(index, "output", double.Output); err != nil {
 			return err
 		}
-		if strings.HasPrefix(double.Output, generatedDoubleRuntimePrefix) {
+		if strings.HasPrefix(strings.ToLower(double.Output), generatedDoubleRuntimePrefix) {
 			return fmt.Errorf("test_doubles[%d].output: must not be under %s", index, generatedDoubleRuntimePrefix)
 		}
 		if first, exists := sources[double.Source]; exists {
@@ -217,7 +217,7 @@ func validateDoubleProjectPath(index int, field string, value string) error {
 	case slices.Contains(strings.Split(value, "/"), ".."):
 		return fmt.Errorf("%s: %q must not contain a parent directory segment", location, value)
 	case slices.ContainsFunc(strings.Split(value, "/"), func(segment string) bool {
-		return slices.Contains(unsafeDoublePathSegments, segment)
+		return slices.Contains(unsafeDoublePathSegments, strings.ToLower(segment))
 	}):
 		return fmt.Errorf("%s: %q must not contain a .godot or .git segment", location, value)
 	case !strings.HasSuffix(value, ".gd"):

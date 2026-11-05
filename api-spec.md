@@ -840,7 +840,8 @@ Doubles are declared in `test_doubles` in `gdtest.json`:
 - `source` is the project-relative path of the script to double. It must end in
   `.gd`.
 - `output` is the project-relative path of the generated script. It must end in
-  `.gd`, must not be under `addons/gdtest/`, and must not equal any `source`.
+  `.gd`, must not be under `addons/gdtest/` in any letter case, and must not equal any
+  `source`.
 - `class_name` is optional. When it is present it must be a GDScript identifier
   and unique across entries. When it is empty, the generated script declares no
   `class_name`.
@@ -848,7 +849,7 @@ Doubles are declared in `test_doubles` in `gdtest.json`:
 Paths use forward slashes, must be clean relative paths, and must not contain a
 `..` segment. A path may contain spaces, but it must not begin or end with
 whitespace, must not contain a double quote or a control character (a code
-below `0x20` or `0x7f`), and must not contain a `.godot` or `.git` segment at
+below `0x20` or `0x7f`), and must not contain a `.godot` or `.git` segment, in any letter case, at
 any depth, because those directories are never indexed and an output placed
 there could not be found again. Every `source` and every `output` must be
 unique across entries; outputs are compared ignoring case, because paths that

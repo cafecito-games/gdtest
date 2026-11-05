@@ -318,3 +318,11 @@ ADR 0009.
   - A project `class_name` equal to a generated inner class (`GDTestControls` or a
     `<Method>Method` controller) is refused, because Godot 4.7 rejects an inner class that hides a
     global script class: `TestAnalyzeRefusesGeneratedInnerClassHidingGlobalClass`.
+    The configured `class_name` of the double itself is held to the same rule:
+    `TestAnalyzeRefusesConfiguredClassNameEqualToGeneratedInnerClass`.
+  - The `addons/gdtest/`, `.godot`, and `.git` path rules ignore letter case, so a case variant
+    cannot reach the runtime directory on a case-insensitive filesystem:
+    `TestValidateTestDoublesRejectsInvalidEntries`.
+  - An owned output is never removed while it is the same file as a configured output spelled
+    differently, including through a directory symbolic link inside the project:
+    `TestGenerateDoublesOutputThroughDirectorySymlinkStaysOwned`.

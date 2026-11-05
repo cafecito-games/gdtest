@@ -485,3 +485,22 @@ func TestAnalyzeRefusesGeneratedInnerClassHidingGlobalClass(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalyzeRefusesConfiguredClassNameEqualToGeneratedInnerClass(t *testing.T) {
+	t.Parallel()
+
+	for _, className := range []string{"AddMethod", "GDTestControls"} {
+		t.Run(className, func(t *testing.T) {
+			t.Parallel()
+
+			entry := entryFor("inventory.gd")
+			entry.ClassName = className
+			_, diagnostics := analyzeEntry(t, map[string]string{
+				"src/inventory.gd": "extends RefCounted\n\nfunc add() -> int:\n\treturn 0\n",
+			}, entry)
+
+			require.Len(t, diagnostics, 1)
+			assert.Equal(t, "test_doubles class_name "+className+" collides with a class generated inside the double", diagnostics[0].Message)
+		})
+	}
+}

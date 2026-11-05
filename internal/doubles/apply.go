@@ -9,7 +9,6 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/cafecito-games/gdtest/internal/config"
 )
@@ -167,16 +166,17 @@ func inspectOutput(path string) ([]byte, bool, error) {
 	return content, true, nil
 }
 
-// aliasesDesired reports whether owned names the same file as a desired path
-// that differs from it only in case, as happens on case-insensitive
-// filesystems. Removing such a file would delete the freshly written output.
+// aliasesDesired reports whether owned names the same file as a differently
+// spelled desired path, as happens on case-insensitive filesystems or through a
+// directory symbolic link inside the project. Removing such a file would delete
+// the output that is still configured.
 func (index *Index) aliasesDesired(owned string, desired map[string][]byte) bool {
 	ownedInfo, err := os.Lstat(filepath.Join(index.root, filepath.FromSlash(owned)))
 	if err != nil {
 		return false
 	}
 	for relative := range desired {
-		if relative == owned || !strings.EqualFold(relative, owned) {
+		if relative == owned {
 			continue
 		}
 		desiredInfo, err := os.Lstat(filepath.Join(index.root, filepath.FromSlash(relative)))

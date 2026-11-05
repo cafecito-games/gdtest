@@ -90,6 +90,7 @@ type candidate struct {
 // analysis carries the chain and the diagnostics of one Analyze call.
 type analysis struct {
 	index       *Index
+	entry       config.TestDouble
 	chain       []*script
 	enumNames   map[string]bool
 	diagnostics []Diagnostic
@@ -125,7 +126,7 @@ func Analyze(index *Index, entry config.TestDouble) (Model, []Diagnostic) {
 		return model, diagnostics
 	}
 
-	state := &analysis{index: index, chain: chain, enumNames: make(map[string]bool)}
+	state := &analysis{index: index, entry: entry, chain: chain, enumNames: make(map[string]bool)}
 	for _, owner := range chain {
 		maps.Copy(state.enumNames, owner.enums)
 	}
@@ -322,6 +323,10 @@ func (state *analysis) checkMemberNames(controllers map[string]string) {
 	innerClasses := slices.Sorted(maps.Keys(controllers))
 	innerClasses = append(innerClasses, controlsClassName)
 	for _, name := range innerClasses {
+		if name == state.entry.ClassName {
+			state.diagnostics = append(state.diagnostics, Diagnostic{Path: config.Filename, Message: fmt.Sprintf(
+				"test_doubles class_name %s collides with a class generated inside the double", name)})
+		}
 		if global, exists := state.index.classes[name]; exists {
 			state.diagnostics = append(state.diagnostics, Diagnostic{Path: global.path, Message: fmt.Sprintf(
 				"class_name %s collides with a class generated inside the double", name)})
