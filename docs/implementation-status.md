@@ -13,7 +13,7 @@ blocked release work.
 | 3. Worktrees and scheduler | Verified | Canonical Git worktree identity, isolated sessions, fair bounded scheduling, four isolation policies, per-file concurrency, global worker bound, LRU/idle/run/age/memory recycling, and multi-worktree stress coverage. Each process has opaque private `user://` storage removed on exit; memory measurement failure conservatively recycles the worker. See ADR 0006. |
 | 4. Discovery and generations | Verified with ADR | Static and dynamic discovery, stable IDs/locations, selectors, dependency analysis, reusable parsed-AST/static/dependency/dynamic artifacts, authoritative reconciliation, stale events, and watch mode are implemented. Any source-generation change replaces the worker instead of attempting unverifiable in-process reload; see ADR 0005. Real Godot generation and dynamic-discovery tests pass. |
 | 5. Selection and migration | Verified | Engine-completed selection, dynamic-only files, path/directory/glob/name/focus selectors, conservative affected selection, and gdparser-span Vest migration with atomic writes and precise unsupported-context findings. Nested-class scope, nested SceneTree access, inherited-name warning annotations, migration goldens, a mechanically migrated real-Godot fixture, and the complete 682-file Uzir migration audit pass. |
-| 6. Hardening and packaging | In progress | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, and the specified performance corpora are implemented and verified. The remaining completion work is the final requirement-by-requirement audit and any gaps it exposes; Windows is explicitly deferred in ADR 0004. |
+| 6. Hardening and packaging | In progress | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, pinned Linux Godot end-to-end CI, and the specified performance corpora are implemented and verified. The remaining completion work is the final requirement-by-requirement audit and any gaps it exposes; Windows is explicitly deferred in ADR 0004. |
 
 All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 
@@ -108,6 +108,15 @@ Completed on 2026-11-05 for the current hardening batch:
   0.0.0-worker-pool-audit` pass after the bounded worker-pool and isolation changes. The package
   tests include reproducibility, exact slice reassembly, same-version runtime handshakes, and
   host-only, default `platforms = []`, and all-platform installations.
+- A pristine Linux arm64 container installed checksum-pinned stock Godot
+  `4.7.2.stable.official.ed1daf0bf` and passed the race-enabled integration, shared protocol, and
+  worker/API suites. It exposed and fixed a protocol-fixture dependency on a pre-existing global
+  class cache. The same container installed the checksum-pinned gpm 0.5.1 release binary and
+  passed `scripts/test-package-addon 0.0.0-linux-arm64-audit`, including execution of the packaged
+  Linux arm64 host binary. CI and release workflows now use those verified release installers;
+  the prior `go install` command produced `gpm version dev` and could not satisfy the packaging
+  version gate. The x86-64 installer paths independently verified both release-asset digests and
+  exact Godot/gpm version output under Linux emulation. `actionlint` also passes for both workflows.
 
 ## Uzir customer dogfood
 

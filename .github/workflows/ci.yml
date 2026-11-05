@@ -16,12 +16,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4
           install-only: true
       - name: Install gdkit
         run: go install github.com/cafecito-games/gdkit/cmd/gdkit@v0.10.0
+      - name: Install pinned Godot 4.7.2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfontconfig1
+          scripts/install-godot-linux-ci "$RUNNER_TEMP/godot-bin/godot"
+          echo "$RUNNER_TEMP/godot-bin" >> "$GITHUB_PATH"
       - name: Run canonical checks
         run: scripts/check
 
@@ -33,7 +39,15 @@ jobs:
         with:
           go-version: "1.26"
       - name: Install pinned gpm
-        run: go install github.com/cafecito-games/godot-package-manager/cmd/gpm@v0.5.1
+        run: |
+          scripts/install-gpm-linux-ci "$RUNNER_TEMP/gpm-bin/gpm"
+          echo "$RUNNER_TEMP/gpm-bin" >> "$GITHUB_PATH"
+      - name: Install pinned Godot 4.7.2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfontconfig1
+          scripts/install-godot-linux-ci "$RUNNER_TEMP/godot-bin/godot"
+          echo "$RUNNER_TEMP/godot-bin" >> "$GITHUB_PATH"
       - name: Verify staged release package
         run: |
           scripts/package-addon 0.0.0-ci

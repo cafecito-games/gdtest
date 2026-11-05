@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Install the exact stock Godot build used by Linux CI, with release-asset
+# identity verified before extraction.
+set -euo pipefail
+
+version="4.7.2-stable"
+destination="${1:-}"
+
+if [ -z "$destination" ] || [ $# -ne 1 ]; then
+	echo "usage: scripts/install-godot-linux-ci DESTINATION" >&2
+	exit 2
+fi
+if [ "$(uname -s)" != "Linux" ]; then
+	echo "install-godot-linux-ci only supports Linux" >&2
+	exit 2
+fi
+
+case "$(uname -m)" in
+	x86_64 | amd64)
+		architecture="x86_64"
+		sha256="cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4"
+		;;
+	aarch64 | arm64)
+		architecture="arm64"
+		sha256="5dd0d86405cf7e8adf79fb6377b38ba682a2846cb378ffe5364f38c01ad29b9d"
+		;;
+	*)
+		echo "unsupported Linux architecture: $(uname -m)" >&2
+		exit 2
+		;;
+esac
+
+asset="Godot_v${version}_linux.${architecture}.zip"
+url="https://github.com/godotengine/godot-builds/releases/download/${version}/${asset}"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+	--output "$work/$asset" "$url"
+printf '%s  %s\n' "$sha256" "$work/$asset" | sha256sum --check --status
+unzip -q "$work/$asset" -d "$work/extracted"
+
+binary="$work/extracted/Godot_v${version}_linux.${architecture}"
+if [ ! -f "$binary" ]; then
+	echo "Godot archive did not contain the expected binary: $binary" >&2
+	exit 1
+fi
+mkdir -p "$(dirname "$destination")"
+install -m 0755 "$binary" "$destination"
+
+actual_version=$("$destination" --headless --version 2>/dev/null)
+case "$actual_version" in
+	4.7.2.stable.*) ;;
+	*)
+		echo "installed Godot reported unexpected version: $actual_version" >&2
+		exit 1
+		;;
+esac
+printf 'installed %s (%s) at %s\n' "$actual_version" "$architecture" "$destination"

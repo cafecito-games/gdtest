@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Install the exact released gpm binary used by Linux packaging jobs.
+set -euo pipefail
+
+version="0.5.1"
+destination="${1:-}"
+
+if [ -z "$destination" ] || [ $# -ne 1 ]; then
+	echo "usage: scripts/install-gpm-linux-ci DESTINATION" >&2
+	exit 2
+fi
+if [ "$(uname -s)" != "Linux" ]; then
+	echo "install-gpm-linux-ci only supports Linux" >&2
+	exit 2
+fi
+
+case "$(uname -m)" in
+	x86_64 | amd64)
+		architecture="amd64"
+		sha256="beaba7bc7aa2d05dba09989530fda8240ca53ce2202a63c58f682a8de3527299"
+		;;
+	aarch64 | arm64)
+		architecture="arm64"
+		sha256="eb807f6326bf038cf7b2b23f80ef43724196eecb8cecd507e8b55019a448948a"
+		;;
+	*)
+		echo "unsupported Linux architecture: $(uname -m)" >&2
+		exit 2
+		;;
+esac
+
+asset="gpm_${version}_linux_${architecture}.tar.gz"
+url="https://github.com/cafecito-games/godot-package-manager/releases/download/v${version}/${asset}"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+	--output "$work/$asset" "$url"
+printf '%s  %s\n' "$sha256" "$work/$asset" | sha256sum --check --status
+mkdir -p "$work/extracted"
+tar -xzf "$work/$asset" -C "$work/extracted"
+
+binary="$work/extracted/gpm"
+if [ ! -f "$binary" ]; then
+	echo "gpm archive did not contain the expected binary: $binary" >&2
+	exit 1
+fi
+mkdir -p "$(dirname "$destination")"
+install -m 0755 "$binary" "$destination"
+
+actual_version=$("$destination" --version)
+if [ "$actual_version" != "gpm version $version" ]; then
+	echo "installed gpm reported unexpected version: $actual_version" >&2
+	exit 1
+fi
+printf 'installed %s (%s) at %s\n' "$actual_version" "$architecture" "$destination"
