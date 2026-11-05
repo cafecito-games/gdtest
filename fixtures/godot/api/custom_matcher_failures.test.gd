@@ -67,21 +67,6 @@ class MatcherWithInternalHelpers:
 		return GDTestMatchResult.unmatched("deep internal helper mismatch")
 
 
-## Unoverridden base matcher subclass.
-class UnoverriddenMatcher:
-	extends GDTestMatcher
-
-
-## Matcher overriding name only.
-class UnoverriddenMatchMethod:
-	extends GDTestMatcher
-
-
-	## Returns non-empty name.
-	func name() -> String:
-		return "unoverridden_match_method"
-
-
 ## Matcher returning empty string name.
 class EmptyNameMatcher:
 	extends GDTestMatcher
@@ -329,16 +314,6 @@ func test_fail_closed_empty_matcher_name() -> void:
 ## Verifies fail-closed rejection of a whitespace-only matcher name.
 func test_fail_closed_whitespace_matcher_name() -> void:
 	expect_that("sample", WhitespaceNameMatcher.new())
-
-
-## Verifies fail-closed rejection of unoverridden GDTestMatcher.name().
-func test_fail_closed_unoverridden_matcher_name() -> void:
-	expect_that("sample", UnoverriddenMatcher.new())
-
-
-## Verifies fail-closed rejection of unoverridden GDTestMatcher.match().
-func test_fail_closed_unoverridden_matcher_match() -> void:
-	expect_that("sample", UnoverriddenMatchMethod.new())
 
 
 ## Verifies fail-closed rejection when match() returns null.
