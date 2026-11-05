@@ -252,3 +252,73 @@ func TestCollectorFoldsCustomMatcherAssertionFailures(t *testing.T) {
 	assert.Equal(t, "matches_threshold", caseResult.Failures[3].Assertion)
 	assert.Equal(t, "inventory limit: count exceeds maximum", caseResult.Failures[3].Message)
 }
+
+func TestCollectorFoldsCaseWarningsWithoutFailingCaseOrRun(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollector()
+	events := []model.Event{
+		{Type: model.EventRunStarted, RunID: "run"},
+		{Type: model.EventCaseStarted, RunID: "run", TestID: "suite.test.gd::test_warns", Name: "Warns"},
+		{
+			Type:      model.EventCaseWarning,
+			RunID:     "run",
+			TestID:    "suite.test.gd::test_warns",
+			Assertion: "leak",
+			Message:   `leaked 1 node: orphan Node "Enemy"`,
+			Location:  &model.Location{File: "suite.test.gd", Line: 8},
+		},
+		{Type: model.EventCaseFinished, RunID: "run", TestID: "suite.test.gd::test_warns", Status: "pass"},
+		{
+			Type:      model.EventCaseWarning,
+			RunID:     "run",
+			Assertion: "leak",
+			Message:   "`before_all`/`after_all` leaked 1 node: orphan Node \"Shared\"",
+			Location:  &model.Location{File: "suite.test.gd", Line: 1},
+		},
+		{Type: model.EventRunFinished, RunID: "run", Status: "pass"},
+	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+	summary := collector.Summary()
+	assert.Equal(t, 1, summary.Passed)
+	assert.Equal(t, 0, summary.Failed)
+	assert.False(t, summary.HasFailures())
+	require.Len(t, summary.Cases, 1)
+	require.Len(t, summary.Cases[0].Warnings, 1)
+	assert.Equal(t, "leak", summary.Cases[0].Warnings[0].Assertion)
+	require.Len(t, summary.Warnings, 1)
+	assert.Contains(t, summary.Warnings[0].Message, "`before_all`/`after_all`")
+}
+
+func TestCollectorFoldsSuiteAndFileLeakFailuresWithoutCreatingEmptyCase(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollector()
+	events := []model.Event{
+		{Type: model.EventRunStarted, RunID: "run"},
+		{Type: model.EventCaseStarted, RunID: "run", TestID: "suite.test.gd::test_ok", Name: "Ok"},
+		{Type: model.EventCaseFinished, RunID: "run", TestID: "suite.test.gd::test_ok", Status: "pass"},
+		{
+			Type:      model.EventAssertionFail,
+			RunID:     "run",
+			Assertion: "leak",
+			Message:   "`before_suite`/`after_suite` of suite `Inventory` leaked 1 node: orphan Node \"Slot\"",
+			Location:  &model.Location{File: "suite.test.gd", Line: 4},
+		},
+		{Type: model.EventRunFinished, RunID: "run", Status: "fail"},
+	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+	summary := collector.Summary()
+	assert.Equal(t, 1, summary.Passed)
+	assert.Equal(t, 1, summary.Failed)
+	assert.True(t, summary.HasFailures())
+	assert.False(t, summary.HasInfrastructureFailure())
+	require.Len(t, summary.Cases, 1)
+	assert.Equal(t, "suite.test.gd::test_ok", summary.Cases[0].ID)
+	require.Len(t, summary.Failures, 1)
+	assert.Equal(t, "leak", summary.Failures[0].Assertion)
+}

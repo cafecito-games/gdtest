@@ -53,10 +53,9 @@ func NewTerminalWithOptions(writer io.Writer, verbose bool) *Terminal {
 func (r *Terminal) Emit(event model.Event) error {
 	switch event.Type {
 	case model.EventAssertionFail:
-		location := formatLocation(event.Location)
-		details := diagnosticValues(event)
-		_, err := fmt.Fprintf(r.writer, "FAIL %s%s: %s%s\n", event.TestID, location, event.Message, details)
-		return err
+		return r.writeDiagnostic("FAIL", event)
+	case model.EventCaseWarning:
+		return r.writeDiagnostic("WARN", event)
 	case model.EventOutput:
 		if r.verbose {
 			return r.writeOutput(event)
@@ -88,6 +87,25 @@ func (r *Terminal) Emit(event model.Event) error {
 	default:
 		return nil
 	}
+}
+
+func (r *Terminal) writeDiagnostic(prefix string, event model.Event) error {
+	details := diagnosticValues(event)
+	target := formatDiagnosticTarget(event.TestID, event.Location)
+	if target == "" {
+		_, err := fmt.Fprintf(r.writer, "%s: %s%s\n", prefix, event.Message, details)
+		return err
+	}
+	_, err := fmt.Fprintf(r.writer, "%s %s: %s%s\n", prefix, target, event.Message, details)
+	return err
+}
+
+func formatDiagnosticTarget(testID string, location *model.Location) string {
+	formattedLocation := formatLocation(location)
+	if testID != "" {
+		return testID + formattedLocation
+	}
+	return strings.TrimPrefix(formattedLocation, " ")
 }
 
 func formatLocation(location *model.Location) string {

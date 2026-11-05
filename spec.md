@@ -312,7 +312,11 @@ The initial schema should cover:
   "warm_workers": 1,
   "worker_idle_timeout": "2m",
   "worker_max_runs": 100,
-  "only_mode": "auto"
+  "only_mode": "auto",
+  "leak_check": {
+    "policy": "fail",
+    "ignore": []
+  }
 }
 ```
 
@@ -341,6 +345,26 @@ doubles` owns. It is an array of strict entries:
 Paths must be clean, forward-slashed, project-relative paths without a `..`
 segment. Unknown fields are rejected, and every validation error names the entry
 index. Section 14.7 of `api-spec.md` defines the generated contract.
+
+`leak_check` configures post-scope `Node` leak detection on workers:
+
+```json
+"leak_check": {
+  "policy": "fail",
+  "ignore": ["res://ui/toast_layer.gd", "Timer"]
+}
+```
+
+- `policy` (optional; defaults to `"fail"` when omitted) must be `"fail"`,
+  `"warn"`, or `"off"`.
+- `ignore` (optional) is an array of unique clean `res://...gd` script paths or
+  valid GDScript identifiers (`^[A-Za-z_][A-Za-z0-9_]*$`). Absolute paths,
+  parent segments, whitespace-padded entries, duplicates, unknown fields, and
+  `null` or non-object values are rejected at load time.
+
+The backend-neutral `TestPlan` carries `leak_check` into worker execution and
+plan-affecting cache identities. Section 14.10 of `api-spec.md` defines the
+runtime semantics.
 
 User-level configuration may set global maximum workers, memory budget,
 logging, and default Godot resolution. Project configuration must not be able
@@ -558,7 +582,8 @@ The daemon opens a loopback listener on an ephemeral port. Each worker gets a
 cryptographically random one-time authentication token. The first worker
 message must authenticate and complete a versioned handshake containing:
 
-- Worker protocol version.
+- Worker protocol version (version 3, synchronized across `model.ProtocolVersion`,
+  `protocol.Version`, `daemon.ProtocolVersion`, and `addons/gdtest/version.gd`).
 - gdtest runtime version.
 - Godot version and build information.
 - Canonical project path.
@@ -591,6 +616,7 @@ Workers stream immutable events:
 - `suite_started`
 - `case_started`
 - `assertion_failed`
+- `case_warning`
 - `output`
 - `case_finished`
 - `suite_finished`
@@ -600,6 +626,17 @@ Workers stream immutable events:
 
 The worker must never send the complete accumulated result tree after every
 case. The Go side folds events into reports once.
+
+At the end of every case, suite, and file scope that completes without timeout
+or cancellation, the worker runs the closing hook, frees `autofree`
+registrations in reverse order, awaits one `SceneTree.process_frame` so pending
+`queue_free()` deletions drain, and compares `Node.get_orphan_node_ids()` plus a
+full `SceneTree.root` walk against the scope's opening baseline. Under
+`policy: "fail"`, un-ignored leaks emit `assertion_failed` (`assertion: "leak"`,
+omitting `test_id` for suite and file scopes) and fail the case or file; under
+`policy: "warn"`, they emit `case_warning` without changing pass/fail status.
+Timed-out and canceled scopes skip `autofree` release, the frame drain, and the
+leak check before tainting and retiring the worker.
 
 ### 11.3 Wire values
 

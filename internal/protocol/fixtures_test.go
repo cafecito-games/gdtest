@@ -14,6 +14,7 @@ import (
 func TestLanguageNeutralFixturesDecode(t *testing.T) {
 	t.Parallel()
 
+	assert.Equal(t, 3, Version)
 	for _, name := range []string{"worker-handshake.jsonl", "run-events.jsonl", "benchmark-events.jsonl"} {
 		name := name
 		t.Run(name, func(t *testing.T) {

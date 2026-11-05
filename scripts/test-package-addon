@@ -187,6 +187,8 @@ func test_packaged_handshake() -> void:
 	probe.callback().call("ready")
 	expect_equal(probe.invocation_count(), 1)
 	expect_equal(probe.arguments_at(0), ["ready"])
+	var fixture_node: Node = autofree(Node.new())
+	expect_not_null(fixture_node)
 	expect_that("sample", AlwaysMatches.new())
 EOF
 	import_output=$(godot --headless --editor --path "$host_project" --quit 2>&1) \

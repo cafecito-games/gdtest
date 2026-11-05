@@ -16,7 +16,7 @@ import (
 )
 
 // ProtocolVersion is the client-to-daemon JSONL protocol version.
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 
 var safeBuildID = regexp.MustCompile(`\A[a-zA-Z0-9._-]+\z`)
 

@@ -291,3 +291,84 @@ func TestJSONLPrintsCustomMatcherFailures(t *testing.T) {
 	assert.Equal(t, "predicate_check", third["assertion"])
 	assert.Nil(t, third["expected"])
 }
+
+func TestTerminalRendersCaseWarningsAndSuiteLeakFailures(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	terminal := NewTerminal(&output)
+	require.NoError(t, terminal.Emit(model.Event{
+		Type:      model.EventCaseWarning,
+		TestID:    "tests/hud.test.gd::test_toast",
+		Assertion: "leak",
+		Message:   `leaked 1 node: stray Control "/root/Toast"`,
+		Location:  &model.Location{File: "tests/hud.test.gd", Line: 12},
+	}))
+	require.NoError(t, terminal.Emit(model.Event{
+		Type:     model.EventCaseFinished,
+		TestID:   "tests/hud.test.gd::test_toast",
+		Status:   "pass",
+		Messages: []string{"quiet on pass"},
+	}))
+	require.NoError(t, terminal.Emit(model.Event{
+		Type:      model.EventAssertionFail,
+		Assertion: "leak",
+		Message:   "`before_suite`/`after_suite` of suite `Inventory` leaked 1 node: orphan Node \"Slot\"",
+		Location:  &model.Location{File: "tests/inventory.test.gd", Line: 4},
+	}))
+
+	assert.Equal(
+		t,
+		"WARN tests/hud.test.gd::test_toast (tests/hud.test.gd:12): leaked 1 node: stray Control \"/root/Toast\"\n"+
+			"FAIL (tests/inventory.test.gd:4): `before_suite`/`after_suite` of suite `Inventory` leaked 1 node: orphan Node \"Slot\"\n",
+		output.String(),
+	)
+}
+
+func TestJSONLStreamsCaseWarningAndLeakFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	machine := NewJSONL(&output)
+	require.NoError(t, machine.Emit(model.Event{
+		ProtocolVersion: model.ProtocolVersion,
+		Type:            model.EventCaseWarning,
+		RunID:           "run-1",
+		TestID:          "tests/hud.test.gd::test_toast",
+		Assertion:       "leak",
+		Message:         `leaked 21 nodes: orphan Node "N0", and 1 more`,
+		Location:        &model.Location{File: "tests/hud.test.gd", Line: 12},
+		Metadata: map[string]any{
+			"leaks": []map[string]any{{
+				"kind":        "orphan",
+				"class":       "Node",
+				"name":        "N0",
+				"script":      "",
+				"path":        "",
+				"descendants": 0,
+			}},
+			"omitted": 1,
+		},
+	}))
+
+	assert.JSONEq(t, `{
+		"protocol_version": 3,
+		"type": "case_warning",
+		"run_id": "run-1",
+		"test_id": "tests/hud.test.gd::test_toast",
+		"assertion": "leak",
+		"message": "leaked 21 nodes: orphan Node \"N0\", and 1 more",
+		"location": {"file": "tests/hud.test.gd", "line": 12},
+		"metadata": {
+			"leaks": [{
+				"kind": "orphan",
+				"class": "Node",
+				"name": "N0",
+				"script": "",
+				"path": "",
+				"descendants": 0
+			}],
+			"omitted": 1
+		}
+	}`, output.String())
+}

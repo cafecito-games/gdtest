@@ -2,6 +2,8 @@
 class_name GDTest
 extends RefCounted
 
+## Internal scope-stacked autofree registry.
+const AutofreeRegistry: GDScript = preload("res://addons/gdtest/autofree_registry.gd")
 ## Internal shared case-scoped probe ledger.
 const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
 const _STATUS_RANK: Dictionary[String, int] = {
@@ -50,6 +52,7 @@ var _gdtest_callback_probes: Array[GDTestCallbackProbe] = []
 var _gdtest_probe_context: RefCounted = null
 var _gdtest_outside_probe_context: RefCounted = null
 var _gdtest_double_context: GDTestDoubleContext = null
+var _gdtest_autofree: RefCounted = AutofreeRegistry.new()
 var _gdtest_sequence: int = 0
 
 
@@ -71,7 +74,7 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 	var sibling_ordinal: int = _gdtest_suite_ordinals.get(sibling_key, 0)
 	_gdtest_suite_ordinals[sibling_key] = sibling_ordinal + 1
 	var delimiter: String = "/" if not parent_id.is_empty() else ""
-	var encoded_name: String = _encode_component(name)
+	var encoded_name: String = ProbeLedger.encode_component(name)
 	var suite_id: String = parent_id + delimiter + encoded_name + "@" + str(sibling_ordinal)
 	var info := GDTestSuiteInfo.new(
 			suite_id,
@@ -147,7 +150,7 @@ func test_each(
 				continue
 			rows[parameter_name] = dictionary[key]
 			names.append(parameter_name)
-		names.sort_custom(_utf8_less)
+		names.sort_custom(ProbeLedger.utf8_less)
 		for parameter_name: String in names:
 			_register_dynamic_row(
 					description,
@@ -199,40 +202,16 @@ func expect_false(condition: bool, message: String = "") -> void:
 
 ## Records equality using directional `actual.equals(expected)` when available.
 func expect_equal(actual: Variant, expected: Variant, message: String = "") -> void:
-	var equal: Variant
-	if actual is Object and is_instance_valid(actual) and actual.has_method("equals"):
-		equal = actual.call("equals", expected)
-		if not equal is bool:
-			_record_failure(
-					"expect_equal",
-					_framework_message(message, "equals() must return bool"),
-					actual,
-					expected,
-					true
-			)
-			return
-	else:
-		equal = actual == expected
-	_record_assertion(bool(equal), "expect_equal", message, actual, expected, true)
+	var equal: Variant = _directional_equal(actual, expected, "expect_equal", message)
+	if equal is bool:
+		_record_assertion(equal, "expect_equal", message, actual, expected, true)
 
 
 ## Records inequality using the inverse of directional equality.
 func expect_not_equal(actual: Variant, expected: Variant, message: String = "") -> void:
-	var equal: Variant
-	if actual is Object and is_instance_valid(actual) and actual.has_method("equals"):
-		equal = actual.call("equals", expected)
-		if not equal is bool:
-			_record_failure(
-					"expect_not_equal",
-					_framework_message(message, "equals() must return bool"),
-					actual,
-					expected,
-					true
-			)
-			return
-	else:
-		equal = actual == expected
-	_record_assertion(not bool(equal), "expect_not_equal", message, actual, expected, true)
+	var equal: Variant = _directional_equal(actual, expected, "expect_not_equal", message)
+	if equal is bool:
+		_record_assertion(not equal, "expect_not_equal", message, actual, expected, true)
 
 
 ## Records an identity assertion using Godot `is_same` semantics.
@@ -259,13 +238,7 @@ func expect_approx(
 		tolerance: float = 0.00001,
 		message: String = ""
 ) -> void:
-	if not _valid_tolerance(tolerance, "expect_approx", message):
-		return
-	var matches: bool = actual == expected if (
-			not is_finite(actual)
-			or not is_finite(expected)
-	) else absf(actual - expected) <= tolerance
-	_record_assertion(matches, "expect_approx", message, actual, expected, true)
+	_assert_approx(actual, expected, tolerance, false, "expect_approx", message)
 
 
 ## Records the inverse of an absolute-tolerance numeric assertion.
@@ -275,13 +248,7 @@ func expect_not_approx(
 		tolerance: float = 0.00001,
 		message: String = ""
 ) -> void:
-	if not _valid_tolerance(tolerance, "expect_not_approx", message):
-		return
-	var matches: bool = actual == expected if (
-			not is_finite(actual)
-			or not is_finite(expected)
-	) else absf(actual - expected) <= tolerance
-	_record_assertion(not matches, "expect_not_approx", message, actual, expected, true)
+	_assert_approx(actual, expected, tolerance, true, "expect_not_approx", message)
 
 
 ## Records that a value is null.
@@ -296,69 +263,22 @@ func expect_not_null(value: Variant, message: String = "") -> void:
 
 ## Records that a supported value is empty.
 func expect_empty(value: Variant, message: String = "") -> void:
-	var result: Dictionary[String, Variant] = _is_empty_value(value)
-	if not bool(result["supported"]):
-		_record_failure(
-				"expect_empty",
-				_framework_message(message, str(result["error"])),
-				value,
-				null,
-				false
-		)
-		return
-	_record_assertion(bool(result["value"]), "expect_empty", message, value, null, false)
+	_assert_emptiness(value, false, "expect_empty", message)
 
 
 ## Records that a supported value is not empty.
 func expect_not_empty(value: Variant, message: String = "") -> void:
-	var result: Dictionary[String, Variant] = _is_empty_value(value)
-	if not bool(result["supported"]):
-		_record_failure(
-				"expect_not_empty",
-				_framework_message(message, str(result["error"])),
-				value,
-				null,
-				false
-		)
-		return
-	_record_assertion(not bool(result["value"]), "expect_not_empty", message, value, null, false)
+	_assert_emptiness(value, true, "expect_not_empty", message)
 
 
 ## Records that a supported collection or string contains an item.
 func expect_contains(value: Variant, item: Variant, message: String = "") -> void:
-	var result: Dictionary[String, Variant] = _contains_value(value, item)
-	if not bool(result["supported"]):
-		_record_failure(
-				"expect_contains",
-				_framework_message(message, str(result["error"])),
-				value,
-				item,
-				true
-		)
-		return
-	_record_assertion(bool(result["value"]), "expect_contains", message, value, item, true)
+	_assert_containment(value, item, false, "expect_contains", message)
 
 
 ## Records that a supported collection or string does not contain an item.
 func expect_does_not_contain(value: Variant, item: Variant, message: String = "") -> void:
-	var result: Dictionary[String, Variant] = _contains_value(value, item)
-	if not bool(result["supported"]):
-		_record_failure(
-				"expect_does_not_contain",
-				_framework_message(message, str(result["error"])),
-				value,
-				item,
-				true
-		)
-		return
-	_record_assertion(
-			not bool(result["value"]),
-			"expect_does_not_contain",
-			message,
-			value,
-			item,
-			true
-	)
+	_assert_containment(value, item, true, "expect_does_not_contain", message)
 
 
 ## Evaluates `actual` with `matcher` and records an assertion.
@@ -535,6 +455,20 @@ func double_context() -> GDTestDoubleContext:
 	return _gdtest_double_context
 
 
+## Registers `node` to be freed when the current case, suite, or file scope ends.
+func autofree(node: Node) -> Node:
+	if _gdtest_registration_active or not _gdtest_autofree.has_active_scope():
+		_record_framework_error(
+				"autofree is only valid while a test file, suite, or case scope is executing"
+		)
+		return node if node != null and is_instance_valid(node) else null
+	if node == null or not is_instance_valid(node):
+		_record_framework_error("autofree requires a valid Node instance")
+		return null
+	_gdtest_autofree.register(node)
+	return node
+
+
 func _gdtest_configure(tree: SceneTree, file: String, failure_sink: Callable) -> void:
 	_gdtest_tree = tree
 	_gdtest_file = file
@@ -557,7 +491,7 @@ func _gdtest_begin_registration() -> void:
 func _gdtest_finish_registration() -> void:
 	for definition_value: Variant in _gdtest_definition_roots:
 		if definition_value is Dictionary:
-			await _gdtest_run_definition(_string_dictionary(definition_value))
+			await _gdtest_run_definition(ProbeLedger.string_dictionary(definition_value))
 	_gdtest_definition_roots.clear()
 	_gdtest_suite_stack.clear()
 	_gdtest_active_definition.clear()
@@ -577,7 +511,7 @@ func _gdtest_run_definition(definition: Dictionary[String, Variant]) -> void:
 	if children is Array:
 		for child_value: Variant in children:
 			if child_value is Dictionary:
-				await _gdtest_run_definition(_string_dictionary(child_value))
+				await _gdtest_run_definition(ProbeLedger.string_dictionary(child_value))
 	_gdtest_active_definition = previous
 
 
@@ -595,6 +529,10 @@ func _gdtest_drain_discovery_errors() -> Array[Variant]:
 	return drained
 
 
+func _gdtest_autofree_registry() -> RefCounted:
+	return _gdtest_autofree
+
+
 func _gdtest_begin_case() -> void:
 	_gdtest_case_active = true
 	_gdtest_status = "void"
@@ -607,14 +545,28 @@ func _gdtest_begin_case() -> void:
 	_gdtest_callback_probes.clear()
 	_gdtest_probe_context = null
 	_gdtest_double_context = null
+	_gdtest_autofree.push_scope()
 
 
-func _gdtest_end_case() -> Dictionary[String, Variant]:
-	_gdtest_release_signal_probes()
-	_gdtest_release_callback_probes()
-	_gdtest_release_double_context()
-	_gdtest_release_probe_context()
+func _gdtest_end_case(leak_checker: Callable = Callable()) -> Dictionary[String, Variant]:
+	_gdtest_autofree.begin_closing()
+	_gdtest_release_case_probes()
+	await _gdtest_autofree.release_and_drain(_gdtest_tree)
+	if leak_checker.is_valid():
+		leak_checker.call()
+	_gdtest_autofree.end_closing()
 	_gdtest_case_active = false
+	return _gdtest_case_result()
+
+
+func _gdtest_end_case_aborted() -> Dictionary[String, Variant]:
+	_gdtest_release_case_probes()
+	_gdtest_autofree.discard_current_scope()
+	_gdtest_case_active = false
+	return _gdtest_case_result()
+
+
+func _gdtest_case_result() -> Dictionary[String, Variant]:
 	return {
 		"status": _gdtest_status,
 		"assertions": _gdtest_assertions,
@@ -622,6 +574,24 @@ func _gdtest_end_case() -> Dictionary[String, Variant]:
 		"messages": _gdtest_messages.duplicate(),
 		"outcomes": _gdtest_outcome_data.duplicate(true),
 	}
+
+
+func _gdtest_record_leak_failure(
+		text: String,
+		file: String,
+		line: int,
+		metadata: Dictionary[String, Variant]
+) -> void:
+	_promote_status("fail")
+	var diagnostic: Dictionary[String, Variant] = {
+		"assertion": "leak",
+		"message": text,
+		"omit_actual": true,
+		"location": { "file": file, "line": line },
+		"metadata": metadata,
+	}
+	_gdtest_failures.append(diagnostic)
+	_emit_failure(diagnostic)
 
 
 func _gdtest_has_error() -> bool:
@@ -697,7 +667,7 @@ func _register_dynamic_case(
 	_gdtest_case_ordinals[line] = ordinal + 1
 	var full_name: Array[String] = suite_path.duplicate()
 	full_name.append(description)
-	var encoded_name: String = "/".join(full_name.map(_encode_component))
+	var encoded_name: String = "/".join(full_name.map(ProbeLedger.encode_component))
 	var case_id: String = _gdtest_file.trim_prefix(
 			"res://"
 	) + "::dynamic@%d:%d[%s]" % [line, ordinal, encoded_name]
@@ -816,6 +786,27 @@ func _record_outcome_data(kind: String, text: String, data: Dictionary[String, V
 	_gdtest_outcome_data.append({ "kind": kind, "message": text, "data": data.duplicate(true) })
 
 
+func _directional_equal(
+		actual: Variant,
+		expected: Variant,
+		assertion: String,
+		custom_message: String
+) -> Variant:
+	if actual is Object and is_instance_valid(actual) and actual.has_method("equals"):
+		var equal: Variant = actual.call("equals", expected)
+		if not equal is bool:
+			_record_failure(
+					assertion,
+					_framework_message(custom_message, "equals() must return bool"),
+					actual,
+					expected,
+					true
+			)
+			return null
+		return equal
+	return actual == expected
+
+
 func _valid_tolerance(tolerance: float, assertion: String, custom_message: String) -> bool:
 	if is_finite(tolerance) and tolerance >= 0.0:
 		return true
@@ -827,6 +818,71 @@ func _valid_tolerance(tolerance: float, assertion: String, custom_message: Strin
 			true
 	)
 	return false
+
+
+func _assert_approx(
+		actual: float,
+		expected: float,
+		tolerance: float,
+		negated: bool,
+		assertion: String,
+		custom_message: String
+) -> void:
+	if not _valid_tolerance(tolerance, assertion, custom_message):
+		return
+	var matches: bool = actual == expected if (
+			not is_finite(actual)
+			or not is_finite(expected)
+	) else absf(actual - expected) <= tolerance
+	_record_assertion(
+			not matches if negated else matches,
+			assertion,
+			custom_message,
+			actual,
+			expected,
+			true
+	)
+
+
+func _assert_emptiness(
+		value: Variant,
+		negated: bool,
+		assertion: String,
+		custom_message: String
+) -> void:
+	var result: Dictionary[String, Variant] = _is_empty_value(value)
+	if not bool(result["supported"]):
+		_record_failure(
+				assertion,
+				_framework_message(custom_message, str(result["error"])),
+				value,
+				null,
+				false
+		)
+		return
+	var matched: bool = not bool(result["value"]) if negated else bool(result["value"])
+	_record_assertion(matched, assertion, custom_message, value, null, false)
+
+
+func _assert_containment(
+		value: Variant,
+		item: Variant,
+		negated: bool,
+		assertion: String,
+		custom_message: String
+) -> void:
+	var result: Dictionary[String, Variant] = _contains_value(value, item)
+	if not bool(result["supported"]):
+		_record_failure(
+				assertion,
+				_framework_message(custom_message, str(result["error"])),
+				value,
+				item,
+				true
+		)
+		return
+	var matched: bool = not bool(result["value"]) if negated else bool(result["value"])
+	_record_assertion(matched, assertion, custom_message, value, item, true)
 
 
 func _is_empty_value(value: Variant) -> Dictionary[String, Variant]:
@@ -889,32 +945,27 @@ func _ensure_outside_probe_context() -> RefCounted:
 	return _gdtest_outside_probe_context
 
 
-func _gdtest_release_signal_probes() -> void:
+func _gdtest_release_case_probes() -> void:
 	for probe: GDTestSignalProbe in _gdtest_signal_probes:
 		probe.stop_recording()
 	_gdtest_signal_probes.clear()
-
-
-func _gdtest_release_callback_probes() -> void:
 	for probe: GDTestCallbackProbe in _gdtest_callback_probes:
 		probe.close()
 	_gdtest_callback_probes.clear()
-
-
-func _gdtest_release_probe_context() -> void:
+	if _gdtest_double_context != null:
+		_gdtest_double_context.close()
+	_gdtest_double_context = null
 	if _gdtest_probe_context != null:
 		_gdtest_probe_context.detach()
 	_gdtest_probe_context = null
 
 
 func _gdtest_dispose() -> void:
-	_gdtest_release_signal_probes()
-	_gdtest_release_callback_probes()
-	_gdtest_release_double_context()
-	_gdtest_release_probe_context()
+	_gdtest_release_case_probes()
 	if _gdtest_outside_probe_context != null:
 		_gdtest_outside_probe_context.detach()
 	_gdtest_outside_probe_context = null
+	_gdtest_autofree.clear()
 	_gdtest_dynamic_cases.clear()
 	_gdtest_dynamic_suites.clear()
 	_gdtest_definition_roots.clear()
@@ -922,12 +973,6 @@ func _gdtest_dispose() -> void:
 	_gdtest_suite_stack.clear()
 	_gdtest_failure_sink = Callable()
 	_gdtest_tree = null
-
-
-func _gdtest_release_double_context() -> void:
-	if _gdtest_double_context != null:
-		_gdtest_double_context.close()
-	_gdtest_double_context = null
 
 
 func _report_probe_error(text: String, location: Dictionary[String, Variant]) -> void:
@@ -944,44 +989,8 @@ func _report_probe_error(text: String, location: Dictionary[String, Variant]) ->
 func _user_location() -> Dictionary[String, Variant]:
 	var stack: Array[Variant] = get_stack()
 	for frame_value: Variant in stack:
-		var frame: Dictionary[String, Variant] = _string_dictionary(frame_value)
+		var frame: Dictionary[String, Variant] = ProbeLedger.string_dictionary(frame_value)
 		var source: String = str(frame.get("source", ""))
 		if not source.begins_with("res://addons/gdtest/"):
 			return { "file": source, "line": int(frame.get("line", -1)) }
 	return { "file": _gdtest_file, "line": -1 }
-
-
-func _encode_component(value: Variant) -> String:
-	var bytes: PackedByteArray = str(value).to_utf8_buffer()
-	var result: String = ""
-	for byte: int in bytes:
-		var character: String = String.chr(byte)
-		if (
-				byte >= 65 and byte <= 90
-				or byte >= 97 and byte <= 122
-				or byte >= 48 and byte <= 57
-				or character in ["-", ".", "_", "~"]
-		):
-			result += character
-		else:
-			result += "%%%02X" % byte
-	return result
-
-
-func _utf8_less(left: String, right: String) -> bool:
-	var left_bytes: PackedByteArray = left.to_utf8_buffer()
-	var right_bytes: PackedByteArray = right.to_utf8_buffer()
-	var shared_size: int = mini(left_bytes.size(), right_bytes.size())
-	for index: int in range(shared_size):
-		if left_bytes[index] != right_bytes[index]:
-			return left_bytes[index] < right_bytes[index]
-	return left_bytes.size() < right_bytes.size()
-
-
-func _string_dictionary(value: Variant) -> Dictionary[String, Variant]:
-	var result: Dictionary[String, Variant] = {}
-	if not value is Dictionary:
-		return result
-	for key: Variant in value:
-		result[str(key)] = value[key]
-	return result

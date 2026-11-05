@@ -56,7 +56,6 @@ func _execute(
 	elif instance.has_method("after_each"):
 		await instance.callv(&"after_each", [info])
 	finished = true
-	finish_capture()
 
 
 func _emit_marker(phase: String) -> void:

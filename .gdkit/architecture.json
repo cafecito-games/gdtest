@@ -14,11 +14,13 @@
     {"pattern": "addons/gdtest/gdtest_double_method.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/gdtest_callback_probe.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/gdtest_signal_probe.gd", "layer": "api", "feature": "runtime"},
+    {"pattern": "addons/gdtest/autofree_registry.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/probe_ledger.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/version.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/protocol.gd", "layer": "transport", "feature": "runtime"},
     {"pattern": "addons/gdtest/worker.gd", "layer": "worker", "feature": "runtime"},
     {"pattern": "addons/gdtest/worker_case_task.gd", "layer": "worker", "feature": "runtime"},
+    {"pattern": "addons/gdtest/worker_leak_tracker.gd", "layer": "worker", "feature": "runtime"},
     {"pattern": "addons/gdtest/worker_benchmark_task.gd", "layer": "worker", "feature": "runtime"},
     {"pattern": "addons/gdtest/worker_benchmark_runner.gd", "layer": "worker", "feature": "runtime"},
     {"pattern": "addons/gdtest/launcher.gd", "layer": "launcher", "feature": "runtime"}

@@ -60,3 +60,24 @@ The customer run also verifies behavior that a microbenchmark cannot: initial pr
 finishes before concurrent lanes start, every lane has isolated `user://` storage, reset restores
 the startup audio-bus layout, and all worker data leaves are removed when the daemon stops. These
 wall-clock figures are local evidence, not release thresholds.
+
+## Scoped autofree and leak-detection overhead
+
+On 2026-11-05, `scripts/benchmark` ran back to back before and after adding scoped `autofree`, the
+per-scope one-frame `queue_free()` drain, and post-scope orphan/`SceneTree` leak detection (ADR
+0010) on an AMD Ryzen 7 PRO 8845HS (`linux/amd64`, Go 1.26.9, Godot 4.7.2 Cafecito):
+
+| Corpus | Items | Before median (p95) | After median (p95) |
+| --- | ---: | ---: | ---: |
+| Ready-daemon client request | 1 | 0.110 ms (0.470 ms) | 0.119 ms (0.365 ms) |
+| Warm direct daemon/worker request | 1 | 55.17 ms (55.94 ms) | 55.19 ms (55.49 ms) |
+| Warm complete Cobra CLI invocation | 1 | 75.87 ms (76.64 ms) | 75.85 ms (76.76 ms) |
+| Dynamic discovery | 10,000 | 315.45 ms (317.00 ms) | 315.76 ms (318.58 ms) |
+| Passing assertions (single case) | 10,000 | 54.94 ms (55.90 ms) | 54.77 ms (55.73 ms) |
+| Dynamic case execution | 10,000 | 759.33 ms (796.04 ms) | 69,258.50 ms (69,299.06 ms) |
+
+Parser, case/deep-suite serialization, rich-failure folding, scheduler, discovery, assertion, and
+single-file warm-daemon latencies are unchanged within host noise. The 10,000-case execution corpus
+reflects one `await SceneTree.process_frame` yield per completed case (~6.92 ms per case under
+Godot's default headless frame cadence) required to drain deferred `queue_free()` deletions before
+the post-scope leak check runs.

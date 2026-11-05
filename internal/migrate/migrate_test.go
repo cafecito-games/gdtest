@@ -753,13 +753,15 @@ func callback_probe() -> void:
 
 func test_conflicts() -> void:
 	var double_context := 1
-	expect_equal(double_context, 1)
+	var autofree := 2
+	expect_equal(double_context + autofree, 3)
 `)
 	result, err := Transform("tests/probe_conflicts.test.gd", source)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		"rewrite.base-class",
 		"unsupported.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
 		"rewrite.inherited-name-conflict",
 	}, findingCodes(result.Findings))
 	assert.Contains(t, string(result.Output), `@warning_ignore("shadowed_variable_base_class")`)

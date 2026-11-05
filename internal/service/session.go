@@ -1581,6 +1581,9 @@ func validatePlan(planValue model.TestPlan) error {
 	if planValue.Generation == 0 {
 		return errors.New("generation must be positive")
 	}
+	if err := planValue.LeakCheck.Validate(); err != nil {
+		return err
+	}
 	for _, file := range planValue.Files {
 		if err := validateProjectPath(file.Path); err != nil {
 			return fmt.Errorf("file %q: %w", file.Path, err)

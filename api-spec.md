@@ -1270,6 +1270,120 @@ The runnable example in `examples/basic/callback_probe.test.gd` exercises both
 asynchronous completion/error callbacks and cross-source sequence ordering with
 `watch_signal` and `InventoryDouble`.
 
+### 14.10 Scoped autofree and leak detection
+
+`autofree(node: Node) -> Node` registers a `Node` with the active execution
+scope so gdtest frees it automatically when that scope finishes, and returns
+`node` unchanged so construction and registration compose inline:
+
+```gdscript
+func test_autofrees_case_node_attached_to_tree() -> void:
+	var timer: Timer = autofree(Timer.new())
+	timer.name = "CaseTimer"
+	timer.one_shot = true
+	_shared_container.add_child(timer)
+	expect_true(timer.is_inside_tree())
+	expect_equal(_shared_container.get_child_count(), 1)
+```
+
+#### Scope mapping
+
+| Where `autofree` is called | Owning scope | Freed |
+|---|---|---|
+| Case body, `before_case`, `after_case`, `before_each`, `after_each` | `case` | After the case's closing hook |
+| `before_suite` (root or nested) | `suite` | After the matching `after_suite` |
+| `before_all` | `file` | After `after_all` |
+
+Registering the same node more than once in the same scope has no additional
+effect. If a node is registered in more than one open scope, the narrowest
+scope wins, so each registered node is freed at most once at the earliest
+closing scope.
+
+Calling `autofree(null)` or passing a freed instance reports a source-located
+error and registers nothing. Calling `autofree` during discovery or
+registration (`script.new()` member initializers, `suite()`, `define()`
+callbacks, `*__cases()` providers, or `get_suite_name()`), during suite or
+file closing hooks (`after_suite` or `after_all`), during end-of-scope
+release or frame drain (such as `_exit_tree()` or `NOTIFICATION_PREDELETE`
+callbacks triggered while gdtest closes a scope), or outside an active file,
+suite, or case scope reports a source-located discovery or framework error and
+registers nothing.
+
+#### End-of-scope teardown and leak detection
+
+For every case, suite, and file scope that completes without timeout or
+cancellation, gdtest executes in order:
+
+1. Run the scope's closing hook (`after_case` or `after_each`, `after_suite`,
+   or `after_all`).
+2. Release any case-scoped probes (for `case` scopes), then free the scope's
+   `autofree` registrations in reverse registration order with `Object.free()`,
+   skipping already-freed instances and descendants whose ancestor is freed in
+   the same pass.
+3. Await one `SceneTree.process_frame` so pending `queue_free()` deletions
+   drain before inspection. Ordinary `queue_free()` cleanup is never reported as
+   a leak.
+4. Run the post-scope leak check unless `leak_check.policy` is `"off"`.
+5. Finalize the scope result.
+
+Timed-out and canceled scopes skip steps 2 through 4 because arbitrary user
+coroutines may still be mutating nodes while the tainted worker shuts down.
+
+At scope start, gdtest snapshots both `Node.get_orphan_node_ids()` and the
+instance IDs of every node reachable from `SceneTree.root` (including internal
+children and autoload subtrees). At step 4, gdtest compares current state
+against that baseline and reports:
+
+- **Stray leaks** (`kind: "stray"`): nodes still inside `SceneTree` whose
+  instance ID was absent from the tree baseline.
+- **Orphan leaks** (`kind: "orphan"`): unparented live `Node` instances in
+  `Node.get_orphan_node_ids()` whose instance ID was absent from the orphan
+  baseline.
+
+Survivors from a completed inner scope are absorbed into open enclosing suite
+and file baselines so a node leaked inside a case is reported once on that case
+rather than re-reported when enclosing `suite` and `file` scopes close.
+
+Each leak set is collapsed to un-ignored subtree roots: a leaked node is
+reported as a root when its parent is null, invalid, present in the baseline,
+or outside the un-ignored leaked set, with `descendants` counting collapsed
+leaked descendants under that root. Records are plain JSON-safe dictionaries
+(`kind`, `class`, `name`, `script`, `path`, `descendants`) ordered with strays
+first sorted by UTF-8 `path`, then orphans sorted by UTF-8 `class` and `name`,
+with instance ID as final tiebreaker. At most 20 root records are serialized in
+`metadata.leaks`; additional roots set `metadata.omitted` and append
+`, and N more` to the diagnostic message.
+
+#### Policy and allowlist configuration
+
+`gdtest.json` configures leak checking through the optional `leak_check` object:
+
+```json
+{
+  "leak_check": {
+    "policy": "fail",
+    "ignore": ["res://ui/toast_layer.gd", "Timer"]
+  }
+}
+```
+
+- `policy`: `"fail"` (the default when `leak_check` or `policy` is omitted),
+  `"warn"`, or `"off"`. Under `"fail"`, leaks emit `assertion_failed` with
+  `assertion: "leak"` and promote case status to `fail` (`error` retains higher
+  precedence) or fail the file for suite/file hook leaks. Under `"warn"`, leaks
+  emit `case_warning` with the same payload without changing pass/fail status.
+  Under `"off"`, step 4 is skipped while `autofree` and the one-frame
+  `queue_free()` drain remain active.
+- `ignore`: optional array of unique clean `res://...gd` script paths or valid
+  GDScript identifiers. A leaked node and its entire subtree are exempt when the
+  node or any ancestor matches an entry via attached or base-script
+  `resource_path`, `Node.is_class(entry)`, or global `class_name` in its script
+  inheritance chain.
+
+The runnable example in `examples/basic/autofree.test.gd` exercises both
+suite-scoped and case-scoped `autofree` registration alongside `queue_free()`
+drainage.
+
 ## 15. Case status and precedence
 
 Public case statuses are:
@@ -1352,6 +1466,7 @@ The following names/patterns are reserved by gdtest:
 - `callback_probe`, the test method that creates a case-scoped callback recorder.
 - `double_context`, the test method that returns a case's double context.
 - `expect_that`, the test method that evaluates a custom matcher.
+- `autofree`, the test method that registers a `Node` for automatic scope-end teardown.
 - `gdtest` and `GDTestControls`, the controller member and class that generated
   test doubles expose.
 - Lifecycle hook names in section 8.
@@ -1476,6 +1591,11 @@ The runtime is conformant when tests prove all of the following:
 19. Custom matchers (`GDTestMatcher`, `GDTestMatchResult`, `expect_that`) execute synchronous domain checks,
     enforce fail-closed contracts, attribute failure locations to the caller, and defend against post-evaluation
     collection mutation.
+20. Scoped `autofree` frees registered `Node` instances in reverse order at case, suite, and file
+    scope boundaries without double-freeing narrowed or parent-covered nodes, drains `queue_free()`
+    deletions before post-scope orphan and `SceneTree` leak checks, honors `fail`, `warn`, `off`,
+    and `ignore` subtree exemptions, and skips teardown and leak checks on timed-out or canceled
+    scopes.
 
 Examples and API documentation in the repository must be executable
 conformance fixtures rather than untested prose snippets wherever practical.

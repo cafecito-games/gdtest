@@ -269,3 +269,21 @@ func benchmark_add_item() -> void:
 ### Vest.timeout
 
 Remove `Vest.timeout` and pass explicit `timeout_seconds` to `until` or `wait_until_count`. Otherwise rely on the runner's case timeout, which bounds every case including a wait with no explicit deadline.
+
+### Node cleanup and `autofree`
+
+The Vest migrator is feature-frozen and does not rewrite manual `free()` or `queue_free()` calls, `after_case` teardown helpers, or private `_owned` node arrays. Because gdtest defaults `leak_check.policy` to `"fail"`, any `Node` instantiated or attached to `SceneTree` during a test or hook that outlives its scope fails the run unless freed. Convert manual node cleanup by hand with `autofree(node: Node) -> Node` (see `api-spec.md` section 14.10):
+
+- **Trailing `.free()` or `.queue_free()` in a test:** Wrap construction in `autofree(...)` and delete the trailing cleanup call:
+
+  ```gdscript
+  func test_timer_starts_in_tree() -> void:
+  	var timer: Timer = autofree(Timer.new())
+  	get_tree().root.add_child(timer)
+  	timer.start(0.5)
+  	expect_false(timer.is_stopped())
+  ```
+
+- **Private `_owned: Array[Node]` lists and `after_case` / `after_each` loops:** Delete the tracking array and cleanup hook; call `autofree(...)` at each allocation site in `before_case`, `before_each`, or the test body. Nodes registered in `before_suite` live until `after_suite`, and nodes registered in `before_all` live until `after_all`.
+- **Parent-child hierarchies:** Registering the root node (`var panel: Control = autofree(PanelScene.instantiate())`) is sufficient because freeing the parent frees its descendants; registering both parent and child is also safe and never double-frees.
+- **Gradual adoption on legacy suites:** If an existing migrated project intentionally leaves background nodes alive while cleanup is in progress, set `"leak_check": { "policy": "warn" }` or add specific script paths or class identifiers to `"leak_check": { "ignore": [...] }` in `gdtest.json` until each suite uses `autofree`.

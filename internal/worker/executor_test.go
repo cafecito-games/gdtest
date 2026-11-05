@@ -7,10 +7,51 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cafecito-games/gdtest/internal/model"
 	"github.com/cafecito-games/gdtest/internal/protocol"
 	"github.com/cafecito-games/gdtest/internal/version"
 	"github.com/stretchr/testify/require"
 )
+
+func TestVerifyHandshakeRejectsProtocolVersionMismatch(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	payload, err := json.Marshal(handshake{
+		RuntimeVersion: version.Product,
+		WorkerID:       "worker-1",
+		ProjectPath:    project,
+		SessionID:      "session-1",
+		Generation:     4,
+		GodotVersion:   testGodotVersion(),
+		Capabilities:   testCapabilities(),
+	})
+	require.NoError(t, err)
+	var stream bytes.Buffer
+	require.NoError(t, protocol.NewEncoder(&stream).Encode(protocol.Envelope{
+		Version: protocol.Version - 1,
+		Type:    "hello",
+		Token:   "secret",
+		Payload: payload,
+	}))
+	err = verifyHandshake(protocol.NewDecoder(&stream, 4096), "secret", project, "session-1", "worker-1", 4)
+	require.EqualError(t, err, fmt.Sprintf(
+		"expected worker protocol %d hello, got version %d type %q",
+		protocol.Version, protocol.Version-1, "hello",
+	))
+}
+
+func TestValidateWorkerPlanRejectsInvalidLeakCheck(t *testing.T) {
+	t.Parallel()
+
+	err := validateWorkerPlan(model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion,
+		RunID:           "run-1",
+		Generation:      1,
+		LeakCheck:       model.LeakCheck{Policy: "strict"},
+	})
+	require.EqualError(t, err, `test plan has invalid leak_check: leak_check.policy "strict" must be fail, warn, or off`)
+}
 
 func TestVerifyHandshake(t *testing.T) {
 	t.Parallel()

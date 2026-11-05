@@ -7,6 +7,8 @@ const Version: GDScript = preload("res://addons/gdtest/version.gd")
 const CaseTask: GDScript = preload("res://addons/gdtest/worker_case_task.gd")
 ## Internal benchmark command runner.
 const BenchmarkRunner: GDScript = preload("res://addons/gdtest/worker_benchmark_runner.gd")
+## Internal scoped node leak tracker.
+const LeakTracker: GDScript = preload("res://addons/gdtest/worker_leak_tracker.gd")
 ## Internal shared probe ledger tracking bounded late callback diagnostics.
 const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
 ## Hard upper bound for one JSONL protocol message.
@@ -32,6 +34,7 @@ var _shutdown_requested: bool = false
 var _serialization_usec: int = 0
 var _case_timeout_usec: int = DEFAULT_CASE_TIMEOUT_USEC
 var _abort_run_requested: bool = false
+var _leak_tracker: RefCounted
 var _initial_audio_bus_layout: AudioBusLayout = AudioServer.generate_bus_layout()
 
 
@@ -219,6 +222,14 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		_finish_run_state()
 		return
 	var plan: Dictionary[String, Variant] = _dict(plan_value)
+	_leak_tracker = LeakTracker.create(
+			self,
+			plan,
+			_send_event,
+			_is_run_aborted,
+			_call_hook,
+			_drain_framework_errors
+	)
 	var case_timeout_ns: int = int(plan.get("case_timeout_ns", 0))
 	if case_timeout_ns <= 0:
 		_case_timeout_usec = DEFAULT_CASE_TIMEOUT_USEC
@@ -267,6 +278,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 			break
 	if _cancel_requested:
 		totals["canceled"] += 1
+		_taint_canceled_run()
 	var execution_usec: int = Time.get_ticks_usec() - execution_started_usec
 	var late_callback_invocations: int = ProbeLedger.take_late_call_count()
 	_send_event(
@@ -316,14 +328,7 @@ func _discover_command(command: Dictionary[String, Variant]) -> void:
 	for file_value: Variant in files_value:
 		if not file_value is Dictionary:
 			prepared_files.append(
-					{
-						"path": "",
-						"instance": null,
-						"cases": [],
-						"root_info": null,
-						"errors": [{ "message": "each plan file must be an object" }],
-						"discovery_error_count": 1,
-					}
+					_empty_prepared_file([{ "message": "each plan file must be an object" }])
 			)
 			continue
 		prepared_files.append(await _prepare_file(_dict(file_value), false))
@@ -336,18 +341,22 @@ func _discover_command(command: Dictionary[String, Variant]) -> void:
 	_finish_run_state()
 
 
-func _prepare_file(
-		file_plan: Dictionary[String, Variant],
-		emit_errors: bool = true
-) -> Dictionary[String, Variant]:
-	var prepared: Dictionary[String, Variant] = {
+func _empty_prepared_file(errors: Array[Variant] = []) -> Dictionary[String, Variant]:
+	return {
 		"path": "",
 		"instance": null,
 		"cases": [],
 		"root_info": null,
-		"errors": [],
-		"discovery_error_count": 0,
+		"errors": errors,
+		"discovery_error_count": errors.size(),
 	}
+
+
+func _prepare_file(
+		file_plan: Dictionary[String, Variant],
+		emit_errors: bool = true
+) -> Dictionary[String, Variant]:
+	var prepared: Dictionary[String, Variant] = _empty_prepared_file()
 	var path: String = str(file_plan.get("file", file_plan.get("path", "")))
 	if not path.begins_with("res://"):
 		path = "res://" + path.trim_prefix("/")
@@ -467,7 +476,14 @@ func _run_prepared_file(
 			{ "id": root_info.id, "name": root_info.name, "file": path.trim_prefix("res://") }
 	)
 	if not cases.is_empty():
-		await _execute_file_lifecycle(instance, root_info, cases, path, totals)
+		await _leak_tracker.execute_file_lifecycle(
+				instance,
+				root_info,
+				cases,
+				path,
+				totals,
+				_run_case
+		)
 	totals["error"] += _drain_framework_errors(instance, path)
 	instance._gdtest_dispose()
 	_send_event(
@@ -476,56 +492,6 @@ func _run_prepared_file(
 	)
 	_active_test = null
 	return totals
-
-
-func _execute_file_lifecycle(
-		instance: GDTest,
-		root_info: GDTestSuiteInfo,
-		cases: Array[Variant],
-		path: String,
-		totals: Dictionary[String, int]
-) -> void:
-	if not await _call_hook(instance, &"before_all", [], path, totals):
-		await _call_hook(instance, &"after_all", [], path, totals)
-		return
-	if not await _call_hook(instance, &"before_suite", [root_info], path, totals):
-		await _call_hook(instance, &"after_suite", [root_info], path, totals)
-		await _call_hook(instance, &"after_all", [], path, totals)
-		return
-	var open_suites: Array[GDTestSuiteInfo] = []
-	var blocked_suite_depth: int = -1
-	for case_value: Variant in cases:
-		if _cancel_requested or _abort_run_requested:
-			break
-		var case_plan: Dictionary[String, Variant] = _dict(case_value)
-		var desired_suites: Array[GDTestSuiteInfo] = _suite_infos(case_plan.get("suite_infos", []))
-		var common_count: int = _common_suite_count(open_suites, desired_suites)
-		for index: int in range(open_suites.size() - 1, common_count - 1, -1):
-			await _call_hook(instance, &"after_suite", [open_suites[index]], path, totals)
-		open_suites.resize(common_count)
-		if blocked_suite_depth >= common_count:
-			blocked_suite_depth = -1
-		if blocked_suite_depth < 0:
-			for index: int in range(common_count, desired_suites.size()):
-				open_suites.append(desired_suites[index])
-				if not await _call_hook(
-						instance,
-						&"before_suite",
-						[desired_suites[index]],
-						path,
-						totals
-				):
-					blocked_suite_depth = index
-					break
-		if blocked_suite_depth >= 0:
-			continue
-		var status: String = await _run_case(instance, path, case_plan)
-		totals[status] = totals.get(status, 0) + 1
-		totals["error"] += _drain_framework_errors(instance, path)
-	for index: int in range(open_suites.size() - 1, -1, -1):
-		await _call_hook(instance, &"after_suite", [open_suites[index]], path, totals)
-	await _call_hook(instance, &"after_suite", [root_info], path, totals)
-	await _call_hook(instance, &"after_all", [], path, totals)
 
 
 func _release_skipped_prepared_files(
@@ -775,23 +741,6 @@ func _argument_matches(value: Variant, argument: Dictionary[String, Variant]) ->
 	return typeof(value) == expected_type
 
 
-func _suite_infos(value: Variant) -> Array[GDTestSuiteInfo]:
-	var result: Array[GDTestSuiteInfo] = []
-	if not value is Array:
-		return result
-	for suite_value: Variant in value:
-		if suite_value is GDTestSuiteInfo:
-			result.append(suite_value)
-	return result
-
-
-func _common_suite_count(left: Array[GDTestSuiteInfo], right: Array[GDTestSuiteInfo]) -> int:
-	var result: int = 0
-	while result < left.size() and result < right.size() and left[result].id == right[result].id:
-		result += 1
-	return result
-
-
 func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Variant]) -> String:
 	var case_id: String = str(case_plan.get("id", ""))
 	var case_name: String = str(case_plan.get("name", case_id))
@@ -815,6 +764,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	_active_case_id = case_id
 	_send_event("case_started", Protocol.case_started(case_id, case_name, path, info.line))
 	instance._gdtest_begin_case()
+	_leak_tracker.push_scope(root)
 	var started_usec: int = Time.get_ticks_usec()
 	var task: RefCounted = CaseTask.new()
 	task.start(instance, info, case_plan, method_name, parameters)
@@ -822,20 +772,28 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	while not task.finished and not _cancel_requested and Time.get_ticks_usec() < deadline_usec:
 		_poll_messages()
 		await process_frame
-	var timed_out: bool = not task.finished and not _cancel_requested
+	var case_canceled: bool = _cancel_requested
+	var timed_out: bool = not task.finished and not case_canceled
 	if timed_out:
 		instance._gdtest_record_error_at(
 				"case timed out after %.3f seconds" % (float(_case_timeout_usec) / 1000000.0),
 				path,
 				info.line
 		)
-	if not task.finished:
+	var result: Dictionary[String, Variant]
+	if not task.finished or case_canceled:
 		task.finish_capture()
 		_abort_run_requested = true
 		_shutdown_requested = true
 		_send_event("worker_tainted", Protocol.worker_tainted(case_id, timed_out))
-	var result: Dictionary[String, Variant] = instance._gdtest_end_case()
-	var status: String = "canceled" if _cancel_requested else str(result.get("status", "error"))
+		result = instance._gdtest_end_case_aborted()
+		_leak_tracker.pop_without_check()
+	else:
+		result = await instance._gdtest_end_case(
+				_leak_tracker.check_case_scope.bind(instance, case_id, path, info.line)
+		)
+		task.finish_capture()
+	var status: String = "canceled" if case_canceled else str(result.get("status", "error"))
 	_send_event(
 			"case_finished",
 			Protocol.case_finished(
@@ -852,6 +810,17 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	return status
 
 
+func _taint_canceled_run() -> void:
+	if _shutdown_requested:
+		return
+	_shutdown_requested = true
+	_send_event("worker_tainted", Protocol.worker_tainted("", false))
+
+
+func _is_run_aborted() -> bool:
+	return _cancel_requested or _abort_run_requested
+
+
 func _call_hook(
 		instance: GDTest,
 		method: StringName,
@@ -859,15 +828,11 @@ func _call_hook(
 		path: String,
 		totals: Dictionary[String, int]
 ) -> bool:
-	await _call_optional(instance, method, arguments)
+	if instance.has_method(method):
+		await instance.callv(method, arguments)
 	var error_count: int = _drain_framework_errors(instance, path)
 	totals["error"] += error_count
 	return error_count == 0
-
-
-func _call_optional(instance: Object, method: StringName, arguments: Array[Variant]) -> void:
-	if instance.has_method(method):
-		await instance.callv(method, arguments)
 
 
 func _drain_framework_errors(instance: GDTest, default_file: String) -> int:
@@ -990,6 +955,7 @@ func _finish_run_state() -> void:
 	_request_id = ""
 	_active_case_id = ""
 	_active_test = null
+	_leak_tracker = null
 
 
 func _dict(value: Variant) -> Dictionary[String, Variant]:
