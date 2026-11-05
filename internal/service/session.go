@@ -871,6 +871,7 @@ func (s *SessionService) logLifecycle(
 		record[key] = value
 	}
 	record["event"] = event
+	record["level"] = lifecycleLogLevel(event)
 	if entry != nil {
 		record["session_id"] = entry.id
 	}
@@ -882,6 +883,18 @@ func (s *SessionService) logLifecycle(
 		record["run_id"] = runID
 	}
 	s.log(record)
+}
+
+func lifecycleLogLevel(event string) string {
+	if strings.HasSuffix(event, "_failed") || strings.HasSuffix(event, "_error") {
+		return "error"
+	}
+	switch event {
+	case "discovery_finished", "worker_reused":
+		return "debug"
+	default:
+		return "info"
+	}
 }
 
 func (s *SessionService) recordWorkerMemory(entry *session) (bool, error) {

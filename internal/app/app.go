@@ -987,15 +987,15 @@ func serveDaemon(ctx context.Context, requestedNamespace string, streams IO) err
 	if err := namespace.Prepare(); err != nil {
 		return err
 	}
-	logger, err := daemon.OpenLogger(namespace.LogPath, 0)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = logger.Close() }()
 	userConfig, err := config.LoadUser()
 	if err != nil {
 		return err
 	}
+	logger, err := daemon.OpenLoggerWithLevel(namespace.LogPath, 0, userConfig.LogLevel)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logger.Close() }()
 	sessions := service.NewSessionServiceWithOptions(service.ServiceOptions{
 		MaxWorkers: userConfig.MaxWorkers, MaxWorkerAge: time.Duration(userConfig.WorkerMaxAge),
 		MemoryBudgetMB: userConfig.MemoryBudgetMB,
@@ -1019,19 +1019,19 @@ func serveDaemon(ctx context.Context, requestedNamespace string, streams IO) err
 			case <-sourceTicker.C:
 				updates, failures := sessions.ReconcileSources(janitorCtx)
 				if len(updates) > 0 {
-					_ = logger.Write(map[string]any{"event": "source_generations_advanced", "sessions": updates})
+					_ = logger.Write(map[string]any{"event": "source_generations_advanced", "level": "info", "sessions": updates})
 				}
 				for sessionID, reconcileErr := range failures {
 					_ = logger.Write(map[string]any{
-						"event": "source_reconcile_error", "session": sessionID, "error": reconcileErr.Error(),
+						"event": "source_reconcile_error", "level": "error", "session": sessionID, "error": reconcileErr.Error(),
 					})
 				}
 			case now := <-lifecycleTicker.C:
 				removed, reconcileErr := sessions.Reconcile(now, 2*time.Second, 2*time.Minute)
 				if reconcileErr != nil {
-					_ = logger.Write(map[string]any{"event": "session_reconcile_error", "error": reconcileErr.Error()})
+					_ = logger.Write(map[string]any{"event": "session_reconcile_error", "level": "error", "error": reconcileErr.Error()})
 				} else if len(removed) > 0 {
-					_ = logger.Write(map[string]any{"event": "sessions_evicted", "sessions": removed})
+					_ = logger.Write(map[string]any{"event": "sessions_evicted", "level": "info", "sessions": removed})
 				}
 			}
 		}

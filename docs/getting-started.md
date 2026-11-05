@@ -40,6 +40,9 @@ User-wide resource policy lives in the operating system's user configuration dir
 }
 ```
 
+`log_level` accepts `debug`, `info`, `warn`, or `error` and filters the bounded structured daemon
+log at write time. Error records remain available at every configured level.
+
 CLI flags take precedence over project and user configuration. `--godot` selects an executable,
 `--jobs 0` uses concurrency bounded by the daemon's global worker limit, and `--isolation` accepts
 `reuse`, `recycle`, `fresh`, or `exclusive`.

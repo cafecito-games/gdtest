@@ -66,7 +66,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := s.Namespace.writeMetadata(metadata); err != nil {
 		return err
 	}
-	s.log(map[string]any{"event": "daemon_started", "pid": metadata.PID})
+	s.log(map[string]any{"event": "daemon_started", "level": "info", "pid": metadata.PID})
 	go func() {
 		<-serveCtx.Done()
 		s.closeTransport()
@@ -115,7 +115,7 @@ func (s *Server) handleConnection(ctx context.Context, connection net.Conn) {
 			return
 		}
 		_ = encodeMessage(encoder, MessageError, "", "", true, map[string]any{"message": err.Error()})
-		s.log(map[string]any{"event": "client_protocol_error", "error": err.Error()})
+		s.log(map[string]any{"event": "client_protocol_error", "level": "warn", "error": err.Error()})
 		return
 	}
 	if err := validateRequest(message); err != nil {
@@ -180,7 +180,7 @@ func (s *Server) callHandler(ctx context.Context, request Request, emit EmitFunc
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			s.log(map[string]any{
-				"event": "handler_panic", "request_id": request.ID,
+				"event": "handler_panic", "level": "error", "request_id": request.ID,
 				"method": request.Method, "panic": fmt.Sprint(recovered), "stack": string(debug.Stack()),
 			})
 			result = nil
@@ -239,7 +239,7 @@ func (s *Server) cleanup() {
 	s.wait.Wait()
 	_ = os.Remove(s.Namespace.MetadataPath)
 	_ = os.Remove(s.Namespace.SocketPath)
-	s.log(map[string]any{"event": "daemon_stopped"})
+	s.log(map[string]any{"event": "daemon_stopped", "level": "info"})
 }
 
 func (s *Server) log(fields map[string]any) {

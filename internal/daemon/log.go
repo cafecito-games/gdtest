@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -13,11 +14,30 @@ type Logger struct {
 	mu       sync.Mutex
 	path     string
 	maxBytes int64
+	minimum  logLevel
 	file     *os.File
 }
 
+type logLevel uint8
+
+const (
+	levelDebug logLevel = iota
+	levelInfo
+	levelWarn
+	levelError
+)
+
 // OpenLogger opens a current-user-only log. Non-positive limits use 8 MiB.
 func OpenLogger(path string, maxBytes int64) (*Logger, error) {
+	return OpenLoggerWithLevel(path, maxBytes, "info")
+}
+
+// OpenLoggerWithLevel opens a bounded log that drops records below minimum.
+func OpenLoggerWithLevel(path string, maxBytes int64, minimum string) (*Logger, error) {
+	parsedMinimum, err := parseLogLevel(minimum)
+	if err != nil {
+		return nil, err
+	}
 	if maxBytes <= 0 {
 		maxBytes = 8 << 20
 	}
@@ -29,12 +49,27 @@ func OpenLogger(path string, maxBytes int64) (*Logger, error) {
 		_ = file.Close()
 		return nil, fmt.Errorf("secure daemon log: %w", err)
 	}
-	return &Logger{path: path, maxBytes: maxBytes, file: file}, nil
+	return &Logger{path: path, maxBytes: maxBytes, minimum: parsedMinimum, file: file}, nil
 }
 
 // Write records fields with a UTC timestamp. Authentication values must not be passed here.
 func (l *Logger) Write(fields map[string]any) error {
 	if l == nil {
+		return nil
+	}
+	name := "info"
+	if value, exists := fields["level"]; exists {
+		text, ok := value.(string)
+		if !ok {
+			return errors.New("daemon log level must be a string")
+		}
+		name = text
+	}
+	level, err := parseLogLevel(name)
+	if err != nil {
+		return err
+	}
+	if level < l.minimum {
 		return nil
 	}
 	l.mu.Lock()
@@ -43,6 +78,7 @@ func (l *Logger) Write(fields map[string]any) error {
 	for key, value := range fields {
 		record[key] = value
 	}
+	record["level"] = name
 	record["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
 	line, err := json.Marshal(record)
 	if err != nil {
@@ -62,6 +98,21 @@ func (l *Logger) Write(fields map[string]any) error {
 		return fmt.Errorf("write daemon log: %w", err)
 	}
 	return nil
+}
+
+func parseLogLevel(value string) (logLevel, error) {
+	switch value {
+	case "debug":
+		return levelDebug, nil
+	case "info":
+		return levelInfo, nil
+	case "warn":
+		return levelWarn, nil
+	case "error":
+		return levelError, nil
+	default:
+		return 0, fmt.Errorf("invalid daemon log level %q", value)
+	}
 }
 
 func (l *Logger) rotate() error {

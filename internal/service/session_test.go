@@ -166,6 +166,16 @@ func TestMergeWorkerTimingsSeparatesExecutionAndSerializationPhases(t *testing.T
 	assert.Equal(t, int64(33*time.Microsecond), timings["result_serialization"])
 }
 
+func TestLifecycleLogLevelsPreserveFailuresAtStrictThresholds(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "error", lifecycleLogLevel("run_failed"))
+	assert.Equal(t, "error", lifecycleLogLevel("source_reconcile_error"))
+	assert.Equal(t, "debug", lifecycleLogLevel("worker_reused"))
+	assert.Equal(t, "debug", lifecycleLogLevel("discovery_finished"))
+	assert.Equal(t, "info", lifecycleLogLevel("worker_started"))
+}
+
 func TestSessionServiceRecyclesWorkerAtConfiguredAge(t *testing.T) {
 	t.Parallel()
 
