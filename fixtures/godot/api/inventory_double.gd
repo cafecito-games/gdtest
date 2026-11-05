@@ -2,7 +2,7 @@
 class_name InventoryDouble
 extends "res://fixtures/godot/api/inventory.gd"
 
-## Path of this script, used to locate callers in failure reports.
+## Path of this generated script, used to locate callers in failure reports.
 const _GDTEST_DOUBLE_PATH: String = "res://fixtures/godot/api/inventory_double.gd"
 
 ## Typed stubbing controls for every doubled method.
@@ -17,48 +17,48 @@ func _init(context: GDTestDoubleContext, capacity: int, label: String = "bag") -
 
 ## Records the call and returns the configured result.
 func add(item: String, count: int = LIMIT) -> bool:
-	var method: AddMethod = gdtest.add
-	var outcome: int = method._gdtest_next([item, count])
-	if outcome == GDTestDoubleMethod.OUTCOME_REAL:
+	var gdtest_method: AddMethod = gdtest.add
+	var gdtest_outcome: int = gdtest_method._gdtest_next([item, count])
+	if gdtest_outcome == GDTestDoubleMethod.OUTCOME_REAL:
 		return super.add(item, count)
-	var value: Variant = method._gdtest_value()
-	if outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
-		value = method._gdtest_answer().call(item, count)
-	var result: bool
-	if outcome != GDTestDoubleMethod.OUTCOME_NEUTRAL:
-		if value is bool:
-			result = value
+	var gdtest_value: Variant = gdtest_method._gdtest_value()
+	if gdtest_outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
+		gdtest_value = gdtest_method._gdtest_answer().call(item, count)
+	var gdtest_result: bool
+	if gdtest_outcome != GDTestDoubleMethod.OUTCOME_NEUTRAL:
+		if gdtest_value is bool:
+			gdtest_result = gdtest_value
 		else:
-			method._gdtest_reject_return(value, "bool")
-	return result
+			gdtest_method._gdtest_reject_return(gdtest_value, "bool")
+	return gdtest_result
 
 
 ## Records the call and returns the configured result.
 func clear() -> void:
-	var method: ClearMethod = gdtest.clear
-	var outcome: int = method._gdtest_next([])
-	if outcome == GDTestDoubleMethod.OUTCOME_REAL:
+	var gdtest_method: ClearMethod = gdtest.clear
+	var gdtest_outcome: int = gdtest_method._gdtest_next([])
+	if gdtest_outcome == GDTestDoubleMethod.OUTCOME_REAL:
 		super.clear()
-	elif outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
-		method._gdtest_answer().call()
+	elif gdtest_outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
+		gdtest_method._gdtest_answer().call()
 
 
 ## Records the call and returns the configured result.
 func load_counts(path: String) -> Dictionary[String, int]:
-	var method: LoadCountsMethod = gdtest.load_counts
-	var outcome: int = method._gdtest_next([path])
-	if outcome == GDTestDoubleMethod.OUTCOME_REAL:
+	var gdtest_method: LoadCountsMethod = gdtest.load_counts
+	var gdtest_outcome: int = gdtest_method._gdtest_next([path])
+	if gdtest_outcome == GDTestDoubleMethod.OUTCOME_REAL:
 		return await super.load_counts(path)
-	var value: Variant = method._gdtest_value()
-	if outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
-		value = await method._gdtest_answer().call(path)
-	var result: Dictionary[String, int]
-	if outcome != GDTestDoubleMethod.OUTCOME_NEUTRAL:
-		if value is Dictionary and result.is_same_typed(value):
-			result = value
+	var gdtest_value: Variant = gdtest_method._gdtest_value()
+	if gdtest_outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
+		gdtest_value = await gdtest_method._gdtest_answer().call(path)
+	var gdtest_result: Dictionary[String, int]
+	if gdtest_outcome != GDTestDoubleMethod.OUTCOME_NEUTRAL:
+		if gdtest_value is Dictionary and gdtest_result.is_same_typed(gdtest_value):
+			gdtest_result = gdtest_value
 		else:
-			method._gdtest_reject_return(value, "Dictionary[String, int]")
-	return result
+			gdtest_method._gdtest_reject_return(gdtest_value, "Dictionary[String, int]")
+	return gdtest_result
 
 
 ## Typed controllers for every doubled method of res://fixtures/godot/api/inventory.gd.

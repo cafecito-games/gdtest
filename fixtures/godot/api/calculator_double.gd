@@ -2,7 +2,7 @@
 class_name CalculatorDouble
 extends "res://fixtures/godot/api/calculator.gd"
 
-## Path of this script, used to locate callers in failure reports.
+## Path of this generated script, used to locate callers in failure reports.
 const _GDTEST_DOUBLE_PATH: String = "res://fixtures/godot/api/calculator_double.gd"
 
 ## Typed stubbing controls for every doubled method.
@@ -16,18 +16,18 @@ func _init(context: GDTestDoubleContext) -> void:
 
 ## Records the call and returns the configured result.
 func compute(value: int) -> int:
-	var method: ComputeMethod = gdtest.compute
-	var outcome: int = method._gdtest_next([value])
-	var returned: Variant = method._gdtest_value()
-	if outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
-		returned = method._gdtest_answer().call(value)
-	var result: int
-	if outcome != GDTestDoubleMethod.OUTCOME_NEUTRAL:
-		if returned is int:
-			result = returned
+	var gdtest_method: ComputeMethod = gdtest.compute
+	var gdtest_outcome: int = gdtest_method._gdtest_next([value])
+	var gdtest_value: Variant = gdtest_method._gdtest_value()
+	if gdtest_outcome == GDTestDoubleMethod.OUTCOME_ANSWER:
+		gdtest_value = gdtest_method._gdtest_answer().call(value)
+	var gdtest_result: int
+	if gdtest_outcome != GDTestDoubleMethod.OUTCOME_NEUTRAL:
+		if gdtest_value is int:
+			gdtest_result = gdtest_value
 		else:
-			method._gdtest_reject_return(returned, "int")
-	return result
+			gdtest_method._gdtest_reject_return(gdtest_value, "int")
+	return gdtest_result
 
 
 ## Typed controllers for every doubled method of res://fixtures/godot/api/calculator.gd.

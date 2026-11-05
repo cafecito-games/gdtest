@@ -57,3 +57,11 @@ func messagesOf(diagnostics []Diagnostic) []string {
 	}
 	return messages
 }
+
+// readRepositoryFile reads a repository-relative slash path from the module root.
+func readRepositoryFile(t *testing.T, relative string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(relative)))
+	require.NoError(t, err)
+	return string(data)
+}
