@@ -84,6 +84,52 @@ func TestPersistentProcessDiscoversSerializableManifest(t *testing.T) {
 	shutdownProcess(t, process)
 }
 
+func TestPersistentProcessStreamsBenchmarkSamples(t *testing.T) {
+	t.Parallel()
+	process := startHelperProcess(t, 3)
+	defer shutdownProcess(t, process)
+	plan := model.BenchmarkPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "bench-run", Generation: 3,
+		Warmup: 1, Samples: 2, Iterations: 4,
+		Files: []model.BenchmarkFilePlan{{Path: "bench/example.bench.gd", Benchmarks: []model.BenchmarkCasePlan{{
+			ID: "bench/example.bench.gd::benchmark_example", MethodName: "benchmark_example", Line: 3,
+		}}}},
+	}
+	var events []model.BenchmarkEvent
+	err := process.Bench(context.Background(), plan, executor.BenchmarkEventSinkFunc(func(event model.BenchmarkEvent) error {
+		events = append(events, event)
+		return nil
+	}))
+	require.NoError(t, err)
+	require.Len(t, events, 10)
+	assert.Equal(t, model.EventBenchmarkRunStarted, events[0].Type)
+	assert.Equal(t, model.EventBenchmarkSample, events[3].Type)
+	assert.True(t, events[3].Warmup)
+	assert.Equal(t, int64(25), events[5].DurationNS)
+	assert.Equal(t, model.EventBenchmarkRunFinished, events[9].Type)
+}
+
+func TestPersistentProcessBenchmarkCancellation(t *testing.T) {
+	t.Parallel()
+	process := startHelperProcess(t, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	plan := model.BenchmarkPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "bench-block", Generation: 1,
+		Samples: 1, Iterations: 1,
+		Files: []model.BenchmarkFilePlan{{Path: "bench/block.bench.gd", Benchmarks: []model.BenchmarkCasePlan{{
+			ID: "bench/block.bench.gd::benchmark_block", MethodName: "benchmark_block",
+		}}}},
+	}
+	err := process.Bench(ctx, plan, executor.BenchmarkEventSinkFunc(func(event model.BenchmarkEvent) error {
+		if event.Type == model.EventBenchmarkSampleStarted {
+			cancel()
+		}
+		return nil
+	}))
+	require.ErrorIs(t, err, context.Canceled)
+	shutdownProcess(t, process)
+}
+
 func TestPersistentProcessCancellation(t *testing.T) {
 	t.Parallel()
 	process := startHelperProcess(t, 1)
@@ -297,8 +343,26 @@ func TestGDTestWorkerHelper(t *testing.T) {
 		})
 		_ = encoder.Encode(protocol.Envelope{Version: protocol.Version, Type: "event", Payload: payload})
 	}
+	sendBenchmarkEvent := func(runID string, kind model.BenchmarkEventType, data model.BenchmarkEvent) {
+		sequence++
+		payload, _ := json.Marshal(struct {
+			Kind       model.BenchmarkEventType `json:"kind"`
+			WorkerID   string                   `json:"worker_id"`
+			SessionID  string                   `json:"session_id"`
+			Generation uint64                   `json:"generation"`
+			RunID      string                   `json:"run_id"`
+			Sequence   uint64                   `json:"sequence"`
+			Data       model.BenchmarkEvent     `json:"data"`
+		}{
+			Kind: kind, WorkerID: arguments["--gdtest-worker-id"],
+			SessionID: arguments["--gdtest-session"], Generation: generation,
+			RunID: runID, Sequence: sequence, Data: data,
+		})
+		_ = encoder.Encode(protocol.Envelope{Version: protocol.Version, Type: "event", Payload: payload})
+	}
 	sendEvent("", model.EventWorkerReady, model.Event{})
 	activeRun := ""
+	activeBenchmark := false
 	for {
 		var message protocol.Envelope
 		if err := decoder.Decode(&message); err != nil {
@@ -356,10 +420,40 @@ func TestGDTestWorkerHelper(t *testing.T) {
 				sendEvent(activeRun, model.EventRunFinished, model.Event{Status: "pass"})
 				activeRun = ""
 			}
+		case "bench":
+			var payload struct {
+				RunID string `json:"run_id"`
+			}
+			_ = json.Unmarshal(message.Payload, &payload)
+			activeRun = payload.RunID
+			activeBenchmark = true
+			sequence = 0
+			id := "bench/example.bench.gd::benchmark_example"
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkRunStarted, model.BenchmarkEvent{})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkStarted, model.BenchmarkEvent{BenchmarkID: id})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkSampleStarted, model.BenchmarkEvent{BenchmarkID: id, Warmup: true})
+			if activeRun == "bench-block" {
+				continue
+			}
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkSample, model.BenchmarkEvent{BenchmarkID: id, Warmup: true, DurationNS: 99})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkSampleStarted, model.BenchmarkEvent{BenchmarkID: id})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkSample, model.BenchmarkEvent{BenchmarkID: id, DurationNS: 25})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkSampleStarted, model.BenchmarkEvent{BenchmarkID: id, SampleIndex: 1})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkSample, model.BenchmarkEvent{BenchmarkID: id, SampleIndex: 1, DurationNS: 30})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkFinished, model.BenchmarkEvent{BenchmarkID: id, Status: "pass"})
+			sendBenchmarkEvent(activeRun, model.EventBenchmarkRunFinished, model.BenchmarkEvent{Status: "pass"})
+			activeRun = ""
+			activeBenchmark = false
 		case "cancel":
 			if activeRun != "" {
-				sendEvent(activeRun, model.EventCaseFinished, model.Event{TestID: "case-" + activeRun, Status: "canceled"})
-				sendEvent(activeRun, model.EventRunFinished, model.Event{Status: "canceled"})
+				if activeBenchmark {
+					sendBenchmarkEvent(activeRun, model.EventBenchmarkFinished, model.BenchmarkEvent{Status: "canceled"})
+					sendBenchmarkEvent(activeRun, model.EventBenchmarkRunFinished, model.BenchmarkEvent{Status: "canceled"})
+					activeBenchmark = false
+				} else {
+					sendEvent(activeRun, model.EventCaseFinished, model.Event{TestID: "case-" + activeRun, Status: "canceled"})
+					sendEvent(activeRun, model.EventRunFinished, model.Event{Status: "canceled"})
+				}
 				activeRun = ""
 			}
 		case "shutdown":

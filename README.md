@@ -1,6 +1,6 @@
 # gdtest
 
-gdtest is a typed GDScript test framework for Godot 4.7 with a Go client, a user-level daemon, and persistent isolated headless workers. It supports conventional `test_*` methods, parameter providers, dynamic suites, async hooks and cases, exact stable-ID selection, affected-test analysis, JSONL reporting, and mechanical Vest migration.
+gdtest is a typed GDScript test framework for Godot 4.7 with a Go client, a user-level daemon, and persistent isolated headless workers. It supports conventional `test_*` methods, dedicated `benchmark_*` performance runs, parameter providers, dynamic suites, async hooks and cases, exact stable-ID selection, affected-test analysis, JSONL reporting, and mechanical Vest migration.
 
 ## Install with gpm
 
@@ -55,6 +55,20 @@ Save it as a `.test.gd` file and run:
 ```
 
 See [Getting started](docs/getting-started.md), the [executable example](examples/basic/math.test.gd), and the authoritative [GDScript API specification](api-spec.md).
+
+## Run informational benchmarks
+
+Put typed `benchmark_*() -> void` methods in a `*.bench.gd` script extending
+`GDTestBenchmark`, then run them separately from correctness tests:
+
+```sh
+./addons/gdtest/gdtest bench
+./addons/gdtest/gdtest bench --write-baseline benchmark-baseline.json
+./addons/gdtest/gdtest bench --compare benchmark-baseline.json
+```
+
+Warmups and hooks are untimed, raw normalized samples are retained, and comparison never fails on
+a timing delta. See the [executable benchmark](examples/basic/math.bench.gd).
 
 ## Worktrees, affected tests, and CI
 

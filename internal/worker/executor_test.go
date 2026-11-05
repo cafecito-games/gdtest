@@ -140,5 +140,5 @@ func testGodotVersion() map[string]any {
 }
 
 func testCapabilities() []string {
-	return []string{"run", "discover", "ping", "cancel", "reload", "reset", "shutdown"}
+	return []string{"run", "bench", "discover", "ping", "cancel", "reload", "reset", "shutdown"}
 }

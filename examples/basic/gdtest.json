@@ -1,5 +1,6 @@
 {
   "tests": ["**/*.test.gd"],
+  "benchmarks": ["**/*.bench.gd"],
   "exclude": [".godot/**"],
   "godot": "godot",
   "jobs": 0,

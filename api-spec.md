@@ -1041,6 +1041,52 @@ The file `examples/basic/inventory_double.test.gd` also covers `then_call_real`,
 parameter, and `reset()`. The generated file `examples/basic/doubles/inventory_double.gd`
 is committed and checked by `scripts/check`.
 
+### 14.8 Dedicated benchmarks
+
+Benchmarks are separate from correctness tests. A benchmark file conventionally ends in
+`.bench.gd`, extends `GDTestBenchmark`, and declares one or more typed methods:
+
+```gdscript
+extends GDTestBenchmark
+
+var _values: Array[int] = []
+
+
+func before_sample(_info: GDTestBenchmarkInfo) -> void:
+	_values = [5, 3, 1, 4, 2]
+
+
+func benchmark_sort_integers() -> void:
+	_values.sort()
+```
+
+A benchmark method is named `benchmark_*`, takes no arguments, and explicitly returns `void`.
+It may suspend. Its stable ID is `<project-relative-file>::<method-name>`.
+
+The optional typed hooks are:
+
+```gdscript
+func before_all() -> void
+func after_all() -> void
+func before_benchmark(info: GDTestBenchmarkInfo) -> void
+func after_benchmark(info: GDTestBenchmarkInfo) -> void
+func before_sample(info: GDTestBenchmarkInfo) -> void
+func after_sample(info: GDTestBenchmarkInfo) -> void
+```
+
+Every hook is awaited and excluded from the timed interval. `before_all` and `after_all` run once
+per non-empty benchmark file. The benchmark hooks run once per selected method. Sample hooks run
+for both discarded warmups and measured samples. `GDTestBenchmarkInfo` exposes immutable `id`,
+`name`, `file`, `line`, `method_name`, `warmup`, `sample_index`, and `iterations` fields.
+
+`gdtest bench` defaults to three warmups, thirty samples, and one method invocation per sample.
+Each sample invokes the method `iterations` times and records the monotonic engine duration
+normalized per invocation. Reports retain every normalized sample and deterministically derive
+min, median, p95, and max. Timing deltas are informational and never become correctness failures.
+
+`GDTestBenchmark.get_tree()` and `sleep()` support asynchronous setup and benchmark bodies. The
+benchmark base has no assertion API: correctness belongs in `GDTest` tests.
+
 ## 15. Case status and precedence
 
 Public case statuses are:
@@ -1105,6 +1151,12 @@ other bytes are `%HH` with uppercase hex. The file portion is the normalized
 project-relative path with forward slashes and no `res://` prefix. GDScript
 identifiers need no additional escaping.
 
+A benchmark method ID is:
+
+```text
+<project-relative-file>::<benchmark-method-name>
+```
+
 File locations use `res://` paths and one-based lines. Unknown lines are `-1`.
 Reports and selectors must not expose the absolute worktree path as identity.
 
@@ -1121,6 +1173,7 @@ The following names/patterns are reserved by gdtest:
 - `test_*__cases` parameter providers.
 - `test_*__only` focus suffix.
 - Methods beginning with `__gdtest_`.
+- Benchmark methods beginning with `benchmark_` and the benchmark hooks in section 14.8.
 
 Test authors should not override inherited methods from `GDTest` except the
 documented hooks and naming methods.
@@ -1132,7 +1185,7 @@ The following Vest-facing concepts are not gdtest v1 APIs:
 - Lifecycle signals (`on_begin`, `on_case_begin`, and similar).
 - Runtime-generated mocks (`mock`, `when`, `get_calls_of`). Ahead-of-time generated
   doubles (section 14.7) cover the typed subset of this use case.
-- Benchmark builders and measures.
+- Vest's fluent benchmark builders and measure objects. Use the dedicated API in section 14.8.
 - Fluent `assert_that` objects.
 - Test mixin generation or user-configurable inheritance chains.
 - Public mutable suite/result definition objects.
@@ -1172,7 +1225,7 @@ Vest runtime internals.
 | Lifecycle signals | Hooks | Report or rewrite only when unambiguous |
 | `Vest.timeout` | No v1 equivalent | Report |
 | Runtime mocks (`mock`, `when`, `get_calls_of`) | Configured generated double (section 14.7) for the typed subset; otherwise hand-written | Report with a pointer to [docs/vest-migration.md](./docs/vest-migration.md); not converted mechanically |
-| Benchmarks | No v1 equivalent | Report |
+| Benchmarks | `GDTestBenchmark` plus `benchmark_*` methods | Report with the manual recipe in [docs/vest-migration.md](./docs/vest-migration.md); do not translate the builder DSL mechanically |
 | `capture_signal(member_signal, literal_count)` in a `test_` function, with reads only as `get_signal_emissions(...).size()`, an index into the result, or an emptiness check | `var probe := watch_signal(member_signal)` with reads rewritten to `probe.emission_count()`, `probe.arguments_at(...)`, or `probe.emissions()` | Syntax-aware rewrite when unambiguous |
 | Persistent, aliased, nested, repeated-in-one-test, reassigned-owner, non-literal-count, or otherwise ambiguous signal capture | No v1 equivalent | Report and preserve |
 
@@ -1231,6 +1284,10 @@ The runtime is conformant when tests prove all of the following:
 15. Equivalent tests in two worktrees receive identical stable IDs.
 16. The runtime and every executable example pass strict gdkit typing/lint and
     canonical gdkit formatting checks over the actual shipped addon path.
+17. Benchmark discovery rejects invalid signatures with source locations, hooks are untimed,
+    warmups are discarded, and normalized raw samples reproduce every reported statistic.
+18. Benchmark IDs, results, baselines, and comparisons remain project-relative and stable across
+    equivalent worktrees.
 
 Examples and API documentation in the repository must be executable
 conformance fixtures rather than untested prose snippets wherever practical.

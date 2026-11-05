@@ -17,6 +17,28 @@ published-release evidence that verifies them.
 
 All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 
+## Dedicated benchmark runner
+
+Issue #6 adds the public `GDTestBenchmark` API and `gdtest bench` command without mixing
+benchmark measurements into ordinary correctness tests. Static `*.bench.gd` discovery produces
+backend-neutral benchmark plans; the existing daemon scheduler runs them on authenticated,
+persistent workers with generation checks, cancellation, reset, and conservative worker
+replacement. Warmups are discarded, hooks execute outside the measured region, and each sample
+records normalized nanoseconds per iteration. Schema-versioned results retain raw samples,
+deterministic min/median/p95/max statistics, source identity, generation/content identity, and
+runtime/host metadata. Strict baseline decoding, stable-ID comparison, and atomic writes keep
+historical measurements reviewable without introducing flaky performance thresholds.
+
+Focused Go tests cover discovery and hook validation, statistics and event folding, protocol
+fixtures, worker streaming/cancellation, session reuse/reset, CLI validation, and baseline
+behavior. The basic example executes the command through real Godot, and packaged-addon
+verification executes a fresh benchmark through the project-local launcher. A deterministic
+fake-clock Godot test proves hook time is excluded, real-Godot tests cover lifecycle ordering,
+runtime and hook errors, and cancellation, and service stress covers global bounds across distinct
+worktree identities plus crash replacement and recycling. On 2026-11-05, `scripts/check`,
+`scripts/package-addon 0.0.0-issue-6`, and `scripts/test-package-addon 0.0.0-issue-6` all passed;
+the package checks used the repository's checksum-pinned gpm 0.6.0 installer.
+
 ## Acceptance criteria
 
 | Criterion | Status | Evidence or remaining work |

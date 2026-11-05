@@ -1,11 +1,12 @@
 extends SceneTree
-
 ## Internal protocol codec script.
 const Protocol: GDScript = preload("res://addons/gdtest/protocol.gd")
 ## Internal runtime version declaration.
 const Version: GDScript = preload("res://addons/gdtest/version.gd")
 ## Internal asynchronous case task.
 const CaseTask: GDScript = preload("res://addons/gdtest/worker_case_task.gd")
+## Internal benchmark command runner.
+const BenchmarkRunner: GDScript = preload("res://addons/gdtest/worker_benchmark_runner.gd")
 ## Hard upper bound for one JSONL protocol message.
 const MAX_MESSAGE_BYTES: int = 16777216
 ## Default external deadline for one case including its hooks.
@@ -72,6 +73,7 @@ func _start() -> void:
 					"godot_version": Engine.get_version_info(),
 					"capabilities": [
 						"run",
+						"bench",
 						"discover",
 						"ping",
 						"cancel",
@@ -173,11 +175,13 @@ func _dispatch(message: Dictionary[String, Variant]) -> void:
 						"payload": { "worker_id": _worker_id, "generation": _generation },
 					}
 			)
-		"run":
+		"run", "bench":
 			if _running:
-				_send_worker_error("worker.busy", "worker already has an active run")
-			else:
+				_send_worker_error("worker.busy", "worker already has an active operation")
+			elif message_type == "run":
 				_run_command(message)
+			else:
+				BenchmarkRunner.new().start(self, message)
 		"discover":
 			if _running:
 				_send_worker_error("worker.busy", "worker already has an active operation")
@@ -406,7 +410,7 @@ func _prepare_file(
 	instance._gdtest_configure(self, path, _on_assertion_failed)
 	instance._gdtest_begin_registration()
 	if instance.has_method("suite"):
-		await _call(instance, &"suite", [])
+		await instance.callv(&"suite", [])
 	await instance._gdtest_finish_registration()
 	var manifest: Dictionary[String, Variant] = instance._gdtest_manifest()
 	var discovery_errors: Array[Variant] = manifest.get("errors", [])
@@ -864,11 +868,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 
 func _call_optional(instance: Object, method: StringName, arguments: Array[Variant]) -> void:
 	if instance.has_method(method):
-		await _call(instance, method, arguments)
-
-
-func _call(instance: Object, method: StringName, arguments: Array[Variant]) -> void:
-	await instance.callv(method, arguments)
+		await instance.callv(method, arguments)
 
 
 func _on_assertion_failed(diagnostic: Dictionary[String, Variant]) -> void:

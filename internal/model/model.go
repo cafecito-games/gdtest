@@ -7,7 +7,7 @@ import (
 )
 
 // ProtocolVersion is the serialized plan and event schema version.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // TestPlan is independent of absolute worktree paths and concrete executors.
 type TestPlan struct {

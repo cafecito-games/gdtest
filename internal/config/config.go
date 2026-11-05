@@ -44,6 +44,7 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 // Project is the strict project-level configuration.
 type Project struct {
 	Tests             []string     `json:"tests"`
+	Benchmarks        []string     `json:"benchmarks"`
 	Exclude           []string     `json:"exclude"`
 	Godot             string       `json:"godot"`
 	Jobs              int          `json:"jobs"`
@@ -70,6 +71,7 @@ type TestDouble struct {
 func Defaults() Project {
 	return Project{
 		Tests:             []string{"**/*.test.gd"},
+		Benchmarks:        []string{"**/*.bench.gd"},
 		Exclude:           []string{".godot/**"},
 		Godot:             "godot",
 		Jobs:              0,
@@ -127,6 +129,9 @@ const generatedDoubleRuntimePrefix = "addons/gdtest/"
 func (c Project) Validate() error {
 	if len(c.Tests) == 0 {
 		return errors.New("tests must contain at least one pattern")
+	}
+	if len(c.Benchmarks) == 0 {
+		return errors.New("benchmarks must contain at least one pattern")
 	}
 	if c.Godot == "" {
 		return errors.New("godot must not be empty")

@@ -22,3 +22,19 @@ func (f EventSinkFunc) Emit(event model.Event) error { return f(event) }
 type Executor interface {
 	Run(context.Context, model.TestPlan, EventSink) error
 }
+
+// BenchmarkEventSink consumes an immutable benchmark event exactly once.
+type BenchmarkEventSink interface {
+	EmitBenchmark(model.BenchmarkEvent) error
+}
+
+// BenchmarkEventSinkFunc adapts a function to BenchmarkEventSink.
+type BenchmarkEventSinkFunc func(model.BenchmarkEvent) error
+
+// EmitBenchmark implements BenchmarkEventSink.
+func (f BenchmarkEventSinkFunc) EmitBenchmark(event model.BenchmarkEvent) error { return f(event) }
+
+// BenchmarkExecutor runs a benchmark plan without exposing backend objects.
+type BenchmarkExecutor interface {
+	Bench(context.Context, model.BenchmarkPlan, BenchmarkEventSink) error
+}

@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,13 +56,126 @@ func TestRootHelpDescribesExactCommandTree(t *testing.T) {
 	require.Equal(t, ExitOK, exitCode)
 	assert.Empty(t, stderr.String())
 	for _, command := range []string{
-		"daemon", "doctor", "init", "list", "migrate", "run", "version", "warm", "watch",
+		"bench", "daemon", "doctor", "init", "list", "migrate", "run", "version", "warm", "watch",
 	} {
 		assert.Contains(t, stdout.String(), command)
 	}
 	assert.NotContains(t, stdout.String(), "completion")
 	assert.Contains(t, stdout.String(), "--version")
 	assert.NotContains(t, stdout.String(), "-v, --version")
+}
+
+func TestBenchHelpDocumentsBenchmarkPolicy(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"bench", "--help"}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitOK, exitCode)
+	assert.Empty(t, stderr.String())
+	for _, flag := range []string{
+		"--warmup", "--samples", "--iterations", "--compare", "--write-baseline",
+		"--json", "--no-daemon", "--isolation", "--jobs", "--allow-empty",
+	} {
+		assert.Contains(t, stdout.String(), flag)
+	}
+}
+
+func TestBenchRejectsInvalidNumericOptionsBeforeProjectAccess(t *testing.T) {
+	t.Parallel()
+	tests := [][]string{
+		{"bench", "--project", t.TempDir(), "--warmup", "-1"},
+		{"bench", "--project", t.TempDir(), "--samples", "0"},
+		{"bench", "--project", t.TempDir(), "--iterations", "0"},
+	}
+	for _, arguments := range tests {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := Run(context.Background(), arguments, IO{Out: &stdout, Err: &stderr})
+		require.Equal(t, ExitError, exitCode)
+		assert.Empty(t, stdout.String())
+		assert.Contains(t, stderr.String(), "warmup must be non-negative")
+	}
+}
+
+func TestBenchAllowEmptySucceedsWithoutStartingGodot(t *testing.T) {
+	t.Parallel()
+	root := newTestProject(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{
+		"bench", "--project", root, "--allow-empty", "--no-daemon",
+	}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitOK, exitCode, stderr.String())
+	assert.Equal(t, "No benchmarks selected.\n", stdout.String())
+}
+
+func TestBenchRejectsMalformedBaselineBeforeProjectAccess(t *testing.T) {
+	t.Parallel()
+	baseline := filepath.Join(t.TempDir(), "baseline.json")
+	require.NoError(t, os.WriteFile(baseline, []byte(`{"schema_version":99}`), 0o600))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{
+		"bench", "--project", filepath.Join(t.TempDir(), "missing"), "--compare", baseline,
+	}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitError, exitCode)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "benchmark baseline")
+	assert.Contains(t, stderr.String(), "schema")
+}
+
+func TestBenchFailurePreservesExistingBaseline(t *testing.T) {
+	t.Parallel()
+	root := newTestProject(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "bad.bench.gd"), []byte(
+		"extends GDTestBenchmark\nfunc benchmark_bad(value: int) -> void:\n\tpass\n",
+	), 0o600))
+	baseline := filepath.Join(root, "baseline.json")
+	require.NoError(t, os.WriteFile(baseline, []byte("existing baseline"), 0o600))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{
+		"bench", "--project", root, "--no-daemon", "--write-baseline", baseline,
+	}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitError, exitCode)
+	assert.Contains(t, stderr.String(), "must take no arguments")
+	data, err := os.ReadFile(baseline)
+	require.NoError(t, err)
+	assert.Equal(t, "existing baseline", string(data))
+}
+
+func TestBenchmarkEnvironmentDisclosesDirtyWorktreeWithoutItsPath(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for dirty-worktree benchmark metadata")
+	}
+	root := t.TempDir()
+	runGit := func(arguments ...string) {
+		command := exec.Command("git", append([]string{"-C", root}, arguments...)...)
+		output, err := command.CombinedOutput()
+		require.NoErrorf(t, err, "git %v:\n%s", arguments, output)
+	}
+	runGit("init", "-q", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("clean\n"), 0o600))
+	runGit("add", "tracked.txt")
+	runGit("-c", "user.name=gdtest", "-c", "user.email=gdtest@example.invalid", "commit", "-qm", "clean")
+	clean := benchmarkEnvironment(root)
+	assert.False(t, clean.DirtyWorktree)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("dirty\n"), 0o600))
+	dirty := benchmarkEnvironment(root)
+	assert.True(t, dirty.DirtyWorktree)
+	encoded, err := json.Marshal(dirty)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), root)
 }
 
 func TestRunHelpDocumentsIsolationPolicies(t *testing.T) {
@@ -230,7 +345,7 @@ func TestNoCommandPreservesUsageError(t *testing.T) {
 
 	require.Equal(t, ExitError, exitCode)
 	assert.Empty(t, stdout.String())
-	assert.Equal(t, "usage: gdtest <init|run|list|watch|warm|doctor|migrate|daemon> [options]\n", stderr.String())
+	assert.Equal(t, "usage: gdtest <init|run|bench|list|watch|warm|doctor|migrate|daemon> [options]\n", stderr.String())
 }
 
 func TestMigrateVestModesAndMutuallyExclusiveFlags(t *testing.T) {

@@ -1,5 +1,11 @@
 # Performance measurement
 
+This document covers gdtest's internal engineering corpora. The public `gdtest bench` command is
+separate: it discovers user-authored `*.bench.gd` files, measures them inside persistent workers,
+reports raw samples plus median/p95/min/max statistics, and can write or compare portable JSON
+baselines. See `api-spec.md` section 14.8 and `docs/getting-started.md` for that user-facing API.
+Neither path turns noisy wall-clock measurements into automatic pass/fail thresholds.
+
 Run `scripts/benchmark` from a quiet machine. It prints UTC time, operating system, CPU architecture, Go version, scheduler width, and Godot version before five samples of every Go benchmark. It then measures 30 ready-daemon and warm trivial-file requests and executes the 10,000-assertion and 10,000-dynamic-case corpora through persistent workers. Each report is emitted as a `gdtest_performance` JSON record with sample count, minimum, median, p95, and maximum nanoseconds. Set `GDTEST_PERFORMANCE_SAMPLES` to change the large-corpus default of five or `GDTEST_LATENCY_SAMPLES` to change the latency default of 30.
 
 For allocation or CPU investigation, run `scripts/profile [output-directory]`. It profiles the

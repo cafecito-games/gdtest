@@ -716,6 +716,171 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 	}
 }
 
+// Bench executes one benchmark plan while retaining the process for reuse.
+func (p *Process) Bench(
+	ctx context.Context,
+	plan model.BenchmarkPlan,
+	sink executor.BenchmarkEventSink,
+) error {
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+	if sink == nil {
+		return errors.New("worker benchmark event sink is required")
+	}
+	if err := validateBenchmarkPlan(plan); err != nil {
+		return err
+	}
+	p.sequence = 0
+	if plan.Generation != p.Generation() {
+		return fmt.Errorf("benchmark plan generation %d does not match worker generation %d", plan.Generation, p.Generation())
+	}
+	p.stateMu.Lock()
+	if p.closed {
+		p.stateMu.Unlock()
+		return errors.New("worker is closed")
+	}
+	p.runID = plan.RunID
+	p.lastCase = ""
+	p.stateMu.Unlock()
+	p.clearCapturedOutput()
+	defer func() {
+		p.stateMu.Lock()
+		p.runID = ""
+		p.lastCase = ""
+		p.stateMu.Unlock()
+	}()
+	payload, err := json.Marshal(struct {
+		RunID      string              `json:"run_id"`
+		Generation uint64              `json:"generation"`
+		Plan       model.BenchmarkPlan `json:"plan"`
+	}{RunID: plan.RunID, Generation: plan.Generation, Plan: plan})
+	if err != nil {
+		return fmt.Errorf("encode benchmark plan: %w", err)
+	}
+	if err := p.send(protocol.Envelope{Version: protocol.Version, Type: "bench", RequestID: plan.RunID, Payload: payload}); err != nil {
+		return err
+	}
+	receiveContext := ctx
+	deadline := time.Now().Add(defaultCaseTimeout + caseWatchdogGrace)
+	canceled := false
+	var cancelWait context.CancelFunc
+	defer func() {
+		if cancelWait != nil {
+			cancelWait()
+		}
+	}()
+	for {
+		message, receiveErr := p.receiveBefore(receiveContext, deadline)
+		if receiveErr != nil {
+			if !canceled && ctx.Err() != nil {
+				canceled = true
+				_ = p.Cancel(context.Background(), plan.RunID)
+				var cancel context.CancelFunc
+				receiveContext, cancel = context.WithTimeout(context.Background(), p.options.CancelGrace)
+				cancelWait = cancel
+				deadline = time.Time{}
+				continue
+			}
+			if canceled {
+				p.killAndWait()
+				return ctx.Err()
+			}
+			if errors.Is(receiveErr, context.DeadlineExceeded) {
+				p.killAndWait()
+				return fmt.Errorf("benchmark %s timed out after %s", p.lastBenchmark(), defaultCaseTimeout)
+			}
+			return p.crashError(receiveErr)
+		}
+		if message.Type != "event" {
+			return fmt.Errorf("unexpected worker message type %q during benchmark", message.Type)
+		}
+		event, decodeErr := p.decodeBenchmarkEvent(message)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if event.RunID != plan.RunID {
+			return fmt.Errorf("worker benchmark event run ID %q does not match %q", event.RunID, plan.RunID)
+		}
+		deadline = time.Now().Add(defaultCaseTimeout + caseWatchdogGrace)
+		if !canceled {
+			if diagnostic, captureID, exists := p.benchmarkRuntimeDiagnostic(event); exists {
+				benchmarkID := event.BenchmarkID
+				if benchmarkID == "" {
+					benchmarkID = p.lastBenchmark()
+				}
+				failure := model.BenchmarkEvent{
+					ProtocolVersion: model.ProtocolVersion, Type: model.EventBenchmarkWorkerError,
+					RunID: plan.RunID, BenchmarkID: benchmarkID,
+					Message: diagnostic.message, Location: diagnostic.location,
+					Metadata: map[string]any{"capture_id": captureID},
+				}
+				_ = sink.EmitBenchmark(failure)
+				return fmt.Errorf("benchmark %s runtime error: %s", benchmarkID, diagnostic.message)
+			}
+		}
+		if event.Type == model.EventBenchmarkStarted {
+			p.stateMu.Lock()
+			p.lastCase = event.BenchmarkID
+			p.stateMu.Unlock()
+		}
+		if canceled {
+			if event.Type == model.EventBenchmarkRunFinished {
+				return ctx.Err()
+			}
+			continue
+		}
+		if err := sink.EmitBenchmark(event); err != nil {
+			p.killAndWait()
+			return err
+		}
+		if event.Type == model.EventBenchmarkWorkerError {
+			return fmt.Errorf("worker rejected benchmark: %s", event.Message)
+		}
+		if event.Type == model.EventBenchmarkFinished && event.Status != "pass" {
+			return fmt.Errorf("benchmark %s ended with status %s: %s", event.BenchmarkID, event.Status, event.Message)
+		}
+		if event.Type == model.EventBenchmarkRunFinished {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if event.Status != "pass" {
+				return fmt.Errorf("benchmark run ended with status %s", event.Status)
+			}
+			return nil
+		}
+	}
+}
+
+func (p *Process) benchmarkRuntimeDiagnostic(event model.BenchmarkEvent) (runtimeDiagnostic, string, bool) {
+	if event.Metadata == nil {
+		return runtimeDiagnostic{}, "", false
+	}
+	captures := make([]string, 0, 2)
+	if value, ok := event.Metadata["completed_capture"].(string); ok && value != "" {
+		captures = append(captures, value)
+	}
+	if values, ok := event.Metadata["completed_captures"].([]any); ok {
+		for _, value := range values {
+			if capture, valid := value.(string); valid && capture != "" {
+				captures = append(captures, capture)
+			}
+		}
+	}
+	for _, capture := range captures {
+		p.waitForCaseCapture(context.Background(), capture)
+		if diagnostic, exists := p.takeRuntimeDiagnostic(capture); exists {
+			return diagnostic, capture, true
+		}
+	}
+	return runtimeDiagnostic{}, "", false
+}
+
+func (p *Process) lastBenchmark() string {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	return p.lastCase
+}
+
 func (p *Process) receiveBefore(ctx context.Context, deadline time.Time) (protocol.Envelope, error) {
 	if deadline.IsZero() {
 		return p.receive(ctx)
@@ -1116,6 +1281,61 @@ func (p *Process) decodeEvent(message protocol.Envelope) (model.Event, error) {
 	return event, nil
 }
 
+func (p *Process) decodeBenchmarkEvent(message protocol.Envelope) (model.BenchmarkEvent, error) {
+	if message.Type != "event" {
+		return model.BenchmarkEvent{}, fmt.Errorf("expected worker benchmark event, got %q", message.Type)
+	}
+	var wireEvent struct {
+		Kind       model.BenchmarkEventType `json:"kind"`
+		WorkerID   string                   `json:"worker_id"`
+		SessionID  string                   `json:"session_id"`
+		Generation uint64                   `json:"generation"`
+		RunID      string                   `json:"run_id"`
+		Sequence   uint64                   `json:"sequence"`
+		Data       model.BenchmarkEvent     `json:"data"`
+	}
+	if err := json.Unmarshal(message.Payload, &wireEvent); err != nil {
+		return model.BenchmarkEvent{}, fmt.Errorf("decode worker benchmark event: %w", err)
+	}
+	if wireEvent.Kind == "" {
+		return model.BenchmarkEvent{}, errors.New("worker benchmark event has no kind")
+	}
+	switch wireEvent.Kind {
+	case model.EventBenchmarkRunStarted,
+		model.EventBenchmarkStarted,
+		model.EventBenchmarkSampleStarted,
+		model.EventBenchmarkSample,
+		model.EventBenchmarkFinished,
+		model.EventBenchmarkRunFinished,
+		model.EventBenchmarkWorkerError:
+	default:
+		return model.BenchmarkEvent{}, fmt.Errorf("worker benchmark event has unknown kind %q", wireEvent.Kind)
+	}
+	if wireEvent.WorkerID != p.workerID || wireEvent.SessionID != p.options.SessionID {
+		return model.BenchmarkEvent{}, errors.New("worker benchmark event identity does not match authenticated worker")
+	}
+	if wireEvent.Generation != p.Generation() {
+		return model.BenchmarkEvent{}, fmt.Errorf("worker benchmark event generation %d does not match %d", wireEvent.Generation, p.Generation())
+	}
+	if wireEvent.Sequence != p.sequence+1 {
+		return model.BenchmarkEvent{}, fmt.Errorf("worker benchmark event sequence %d does not follow %d", wireEvent.Sequence, p.sequence)
+	}
+	p.sequence = wireEvent.Sequence
+	event := wireEvent.Data
+	event.ProtocolVersion = model.ProtocolVersion
+	event.Type = wireEvent.Kind
+	event.RunID = wireEvent.RunID
+	if event.Location != nil {
+		location := *event.Location
+		location.File = strings.TrimPrefix(location.File, "res://")
+		if location.File == "" || !validManifestPath(location.File) {
+			return model.BenchmarkEvent{}, fmt.Errorf("worker benchmark event contains invalid diagnostic path %q", event.Location.File)
+		}
+		event.Location = &location
+	}
+	return event, nil
+}
+
 func validateWorkerPlan(plan model.TestPlan) error {
 	if plan.ProtocolVersion != model.ProtocolVersion {
 		return fmt.Errorf(
@@ -1133,6 +1353,34 @@ func validateWorkerPlan(plan model.TestPlan) error {
 	for _, file := range plan.Files {
 		if !validManifestPath(file.Path) {
 			return fmt.Errorf("test plan has invalid project-relative path %q", file.Path)
+		}
+	}
+	return nil
+}
+
+func validateBenchmarkPlan(plan model.BenchmarkPlan) error {
+	if plan.ProtocolVersion != model.ProtocolVersion {
+		return fmt.Errorf("benchmark plan protocol %d does not match %d", plan.ProtocolVersion, model.ProtocolVersion)
+	}
+	if plan.RunID == "" || plan.Generation == 0 {
+		return errors.New("benchmark plan needs a run ID and positive generation")
+	}
+	if plan.Warmup < 0 || plan.Samples <= 0 || plan.Iterations <= 0 {
+		return errors.New("benchmark plan warmup must be non-negative and samples and iterations must be positive")
+	}
+	seen := make(map[string]struct{})
+	for _, file := range plan.Files {
+		if !validManifestPath(file.Path) {
+			return fmt.Errorf("benchmark plan has invalid project-relative path %q", file.Path)
+		}
+		for _, item := range file.Benchmarks {
+			if item.ID == "" || item.MethodName == "" {
+				return errors.New("benchmark plan entries need IDs and method names")
+			}
+			if _, exists := seen[item.ID]; exists {
+				return fmt.Errorf("benchmark plan contains duplicate ID %q", item.ID)
+			}
+			seen[item.ID] = struct{}{}
 		}
 	}
 	return nil
