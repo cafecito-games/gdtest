@@ -181,15 +181,16 @@ type edit struct {
 }
 
 type transformer struct {
-	path          string
-	source        []byte
-	functions     map[string]*ast.FunctionDeclaration
-	edits         []edit
-	findings      []Finding
-	wrappers      []string
-	unsupported   map[string]struct{}
-	migratingVest bool
-	signalHandled map[int]struct{}
+	path             string
+	source           []byte
+	functions        map[string]*ast.FunctionDeclaration
+	edits            []edit
+	findings         []Finding
+	wrappers         []string
+	unsupported      map[string]struct{}
+	migratingVest    bool
+	signalHandled    map[int]struct{}
+	reassignedOwners map[string]bool
 }
 
 func (t *transformer) directives(tree *ast.File) {

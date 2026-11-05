@@ -704,3 +704,23 @@ class Inner:
 	assert.Contains(t, string(result.Output), "capture_signal(_source.nested, 0)")
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 }
+
+func TestSignalCapturesPreserveOwnersReassignedByHelpers(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_helper_reassigns() -> void:
+	capture_signal(_source.helper, 0)
+	_replace()
+	expect_equal(get_signal_emissions(_source.helper).size(), 0)
+
+func _replace() -> void:
+	_source = Source.new()
+`)
+	result, err := Transform("tests/helper.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.helper, 0)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}

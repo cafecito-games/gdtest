@@ -64,6 +64,7 @@ func (t *transformer) signalCaptures(tree *ast.File) {
 		return
 	}
 	parents := parentNodes(tree)
+	t.reassignedOwners = assignedNames(tree)
 	var captures []*signalCapture
 	var reads []*signalRead
 	ast.Inspect(tree, func(node ast.Node) bool {
@@ -333,8 +334,12 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 		return "the signal capture overlaps another migration rewrite"
 	}
 	owner := capture.member.Object.(*ast.Identifier).Name
-	if reassigns(capture.function, owner) {
-		return "the signal owner is reassigned inside the test function"
+	if declaresLocal(capture.function, owner) {
+		if assignedNames(capture.function)[owner] {
+			return "the signal owner is reassigned inside the test function"
+		}
+	} else if t.reassignedOwners[owner] {
+		return "the signal owner is a class member reassigned somewhere in this file"
 	}
 	if redeclares(capture.function, owner) {
 		return "the signal owner name is redeclared inside the test function"
@@ -392,23 +397,45 @@ func redeclares(function *ast.FunctionDeclaration, name string) bool {
 	return shadowed || declarations > 1
 }
 
-func reassigns(function *ast.FunctionDeclaration, name string) bool {
+// declaresLocal reports whether the test function binds the name as a local or parameter,
+// which makes the name local to that test rather than a class member.
+func declaresLocal(function *ast.FunctionDeclaration, name string) bool {
+	for _, parameter := range function.Parameters {
+		if parameter.Name == name {
+			return true
+		}
+	}
 	found := false
 	ast.Inspect(function, func(node ast.Node) bool {
-		switch value := node.(type) {
-		case *ast.Assignment:
-			if identifier, ok := value.Target.(*ast.Identifier); ok && identifier.Name == name {
-				found = true
-			}
-			if member, ok := value.Target.(*ast.MemberExpression); ok && member.Property == name {
-				if receiver, ok := member.Object.(*ast.Identifier); ok && receiver.Name == "self" {
-					found = true
-				}
-			}
+		if declaration, ok := node.(*ast.VariableDeclaration); ok && declaration.Name == name {
+			found = true
 		}
 		return !found
 	})
 	return found
+}
+
+// assignedNames collects every name written within the subtree. Owner reassignment of
+// a class member is judged across the whole file, since a helper can change what a read
+// in another test observes.
+func assignedNames(root ast.Node) map[string]bool {
+	names := make(map[string]bool)
+	ast.Inspect(root, func(node ast.Node) bool {
+		assignment, ok := node.(*ast.Assignment)
+		if !ok {
+			return true
+		}
+		switch target := assignment.Target.(type) {
+		case *ast.Identifier:
+			names[target.Name] = true
+		case *ast.MemberExpression:
+			if receiver, ok := target.Object.(*ast.Identifier); ok && receiver.Name == "self" {
+				names[target.Property] = true
+			}
+		}
+		return true
+	})
+	return names
 }
 
 // declaredNames returns every name a generated probe must not shadow: file-level
