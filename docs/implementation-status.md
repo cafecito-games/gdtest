@@ -96,6 +96,10 @@ Completed on 2026-11-05 for the current hardening batch:
   commands; extras are command-scoped. Real-Godot reset coverage proves that the startup
   `AudioBusLayout` is restored, and each process uses an opaque private `user://` directory that is
   removed on exit and failed startup. See ADR 0006.
+- Pooled multi-file responses and their immutable terminal event now retain phase-separated
+  critical-path timings for scheduler wait, worker acquisition/startup, script load and dynamic
+  definition, hooks and cases, serialization, reset, and total daemon time. A repeated race test
+  covers concurrent aggregation without sharing mutable event metadata.
 - `prek run --all-files` passes on `main`; the standard whitespace hooks leave the two authoritative
   specification files byte-identical, and the hook configuration no longer contradicts the
   required cohesive local milestone commits.

@@ -632,7 +632,14 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 			if err := sink.Emit(model.Event{Type: model.EventCaseFinished, RunID: plan.RunID, TestID: id, Status: "pass"}); err != nil {
 				return err
 			}
-			return sink.Emit(model.Event{Type: model.EventRunFinished, RunID: plan.RunID, Status: "pass"})
+			return sink.Emit(model.Event{
+				Type: model.EventRunFinished, RunID: plan.RunID, Status: "pass",
+				Metadata: map[string]any{"timings_usec": map[string]any{
+					"script_load_dynamic_definition": float64(11),
+					"hooks_cases":                    float64(22),
+					"result_serialization":           float64(33),
+				}},
+			})
 		}
 		factoryMu.Lock()
 		process.pid = 900 + len(processes)
@@ -701,6 +708,15 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 	values, ok := response.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, values["reused"])
+	timings, ok := values["timings_ns"].(map[string]int64)
+	require.True(t, ok)
+	for _, phase := range []string{
+		"queue_wait", "worker_acquisition_startup", "worker_execution_serialization",
+		"script_load_dynamic_definition", "hooks_cases", "result_serialization",
+		"worker_reset", "daemon_total",
+	} {
+		assert.Contains(t, timings, phase)
+	}
 	require.Len(t, processes, 3, "the second command reuses the primary and creates only one extra lane")
 	assert.False(t, processes[0].closed.Load())
 	assert.True(t, processes[2].closed.Load())

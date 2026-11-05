@@ -339,12 +339,17 @@ func (s *SessionService) runFiles(
 		return nil, err
 	}
 	var primary managedWorker
+	aggregateTimings := make(map[string]int64)
+	primarySubmitted := time.Now()
 	_, err = s.schedule(
 		ctx, request.SessionID, request.Plan.Generation,
 		scheduler.Interactive, isolation,
 		func(setupCtx context.Context) (any, error) {
+			aggregateTimings["queue_wait"] = time.Since(primarySubmitted).Nanoseconds()
+			workerStarted := time.Now()
 			var setupErr error
 			primary, setupErr = s.ensureWorker(setupCtx, entry, request.Plan.Generation)
+			aggregateTimings["worker_acquisition_startup"] = time.Since(workerStarted).Nanoseconds()
 			return nil, setupErr
 		},
 	)
@@ -372,9 +377,10 @@ func (s *SessionService) runFiles(
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type fileResult struct {
-		index int
-		pid   int
-		err   error
+		index   int
+		pid     int
+		timings map[string]int64
+		err     error
 	}
 	results := make(chan fileResult, len(request.Plan.Files))
 	available := make(chan *fileWorkerLane, len(lanes))
@@ -393,16 +399,20 @@ func (s *SessionService) runFiles(
 			}
 			fileRequest := request
 			fileRequest.Plan.Files = []model.FilePlan{file}
+			fileSubmitted := time.Now()
 			value, err := s.schedule(
 				runCtx, request.SessionID, request.Plan.Generation,
 				scheduler.Interactive, isolation,
 				func(fileCtx context.Context) (any, error) {
-					return s.runFileOnWorker(fileCtx, entry, lane, fileRequest, safeEmit)
+					return s.runFileOnWorker(
+						fileCtx, entry, lane, fileRequest, safeEmit, time.Since(fileSubmitted),
+					)
 				},
 			)
 			result := fileResult{index: index, err: err}
 			if values, ok := value.(map[string]any); ok {
 				result.pid, _ = values["worker_pid"].(int)
+				result.timings, _ = values["timings_ns"].(map[string]int64)
 			}
 			if err != nil {
 				cancel()
@@ -419,6 +429,7 @@ func (s *SessionService) runFiles(
 		result := <-results
 		pids[result.index] = result.pid
 		joined = errors.Join(joined, result.err)
+		mergeMaximumTimings(aggregateTimings, result.timings)
 		if result.err == nil {
 			succeeded++
 		}
@@ -437,11 +448,15 @@ func (s *SessionService) runFiles(
 	if joined != nil {
 		status = "error"
 	}
+	eventTimings := make(map[string]int64, len(aggregateTimings)+1)
+	mergeMaximumTimings(eventTimings, aggregateTimings)
+	eventTimings["daemon_total"] = time.Since(submitted).Nanoseconds()
 	metadata := map[string]any{
 		"requested_generation": request.Plan.Generation,
 		"current_generation":   currentGeneration,
 		"files":                len(request.Plan.Files),
 		"jobs":                 jobs,
+		"timings_ns":           eventTimings,
 	}
 	if emitErr := safeEmit(model.Event{
 		ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished,
@@ -456,10 +471,11 @@ func (s *SessionService) runFiles(
 	if joined == nil && request.WarmWorkers > 0 {
 		s.warmReplacement(entry, request.Plan.Generation)
 	}
+	aggregateTimings["daemon_total"] = time.Since(submitted).Nanoseconds()
 	return map[string]any{
 		"worker_pids": pids,
 		"reused":      primaryReused,
-		"timings_ns":  map[string]int64{"daemon_total": time.Since(submitted).Nanoseconds()},
+		"timings_ns":  aggregateTimings,
 	}, joined
 }
 
@@ -491,15 +507,22 @@ func (s *SessionService) runFileOnWorker(
 	lane *fileWorkerLane,
 	request RunRequest,
 	emit daemon.EmitFunc,
+	queueWait time.Duration,
 ) (any, error) {
+	timings := map[string]int64{"queue_wait": queueWait.Nanoseconds()}
+	workerStarted := time.Now()
 	process, err := s.ensureFileWorker(ctx, entry, lane, request.Plan.Generation)
+	timings["worker_acquisition_startup"] = time.Since(workerStarted).Nanoseconds()
 	if err != nil {
 		return nil, err
 	}
 	tainted := false
 	sink := executor.EventSinkFunc(func(event model.Event) error {
 		switch event.Type {
-		case model.EventWorkerReady, model.EventRunStarted, model.EventRunFinished:
+		case model.EventWorkerReady, model.EventRunStarted:
+			return nil
+		case model.EventRunFinished:
+			mergeWorkerTimings(timings, event.Metadata)
 			return nil
 		case model.EventWorkerTainted:
 			tainted = true
@@ -508,14 +531,18 @@ func (s *SessionService) runFileOnWorker(
 			return emit(event)
 		}
 	})
+	executionStarted := time.Now()
 	if err := process.Run(ctx, request.Plan, sink); err != nil {
 		s.retireFileWorker(entry, lane)
 		return nil, err
 	}
+	timings["worker_execution_serialization"] = time.Since(executionStarted).Nanoseconds()
+	resetStarted := time.Now()
 	if err := process.Reset(ctx); err != nil {
 		s.retireFileWorker(entry, lane)
 		return nil, fmt.Errorf("reset worker after file: %w", err)
 	}
+	timings["worker_reset"] = time.Since(resetStarted).Nanoseconds()
 	lane.workerRuns++
 	if lane.primary {
 		entry.workerRuns++
@@ -526,7 +553,16 @@ func (s *SessionService) runFileOnWorker(
 		(s.memoryBudgetMB > 0 && (memoryErr != nil || memoryExceeded)) {
 		s.retireFileWorker(entry, lane)
 	}
-	return map[string]any{"worker_pid": process.PID()}, nil
+	return map[string]any{"worker_pid": process.PID(), "timings_ns": timings}, nil
+}
+
+func mergeMaximumTimings(destination, source map[string]int64) {
+	for name, duration := range source {
+		current, exists := destination[name]
+		if !exists || duration > current {
+			destination[name] = duration
+		}
+	}
 }
 
 func (s *SessionService) ensureFileWorker(
