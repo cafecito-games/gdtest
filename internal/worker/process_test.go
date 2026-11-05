@@ -134,9 +134,10 @@ func TestStartBootstrapsOnceThenRetriesBeforeReturningWorker(t *testing.T) {
 	root := t.TempDir()
 	workerAttempts := 0
 	bootstrapAttempts := 0
+	var diagnostics strings.Builder
 	process, err := Start(context.Background(), ProcessOptions{
 		Project: root, SessionID: "bootstrap-retry", Generation: 1,
-		StartupTimeout: 2 * time.Second,
+		StartupTimeout: 2 * time.Second, Stderr: &diagnostics,
 		commandFactory: func(arguments []string) *exec.Cmd {
 			if containsArgument(arguments, "--editor") {
 				bootstrapAttempts++
@@ -154,6 +155,8 @@ func TestStartBootstrapsOnceThenRetriesBeforeReturningWorker(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, workerAttempts)
 	assert.Equal(t, 1, bootstrapAttempts)
+	assert.NotContains(t, diagnostics.String(), "ACTIONABLE-STARTUP-MARKER",
+		"a recovered startup failure must not leak transient diagnostics")
 	startupTimings := process.TakeStartupTimings()
 	assert.Positive(t, startupTimings["project_bootstrap_import"])
 	assert.Empty(t, process.TakeStartupTimings(), "startup timings must be reported only once")
