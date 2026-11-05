@@ -761,6 +761,7 @@ class PredeleteMisuseNode:
 
 
 var _spawned_ids: Array[int] = []
+var _mid_case_ids: Array[int] = []
 
 
 func suite() -> void:
@@ -768,10 +769,16 @@ func suite() -> void:
 			"teardown_suite",
 			func() -> void:
 				test(
-						"case predelete autofree errors the case without registering in outer scopes",
+						"mid-case node removal still registers in active case while end-of-scope release and drain reject",
 						func() -> void:
+							var mid_case_node: PredeleteMisuseNode = PredeleteMisuseNode.new(self, _mid_case_ids)
+							mid_case_node.free()
+							expect_equal(_mid_case_ids.size(), 1)
+							expect_true(is_instance_id_valid(_mid_case_ids[0]))
 							autofree(PredeleteMisuseNode.new(self, _spawned_ids))
-							expect_true(true)
+							var queued_drain_node: PredeleteMisuseNode = PredeleteMisuseNode.new(self, _spawned_ids)
+							get_tree().root.add_child(queued_drain_node)
+							queued_drain_node.queue_free()
 				)
 	)
 
@@ -792,6 +799,10 @@ func after_all() -> void:
 	var file_closing_node: Node = Node.new()
 	_spawned_ids.append(file_closing_node.get_instance_id())
 	autofree(file_closing_node)
+	var mid_case_alive: int = 0
+	for instance_id: int in _mid_case_ids:
+		if is_instance_id_valid(instance_id):
+			mid_case_alive += 1
 	var alive_count: int = 0
 	for instance_id: int in _spawned_ids:
 		if is_instance_id_valid(instance_id):
@@ -801,7 +812,7 @@ func after_all() -> void:
 				resolved.free()
 	var handle: FileAccess = FileAccess.open(%q, FileAccess.WRITE)
 	if handle != null:
-		handle.store_string(str(alive_count))
+		handle.store_string(str(mid_case_alive) + ":" + str(alive_count))
 		handle.close()
 `, markerPath)
 
@@ -844,7 +855,7 @@ func after_all() -> void:
 
 		aliveBytes, err := os.ReadFile(filepath.FromSlash(markerPath))
 		require.NoError(t, err)
-		assert.Equal(t, "4", string(aliveBytes), "none of the rejected teardown autofree nodes may be freed by outer scopes")
+		assert.Equal(t, "0:5", string(aliveBytes), "mid-case autofree must release at case end while all 5 end-of-scope teardown autofree nodes remain unregistered")
 	})
 
 	t.Run("mid-case cancellation and teardown-drain cancellation preserve scope atomicity and taint worker", func(t *testing.T) {

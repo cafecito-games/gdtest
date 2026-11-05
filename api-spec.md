@@ -1303,10 +1303,11 @@ Calling `autofree(null)` or passing a freed instance reports a source-located
 error and registers nothing. Calling `autofree` during discovery or
 registration (`script.new()` member initializers, `suite()`, `define()`
 callbacks, `*__cases()` providers, or `get_suite_name()`), during suite or
-file closing hooks (`after_suite` or `after_all`), during node deletion or
-teardown callbacks (`_exit_tree()` or `NOTIFICATION_PREDELETE`), or outside an
-active file, suite, or case scope reports a source-located discovery or
-framework error and registers nothing.
+file closing hooks (`after_suite` or `after_all`), during end-of-scope
+release or frame drain (such as `_exit_tree()` or `NOTIFICATION_PREDELETE`
+callbacks triggered while gdtest closes a scope), or outside an active file,
+suite, or case scope reports a source-located discovery or framework error and
+registers nothing.
 
 #### End-of-scope teardown and leak detection
 
