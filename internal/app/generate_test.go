@@ -347,6 +347,28 @@ func TestGenerateDoublesWriteThenWriteIsNoOpAndCheckPasses(t *testing.T) {
 	assert.Empty(t, stderr)
 }
 
+func TestGenerateDoublesPathsWithSpacesRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	configuration := `{"test_doubles":[{"source":"src/item catalog.gd","output":"doubles/item catalog double.gd","class_name":"ItemCatalogDouble"}]}`
+	root := writeGenerateProject(t, configuration, map[string]string{"src/item catalog.gd": inventorySource})
+
+	exitCode, stdout, stderr := runGenerate(t, "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "2 file(s) written; 0 file(s) removed\n", stdout)
+	written, err := os.ReadFile(filepath.Join(root, "doubles", "item catalog double.gd"))
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(string(written), "# gdtest:generated-double v1 source=res://src/item catalog.gd\n"))
+
+	exitCode, stdout, stderr = runGenerate(t, "--check", "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stdout=%q stderr=%q", stdout, stderr)
+	assert.Equal(t, "0 double(s) out of date\n", stdout)
+
+	exitCode, stdout, stderr = runGenerate(t, "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "0 file(s) written; 0 file(s) removed\n", stdout)
+}
+
 func TestGenerateDoublesCheckReportsCorruptedByteAsStale(t *testing.T) {
 	t.Parallel()
 

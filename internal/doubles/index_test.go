@@ -50,6 +50,19 @@ func TestBuildIndexRecordsExactOwnershipMarkerOnly(t *testing.T) {
 	assert.Equal(t, []GeneratedScript{{Path: "doubles/owned.gd", Source: "src/a.gd"}}, index.GeneratedScripts())
 }
 
+func TestBuildIndexRecordsOwnershipForSourcePathsWithSpaces(t *testing.T) {
+	t.Parallel()
+
+	index := buildProject(t, map[string]string{
+		"doubles/spaced.gd":   "# gdtest:generated-double v1 source=res://src/item catalog.gd\nclass_name Spaced\n",
+		"doubles/trailing.gd": "# gdtest:generated-double v1 source=res://src/a.gd \n",
+		"doubles/carriage.gd": "# gdtest:generated-double v1 source=res://src/a.gd\r\n",
+		"doubles/not_gd.gd":   "# gdtest:generated-double v1 source=res://src/a.txt\n",
+		"doubles/empty.gd":    "# gdtest:generated-double v1 source=res://\n",
+	})
+	assert.Equal(t, []GeneratedScript{{Path: "doubles/spaced.gd", Source: "src/item catalog.gd"}}, index.GeneratedScripts())
+}
+
 func TestBuildIndexDiagnosesDuplicateClassName(t *testing.T) {
 	t.Parallel()
 

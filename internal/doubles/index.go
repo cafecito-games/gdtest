@@ -19,8 +19,9 @@ import (
 )
 
 // ownershipMarker matches the exact first line of a generated double. The
-// capture is the project-relative path of the script it doubles.
-var ownershipMarker = regexp.MustCompile(`^# gdtest:generated-double v1 source=res://(\S+)$`)
+// capture is the project-relative path of the script it doubles, which may
+// contain spaces; generatedSourceOf validates it.
+var ownershipMarker = regexp.MustCompile(`^# gdtest:generated-double v1 source=res://(.+)$`)
 
 const resourcePrefix = "res://"
 
@@ -305,7 +306,11 @@ func generatedSourceOf(source []byte) string {
 	if match == nil {
 		return ""
 	}
-	return string(match[1])
+	captured := string(match[1])
+	if captured != strings.TrimSpace(captured) || !strings.HasSuffix(captured, ".gd") {
+		return ""
+	}
+	return captured
 }
 
 // literalString returns the contents of a string literal without its quotes.

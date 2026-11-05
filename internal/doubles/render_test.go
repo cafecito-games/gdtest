@@ -310,6 +310,12 @@ func TestRenderReturnChecksByDeclaredType(t *testing.T) {
 			reject: `gdtest_method._gdtest_reject_return(gdtest_value, "Mode")`,
 		},
 		{
+			name:   "global enum",
+			source: "extends RefCounted\n\nfunc pick() -> Error:\n\treturn OK\n",
+			check:  []string{"\t\tif gdtest_value is int:"},
+			reject: `gdtest_method._gdtest_reject_return(gdtest_value, "Error")`,
+		},
+		{
 			name:   "native object",
 			source: "extends RefCounted\n\nfunc pick() -> Node:\n\treturn null\n",
 			check:  []string{"\t\tif gdtest_value == null or gdtest_value is Node:"},

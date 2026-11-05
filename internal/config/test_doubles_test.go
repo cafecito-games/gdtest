@@ -152,6 +152,66 @@ func TestValidateTestDoublesRejectsInvalidEntries(t *testing.T) {
 				{"source": "src/b.gd", "output": "doubles/b.gd", "class_name": "Double"}]`,
 			want: `test_doubles[1].class_name: "Double" duplicates test_doubles[0].class_name`,
 		},
+		{
+			name:    "double quote in source",
+			doubles: `[{"source": "src/a\"b.gd", "output": "doubles/a.gd"}]`,
+			want:    `test_doubles[0].source: "src/a\"b.gd" must not contain a double quote or control character`,
+		},
+		{
+			name:    "double quote in output",
+			doubles: `[{"source": "src/a.gd", "output": "doubles/a\"b.gd"}]`,
+			want:    `test_doubles[0].output: "doubles/a\"b.gd" must not contain a double quote or control character`,
+		},
+		{
+			name:    "tab in source",
+			doubles: `[{"source": "src/a\tb.gd", "output": "doubles/a.gd"}]`,
+			want:    `test_doubles[0].source: "src/a\tb.gd" must not contain a double quote or control character`,
+		},
+		{
+			name:    "newline in output",
+			doubles: `[{"source": "src/a.gd", "output": "doubles/a\nb.gd"}]`,
+			want:    `test_doubles[0].output: "doubles/a\nb.gd" must not contain a double quote or control character`,
+		},
+		{
+			name:    "delete character in source",
+			doubles: `[{"source": "src/a\u007fb.gd", "output": "doubles/a.gd"}]`,
+			want:    `test_doubles[0].source`,
+		},
+		{
+			name:    "leading space in source",
+			doubles: `[{"source": " src/a.gd", "output": "doubles/a.gd"}]`,
+			want:    `test_doubles[0].source: " src/a.gd" must not begin or end with whitespace`,
+		},
+		{
+			name:    "godot segment in source",
+			doubles: `[{"source": ".godot/a.gd", "output": "doubles/a.gd"}]`,
+			want:    `test_doubles[0].source: ".godot/a.gd" must not contain a .godot or .git segment`,
+		},
+		{
+			name:    "git segment in source",
+			doubles: `[{"source": "src/.git/a.gd", "output": "doubles/a.gd"}]`,
+			want:    `test_doubles[0].source: "src/.git/a.gd" must not contain a .godot or .git segment`,
+		},
+		{
+			name:    "godot segment in output",
+			doubles: `[{"source": "src/a.gd", "output": ".godot/doubles/a.gd"}]`,
+			want:    `test_doubles[0].output: ".godot/doubles/a.gd" must not contain a .godot or .git segment`,
+		},
+		{
+			name:    "git segment in output",
+			doubles: `[{"source": "src/a.gd", "output": ".git/a.gd"}]`,
+			want:    `test_doubles[0].output: ".git/a.gd" must not contain a .godot or .git segment`,
+		},
+		{
+			name:    "nested godot segment in output",
+			doubles: `[{"source": "src/a.gd", "output": "a/.godot/b.gd"}]`,
+			want:    `test_doubles[0].output: "a/.godot/b.gd" must not contain a .godot or .git segment`,
+		},
+		{
+			name:    "nested git segment in source at a later entry",
+			doubles: `[{"source": "src/a.gd", "output": "doubles/a.gd"}, {"source": "a/.git/b.gd", "output": "doubles/b.gd"}]`,
+			want:    `test_doubles[1].source: "a/.git/b.gd" must not contain a .godot or .git segment`,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -170,6 +230,8 @@ func TestValidateTestDoublesAcceptsEmptyClassNameAndValidPaths(t *testing.T) {
 	project.TestDoubles = []TestDouble{
 		{Source: "src/a.gd", Output: "doubles/a_double.gd"},
 		{Source: "src/b.gd", Output: "doubles/b_double.gd", ClassName: "_B_Double2"},
+		{Source: "src/item catalog.gd", Output: "doubles/item catalog_double.gd"},
+		{Source: "src/.godot_notes/c.gd", Output: "doubles/godot.gd"},
 	}
 	require.NoError(t, project.Validate())
 }

@@ -186,11 +186,19 @@ func validateTestDoubles(doubles []TestDouble) error {
 	return nil
 }
 
+// unsafeDoublePathSegments are directories that the ownership index never reads,
+// so an output placed beneath one could never be found again.
+var unsafeDoublePathSegments = []string{".godot", ".git"}
+
 func validateDoubleProjectPath(index int, field string, value string) error {
 	location := fmt.Sprintf("test_doubles[%d].%s", index, field)
 	switch {
 	case value == "":
 		return fmt.Errorf("%s: must not be empty", location)
+	case strings.ContainsFunc(value, isEmbeddingUnsafeRune):
+		return fmt.Errorf("%s: %q must not contain a double quote or control character", location, value)
+	case strings.TrimSpace(value) != value:
+		return fmt.Errorf("%s: %q must not begin or end with whitespace", location, value)
 	case strings.Contains(value, `\`):
 		return fmt.Errorf("%s: %q must use forward slashes", location, value)
 	case path.IsAbs(value) || (len(value) >= 2 && value[1] == ':'):
@@ -199,8 +207,18 @@ func validateDoubleProjectPath(index int, field string, value string) error {
 		return fmt.Errorf("%s: %q must be a clean relative path", location, value)
 	case slices.Contains(strings.Split(value, "/"), ".."):
 		return fmt.Errorf("%s: %q must not contain a parent directory segment", location, value)
+	case slices.ContainsFunc(strings.Split(value, "/"), func(segment string) bool {
+		return slices.Contains(unsafeDoublePathSegments, segment)
+	}):
+		return fmt.Errorf("%s: %q must not contain a .godot or .git segment", location, value)
 	case !strings.HasSuffix(value, ".gd"):
 		return fmt.Errorf("%s: %q must end in .gd", location, value)
 	}
 	return nil
+}
+
+// isEmbeddingUnsafeRune reports whether r would break a GDScript string literal
+// or the ownership marker line that embeds a double path.
+func isEmbeddingUnsafeRune(r rune) bool {
+	return r == '"' || r < 0x20 || r == 0x7f
 }

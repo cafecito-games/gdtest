@@ -50,3 +50,16 @@ var builtinTypeNames = []string{
 	"PackedVector2Array", "PackedVector3Array", "PackedColorArray",
 	"PackedVector4Array",
 }
+
+// globalEnumNames are the enums of Godot 4.7 declared in @GlobalScope, which a
+// return type may name without a qualifier, and the Variant enums that a return
+// type names with the Variant qualifier. Enum values are integers, so a generated
+// double checks them with `is int`. The list is taken from the engine's own class
+// reference for Godot 4.7 @GlobalScope and Variant.
+var globalEnumNames = []string{
+	"ClockDirection", "Corner", "Error", "EulerOrder", "HorizontalAlignment",
+	"InlineAlignment", "JoyAxis", "JoyButton", "Key", "KeyLocation",
+	"KeyModifierMask", "MethodFlags", "MIDIMessage", "MouseButton",
+	"MouseButtonMask", "Orientation", "PropertyHint", "PropertyUsageFlags", "Side",
+	"VerticalAlignment", "Variant.Operator", "Variant.Type",
+}

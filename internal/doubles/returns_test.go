@@ -41,6 +41,11 @@ func TestAnalyzeReturnCheckTable(t *testing.T) {
 		{name: "chain inner class", returnType: "Inner", check: ReturnCheckObject, expectedType: "Inner"},
 		{name: "project inner class qualified", returnType: "Calc.Deep", check: ReturnCheckObject, expectedType: "Calc.Deep"},
 		{name: "native class unqualified", returnType: "Node", check: ReturnCheckObject, expectedType: "Node"},
+		{name: "global enum Error", returnType: "Error", check: ReturnCheckEnum, expectedType: "Error"},
+		{name: "global enum Key", returnType: "Key", check: ReturnCheckEnum, expectedType: "Key"},
+		{name: "global enum MIDIMessage", returnType: "MIDIMessage", check: ReturnCheckEnum, expectedType: "MIDIMessage"},
+		{name: "variant enum Type", returnType: "Variant.Type", check: ReturnCheckEnum, expectedType: "Variant.Type"},
+		{name: "variant enum Operator", returnType: "Variant.Operator", check: ReturnCheckEnum, expectedType: "Variant.Operator"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

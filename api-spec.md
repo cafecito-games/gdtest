@@ -846,9 +846,13 @@ Doubles are declared in `test_doubles` in `gdtest.json`:
   `class_name`.
 
 Paths use forward slashes, must be clean relative paths, and must not contain a
-`..` segment. Every `source` and every `output` must be unique across entries.
-Unknown fields are rejected. Each error names the entry index, for example
-`test_doubles[1].output`.
+`..` segment. A path may contain spaces, but it must not begin or end with
+whitespace, must not contain a double quote or a control character (a code
+below `0x20` or `0x7f`), and must not contain a `.godot` or `.git` segment at
+any depth, because those directories are never indexed and an output placed
+there could not be found again. Every `source` and every `output` must be
+unique across entries. Unknown fields are rejected. Each error names the entry
+index, for example `test_doubles[1].output`.
 
 #### Command
 
@@ -964,6 +968,12 @@ A call with no queued behaviour is unexpected. It is recorded, reported as
 described below, and returns the neutral default of the return type.
 
 #### Typed collection answers
+
+An answer for a method whose return type is an enum must be an integer. The
+global enums of Godot 4.7 (`Error`, `Key`, `MouseButton`, and the rest of
+`@GlobalScope`) and the `Variant.Type` and `Variant.Operator` enums are checked
+this way, so a null answer for `-> Error` fails with
+`answer returned Nil, expected Error`.
 
 An answer for a method that returns a typed collection must return an identically
 typed collection. An untyped literal is rejected even when its elements are

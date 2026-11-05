@@ -21,6 +21,9 @@ func (state *analysis) classifyReturn(returnType string) (ReturnCheck, string) {
 	case isTypedCollection(returnType, "Dictionary"):
 		return ReturnCheckTypedDictionary, returnType
 	}
+	if slices.Contains(globalEnumNames, returnType) {
+		return ReturnCheckEnum, returnType
+	}
 	head, tail, qualified := strings.Cut(returnType, ".")
 	if !qualified {
 		if state.enumNames[returnType] {
