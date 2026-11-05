@@ -13,6 +13,7 @@ const (
 	signalCaptureUnset = ""
 	signalCaptureUse   = "signal capture has no gdtest v1 equivalent"
 	probeHelperName    = "watch_signal"
+	probeMaxArity      = 8
 )
 
 type signalCapture struct {
@@ -285,8 +286,12 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 	if len(capture.call.Arguments) != 2 {
 		return "capture_signal requires a literal argument count to migrate"
 	}
-	if literal, ok := capture.call.Arguments[1].(*ast.Literal); !ok || literal.Kind != ast.IntegerLiteral {
+	literal, ok := capture.call.Arguments[1].(*ast.Literal)
+	if !ok || literal.Kind != ast.IntegerLiteral {
 		return "capture_signal requires a literal argument count to migrate"
+	}
+	if count, err := strconv.Atoi(literal.Raw); err != nil || count < 0 || count > probeMaxArity {
+		return "capture_signal's argument count is outside the probe's supported range of 0 through 8"
 	}
 	if capture.statement == nil || capture.function == nil || !strings.HasPrefix(capture.function.Name, "test_") {
 		return "capture_signal must be a top-level statement of a test_ function"

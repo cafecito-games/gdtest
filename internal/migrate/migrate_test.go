@@ -607,3 +607,23 @@ func test_match_binding() -> void:
 	assert.Contains(t, string(matchResult.Output), "capture_signal(_source.changed, 1)")
 	assert.NotContains(t, string(matchResult.Output), "watch_signal(")
 }
+
+func TestSignalCapturesOutsideTheProbeArityRangeArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_too_wide() -> void:
+	capture_signal(_source.wide, 9)
+	expect_equal(get_signal_emissions(_source.wide).size(), 0)
+
+func test_within_range() -> void:
+	capture_signal(_source.narrow, 8)
+	expect_equal(get_signal_emissions(_source.narrow).size(), 0)
+`)
+	result, err := Transform("tests/arity.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.wide, 9)")
+	assert.Contains(t, string(result.Output), "var narrow_probe := watch_signal(_source.narrow)")
+}
