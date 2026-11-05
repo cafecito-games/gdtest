@@ -15,7 +15,13 @@ Release packages contain a binary-free mandatory core and four validated archite
 
 Consumers install with gpm's `--host-tool` add flag. That operation writes `platforms = []`, selects only core plus the implicit current-host slice for the initial install, and rolls the manifest entry back if installation fails. Nil and explicit-empty platform lists retain identical lock hash semantics so locks remain byte-identical across hosts and selection modes.
 
-The minimal gpm enhancement is isolated in sibling `godot-addon-manager` branch `feat/host-tool-platforms`, commit `80a6244`, based on `3202034`. gdtest does not vendor or patch gpm at runtime.
+The minimal gpm enhancement is isolated in sibling `godot-addon-manager` branch
+`feat/host-tool-platforms`, implementation commit `80a6244` plus real sliced-transaction test
+commit `67e8265`, based on `3202034`. The command-level test uses the documented
+`github-release --host-tool` shape with mobile and web project targets, feeds a real
+`gpm package` fixture through the source seam, and verifies that the manifest records
+`platforms = []`, the lock pins every published slice, and machine state plus installed files
+contain only core and the current host slice. gdtest does not vendor or patch gpm at runtime.
 
 ## Consequences
 

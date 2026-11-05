@@ -34,7 +34,7 @@ All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 | 11. Consumer worktree cleanliness | Verified | Init/gpm ownership and scratch-install tests pass. Uzir was migrated only in the isolated `local/gdtest-dogfood` worktree; its main worktree remained clean. |
 | 12. Backend-neutral executor boundary | Verified | `internal/executor` consumes serializable plans/events independently of Godot and reporters. |
 | 13. Reproducible sliced package | Verified | Core plus four macOS/Linux slices stage reproducibly; host-only and all-platform scratch installs pass after removal of unvalidated Windows slices. |
-| 14. Atomic host-tool installation | Locally implemented; release pending | Sibling `godot-addon-manager` branch `feat/host-tool-platforms`, commit `80a6244`, implements atomic `platforms = []`; a released gpm containing it does not yet exist. |
+| 14. Atomic host-tool installation | Locally verified; release pending | Sibling `godot-addon-manager` branch `feat/host-tool-platforms`, implementation commit `80a6244` and transaction-test commit `67e8265`, atomically writes `platforms = []` and installs real packaged core plus only the current-host slice despite mobile/web project targets. A released gpm containing the change does not yet exist. |
 | 15. Canonical local/CI policy | Verified for current revision | `scripts/check`, prek, and CI share the required gates, select shipped runtime files, and deliberate malformed fixtures prove the gates fail. |
 
 ## Current verification evidence
@@ -104,9 +104,12 @@ Completed on 2026-11-05 for the current hardening batch:
   specification files byte-identical, and the hook configuration no longer contradicts the
   required cohesive local milestone commits.
 - `scripts/package-addon 0.0.0-final-audit` and
-  `scripts/test-package-addon 0.0.0-final-audit` pass. The isolated sibling gpm commit `80a6244`
-  also passes gofmt, module-tidy diff, vet, build, golangci-lint, the complete race suite, and
-  `prek run --all-files`; released gpm 0.5.1 still lacks `--host-tool`.
+  `scripts/test-package-addon 0.0.0-final-audit` pass. The isolated sibling gpm implementation
+  commit `80a6244` and test commit `67e8265` also pass gofmt, module-tidy diff, vet, build,
+  golangci-lint, the complete race suite, and `prek run --all-files`. The command-level test uses
+  a real reproducible slice package and verifies the documented one-command transaction, explicit
+  empty addon platforms, host-only materialization, machine-independent complete lock pins, and
+  rollback coverage; released gpm 0.5.1 still lacks `--host-tool`.
 - `scripts/check`, `prek run --all-files`, `scripts/package-addon
   0.0.0-worker-pool-audit`, and `scripts/test-package-addon
   0.0.0-worker-pool-audit` pass after the bounded worker-pool and isolation changes. The package
