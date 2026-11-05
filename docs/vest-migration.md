@@ -122,4 +122,4 @@ gdtest has no runtime mock generator or benchmark API in v1. Replace a mock with
 
 ### Vest.timeout
 
-Remove `Vest.timeout` and pass explicit `timeout_seconds` to `until` or `wait_until_count`, or rely on the case timeout set in `gdtest.json`.
+Remove `Vest.timeout` and pass explicit `timeout_seconds` to `until` or `wait_until_count`. Otherwise rely on the runner's case timeout, which bounds every case including a wait with no explicit deadline.
