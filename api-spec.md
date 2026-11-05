@@ -880,6 +880,9 @@ The following names/patterns are reserved by gdtest:
 
 - `suite`
 - `get_suite_name`
+- `double_context`, the test method that returns a case's double context.
+- `gdtest` and `GDTestControls`, the controller member and class that generated
+  test doubles expose.
 - Lifecycle hook names in section 8.
 - `test_*__cases` parameter providers.
 - `test_*__only` focus suffix.
