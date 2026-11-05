@@ -316,6 +316,64 @@ func TestGodotRuntimeErrorsAreSourceLocatedCaseErrors(t *testing.T) {
 	require.NoError(t, process.Reset(ctx), "ordinary script errors must not poison the worker")
 }
 
+func TestGodotAsyncHelperErrorContractsAreSourceLocated(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot async-helper test skipped: godot is not on PATH")
+	}
+	root := repositoryRoot(t)
+	file := parseFixture(t, root, "fixtures/godot/api/helpers.test.gd")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "async-helper-contracts", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	expectedErrors := map[string]string{
+		"test_sleep_rejects_negative_duration":   "sleep duration must be finite and non-negative",
+		"test_sleep_rejects_non_finite_duration": "sleep duration must be finite and non-negative",
+		"test_until_rejects_negative_timeout":    "until timeout must be finite and non-negative",
+		"test_until_rejects_non_finite_timeout":  "until timeout must be finite and non-negative",
+		"test_until_rejects_negative_interval":   "until interval must be finite and non-negative",
+		"test_until_rejects_non_finite_interval": "until interval must be finite and non-negative",
+	}
+	finished := make(map[string]model.Event)
+	failures := make(map[string][]model.Event)
+	var runFinished model.Event
+	err = process.Run(ctx, model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "async-helper-contracts", Generation: 1,
+		ContentFingerprint: "async-helper-contracts", Files: []model.FilePlan{file},
+	}, executor.EventSinkFunc(func(event model.Event) error {
+		switch event.Type {
+		case model.EventAssertionFail:
+			failures[event.TestID] = append(failures[event.TestID], event)
+		case model.EventCaseFinished:
+			finished[event.TestID] = event
+		case model.EventRunFinished:
+			runFinished = event
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	zeroTimeoutID := file.Path + "::test_until_zero_timeout_succeeds"
+	assert.Equal(t, "pass", finished[zeroTimeoutID].Status)
+	assert.Empty(t, failures[zeroTimeoutID])
+	for method, message := range expectedErrors {
+		id := file.Path + "::" + method
+		assert.Equal(t, "error", finished[id].Status)
+		require.Len(t, failures[id], 1)
+		failure := failures[id][0]
+		assert.Equal(t, "framework", failure.Assertion)
+		assert.Equal(t, message, failure.Message)
+		require.NotNil(t, failure.Location)
+		assert.Equal(t, file.Path, failure.Location.File)
+		assert.Positive(t, failure.Location.Line)
+	}
+	assert.Equal(t, "error", runFinished.Status)
+	require.NoError(t, process.Reset(ctx), "helper input errors must not poison the worker")
+}
+
 func TestGodotCaseTimeoutIsAnErrorAndTaintsTheWorker(t *testing.T) {
 	if _, err := exec.LookPath("godot"); err != nil {
 		t.Skip("Godot case-timeout test skipped: godot is not on PATH")

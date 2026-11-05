@@ -74,6 +74,9 @@ Completed on 2026-11-04 for the current hardening batch:
 - User `log_level` now filters the bounded JSONL daemon log at write time. Lifecycle failures and
   janitor/panic diagnostics carry error severity, protocol rejection is warning severity, and
   debug-only worker reuse/discovery records remain available without weakening error retention.
+- The real-Godot helper conformance fixture proves `until(..., 0.0)` has no internal deadline and
+  that negative or non-finite sleep durations, polling timeouts, and polling intervals produce
+  source-located framework-error outcomes without poisoning the reusable worker.
 
 ## Uzir customer dogfood
 
