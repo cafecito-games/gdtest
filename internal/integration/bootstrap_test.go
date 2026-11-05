@@ -45,6 +45,12 @@ func TestFreshCheckoutBootstrapsWithoutExternalGodotImport(t *testing.T) {
 	assert.Contains(t, output.String(), "1 passed")
 	assert.Contains(t, diagnostics.String(), "gdtest: timing project_bootstrap_import=",
 		"fresh-checkout import must be a distinct observable phase")
+	assert.NotContains(t, diagnostics.String(), "SCRIPT ERROR:",
+		"a recovered pre-import worker attempt must not leak transient script errors")
+	assert.NotContains(t, diagnostics.String(), "Parse Error:",
+		"a recovered pre-import worker attempt must not leak transient parse errors")
+	assert.NotContains(t, diagnostics.String(), "Godot Engine",
+		"successful bootstrap and worker startup output must remain internal")
 	_, err = os.Stat(filepath.Join(root, ".godot"))
 	assert.NoError(t, err, "worker startup should establish the fresh project's Godot cache")
 }

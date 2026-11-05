@@ -290,13 +290,19 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 	if options.Stderr != nil {
 		stderrDestination = options.Stderr
 	}
+	// Keep startup output private until the authenticated worker is ready. A
+	// fresh checkout may fail once while Godot discovers global classes; those
+	// transient diagnostics are retained in StartupError but must not look like
+	// test failures when the bootstrap-and-retry path succeeds.
+	stdoutWriter := &lockedWriter{mu: &outputMu, writer: stdoutTail}
+	stderrWriter := &lockedWriter{mu: &outputMu, writer: stderrTail}
 	stdout := &processOutputWriter{
 		process: p, stream: "stdout",
-		writer: &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stdoutDestination, stdoutTail)},
+		writer: stdoutWriter,
 	}
 	stderr := &processOutputWriter{
 		process: p, stream: "stderr",
-		writer: &lockedWriter{mu: &outputMu, writer: io.MultiWriter(stderrDestination, stderrTail)},
+		writer: stderrWriter,
 	}
 	p.outputWait.Add(2)
 	go drainProcessOutput(&p.outputWait, stdout, stdoutPipe)
@@ -366,6 +372,10 @@ func startOnce(ctx context.Context, options ProcessOptions, project string) (*Pr
 		)
 	}
 	p.encoder = protocol.NewEncoder(connection)
+	outputMu.Lock()
+	stdoutWriter.writer = stdoutDestination
+	stderrWriter.writer = stderrDestination
+	outputMu.Unlock()
 	go p.readLoop(decoder)
 	return p, nil
 }
@@ -428,12 +438,8 @@ func bootstrapProject(ctx context.Context, options ProcessOptions, project strin
 	var output tailBuffer
 	output.limit = startupOutputLimit
 	var outputMu sync.Mutex
-	command.Stdout = &lockedWriter{
-		mu: &outputMu, writer: io.MultiWriter(outputDestination(options.Stdout), &output),
-	}
-	command.Stderr = &lockedWriter{
-		mu: &outputMu, writer: io.MultiWriter(outputDestination(options.Stderr), &output),
-	}
+	command.Stdout = &lockedWriter{mu: &outputMu, writer: &output}
+	command.Stderr = &lockedWriter{mu: &outputMu, writer: &output}
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start %s --headless --editor: %w", options.Godot, err)
 	}
@@ -450,13 +456,6 @@ func bootstrapProject(ctx context.Context, options ProcessOptions, project strin
 		return fmt.Errorf("run %s --headless --editor: %w\nGodot output tail:\n%s", options.Godot, err, strings.TrimSpace(output.String()))
 	}
 	return nil
-}
-
-func outputDestination(destination io.Writer) io.Writer {
-	if destination == nil {
-		return io.Discard
-	}
-	return destination
 }
 
 func startupFailure(
