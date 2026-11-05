@@ -56,6 +56,7 @@ Useful commands:
 ./addons/gdtest/gdtest run --jobs 2 --isolation fresh tests/
 ./addons/gdtest/gdtest watch tests/math.test.gd
 ./addons/gdtest/gdtest warm
+./addons/gdtest/gdtest generate doubles --check
 ./addons/gdtest/gdtest doctor
 ./addons/gdtest/gdtest daemon sessions
 ./addons/gdtest/gdtest daemon logs

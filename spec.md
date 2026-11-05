@@ -89,7 +89,9 @@ redesigning the public result model:
 - Perfectly resetting every kind of Godot global state in place.
 - Sharing a single Godot process between different worktrees.
 - Sharing a writable `.godot` directory between worktrees.
-- Runtime source generation for mocks.
+- Runtime source generation for mocks. Test doubles are generated ahead of time
+  by `gdtest generate doubles` from `gdtest.json` (section 9); the runtime never
+  synthesizes script source.
 - Benchmarking APIs. They may be designed later as a separate concern.
 
 ## 5. High-level architecture
@@ -145,6 +147,8 @@ gdtest/
     daemon/
     client/
     config/
+    doubles/
+    pathglob/
     project/
     discovery/
     dependency/
@@ -178,6 +182,13 @@ The addon must be developed at `addons/gdtest`, exactly where it will be
 installed in a consumer project. Release packaging may stage a copy of this
 tree and add cross-compiled host binaries, but source development must not use
 a different addon path.
+
+`internal/doubles` is the single owner of ahead-of-time test double generation: it
+analyzes project script inheritance and signatures, renders deterministic
+GDScript and `.gd.uid` sidecars, decides ownership from the first-line marker,
+and plans, checks, and writes outputs transactionally. `internal/pathglob` is the
+single glob-matching policy shared by project configuration and discovery.
+`internal/app` only maps flags and results to exit codes for these packages.
 
 ## 7. Executable and daemon model
 
@@ -307,6 +318,28 @@ The initial schema should cover:
 `jobs: 0` means automatic, subject to the daemon's global limit. Project
 configuration may request less concurrency but may not bypass the global
 limit.
+
+`test_doubles` lists the generated typed test doubles that `gdtest generate
+doubles` owns. It is an array of strict entries:
+
+```json
+"test_doubles": [
+  { "source": "inventory.gd", "output": "doubles/inventory_double.gd", "class_name": "InventoryDouble" }
+]
+```
+
+- `source` (required) is the project-relative path of the script to double. It
+  must end in `.gd`.
+- `output` (required) is the project-relative path of the generated script. It
+  must end in `.gd`, must not be under `addons/gdtest/`, and must not equal any
+  `source`.
+- `class_name` (optional) names the generated class. When present it must be a
+  GDScript identifier. Each `class_name` and each `source` and `output` must be
+  unique across entries.
+
+Paths must be clean, forward-slashed, project-relative paths without a `..`
+segment. Unknown fields are rejected, and every validation error names the entry
+index. Section 14.7 of `api-spec.md` defines the generated contract.
 
 User-level configuration may set global maximum workers, memory budget,
 logging, and default Godot resolution. Project configuration must not be able
@@ -723,6 +756,8 @@ for the GDScript API. In summary, v1 includes:
 - Direct boolean, equality, identity, approximate, null, empty, and containment
   assertions with actual-first argument order.
 - Explicit pass, fail, skip, todo, void, error, and canceled outcomes.
+- Ahead-of-time generated typed test doubles configured in `gdtest.json`, with
+  call history and per-method results (section 14.7 of `api-spec.md`).
 - Plan-wide focused tests and CI enforcement.
 - Inherited SceneTree, sleep, polling, timing, and message helpers.
 - A source-aware Vest migration map and executable API conformance suite.
@@ -776,6 +811,12 @@ Exit codes:
 - `2`: configuration, discovery, protocol, startup, or other infrastructure
   error.
 - `130`: canceled by the user.
+
+`gdtest generate doubles [--check] [--project DIR]` uses a separate exit policy.
+`0` means the outputs were written, or `--check` found every generated double
+up to date. `1` means `--check` found a missing, stale, or unexpected generated
+file, which it lists on stdout. `2` means configuration, parsing, signature,
+ownership, or filesystem refusal; nothing is written in that case.
 
 Skipped, todo, and void cases do not fail by default. Strict flags may change
 that policy and must be reflected in the final summary.

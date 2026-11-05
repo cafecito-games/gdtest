@@ -807,6 +807,213 @@ instance. Calling `watch_signal` outside an executing case is a discovery error
 and returns an inert probe. A null signal, or one whose owner has been freed,
 is a framework error and returns an inert probe.
 
+### 14.7 Generated test doubles
+
+A generated test double is a subclass of a project script. A test passes the
+double wherever the source type is expected, so the code under test receives it
+through its ordinary constructor, parameters, or properties. The double records
+every call, returns results the test configured, and can run the real source
+method on demand. gdtest generates doubles ahead of time from explicit
+configuration. Nothing is synthesized at runtime, and no argument matchers are
+provided: tests assert on `calls()`.
+
+Doubles do not monkey-patch existing instances. They do not intercept native
+or static methods, replace properties, or inject dependencies into production
+objects. An instance that was not constructed as a double is never changed.
+
+#### Configuration
+
+Doubles are declared in `test_doubles` in `gdtest.json`:
+
+```json
+{
+  "test_doubles": [
+    {
+      "source": "inventory.gd",
+      "output": "doubles/inventory_double.gd",
+      "class_name": "InventoryDouble"
+    }
+  ]
+}
+```
+
+- `source` is the project-relative path of the script to double. It must end in
+  `.gd`.
+- `output` is the project-relative path of the generated script. It must end in
+  `.gd`, must not be under `addons/gdtest/`, and must not equal any `source`.
+- `class_name` is optional. When it is present it must be a GDScript identifier
+  and unique across entries. When it is empty, the generated script declares no
+  `class_name`.
+
+Paths use forward slashes, must be clean relative paths, and must not contain a
+`..` segment. Every `source` and every `output` must be unique across entries.
+Unknown fields are rejected. Each error names the entry index, for example
+`test_doubles[1].output`.
+
+#### Command
+
+```sh
+gdtest generate doubles [--check] [--project DIR]
+```
+
+Without `--check`, the command writes every desired file that differs from disk
+and removes owned files that are no longer configured. It prints
+`N file(s) written; M file(s) removed` and exits `0`. With `--check`, it writes
+nothing. It prints one line per difference, `missing: <path>`, `stale: <path>`,
+or `unexpected: <path>`, sorted by path. It exits `0` and prints
+`0 double(s) out of date` when nothing differs.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Written, or `--check` found every generated file up to date. |
+| `1` | `--check` found a missing, stale, or unexpected generated file. |
+| `2` | Configuration, parse, signature, ownership, or filesystem error. Nothing is written. |
+
+Invalid inputs always win over out-of-date outputs. An invalid input is reported
+with a source location when one exists, and no entry is written unless every
+entry is valid.
+
+#### Output and ownership
+
+The first line of every generated script is the ownership marker:
+
+```gdscript
+# gdtest:generated-double v1 source=res://inventory.gd
+```
+
+The command rewrites or removes only files that begin with this exact marker.
+A configured `output` that exists without the marker is refused with exit `2`,
+and so is a `.gd.uid` beside a configured output whose `.gd` is missing. An
+output that is a symbolic link, or that resolves outside the project through a
+symbolic link, is refused. Ownership is established only by the marker; no
+state file records what was generated.
+
+Each output has a `.gd.uid` sidecar whose value is derived from the output's
+`res://` path. The same configuration, sources, gdtest version, and gdparser
+version produce byte-identical files regardless of project location, operating
+system, or directory walk order. Regenerating unchanged inputs changes no file.
+
+#### Which methods are doubled
+
+- Every non-static function whose name does not begin with `_` is doubled. The
+  function may be declared at the top level of the source script or of any
+  ancestor that the source extends through a project script. The nearest
+  declaration wins, and doubled methods are emitted in byte order of their names.
+- The generated constructor mirrors the nearest `_init` in the project-script
+  chain and forwards its arguments to the real constructor. Without one, the
+  constructor takes only the context.
+- An asynchronous source method is awaited by the double.
+
+Generation is refused, with a source-located diagnostic and exit `2`, when a
+doubled method has an untyped, inferred (`:=`), or variadic parameter, has no
+return type, or cannot be given a return type the generator supports. It is also
+refused when a name collides with a reserved name or a generated name, or when a
+doubled method has the name of a method that `Object` or `RefCounted` already
+defines. Reserved names are listed in section 17.
+
+#### Context lifecycle
+
+`double_context() -> GDTestDoubleContext` returns the executing case's context.
+The first call in a case creates it; later calls in the same case return the
+same context. Doubles and signal probes created in one case share one call
+sequence, so `calls()` and `watch_signal` records can be ordered against each
+other by `sequence`.
+
+Calling `double_context()` outside an executing case is a discovery error and
+returns a closed context. Gdtest closes the case's context when the case
+finishes, including when it fails, times out, or is canceled. A double built
+with a closed context records nothing into any case. Each call to it reports
+through `push_error` with the form
+`gdtest: <Name>: construct doubles with double_context() inside an executing case`,
+and returns the neutral default.
+
+#### Controller API
+
+A double exposes its controllers through the `gdtest` member. Each doubled method
+has a typed controller, reached as `double.gdtest.<method_name>`:
+
+- `then_return(value: T) -> void` queues a value of the method's return type. A
+  void method has `then_return() -> void`, which marks the next call as expected
+  and returns nothing. Configuration methods return `void` and do not chain.
+- `then_answer(answer: Callable) -> void` queues a callable that receives the
+  forwarded arguments and returns the result. The callable's argument count must
+  equal the method's parameter count, including defaulted parameters. An
+  asynchronous answer is awaited.
+- `then_call_real() -> void` queues a call to the source method through `super`.
+  It is rejected for an abstract method.
+- `calls() -> Array[GDTestInvocation]` returns a defensive copy of every recorded
+  call in call order. Each invocation has a `sequence` and a defensive copy of
+  its `arguments`. Defaulted parameters appear in `arguments` with their values.
+- `call_count() -> int` returns the number of recorded calls.
+- `reset() -> void` clears queued behaviours and recorded calls.
+
+#### Queued behaviour order
+
+Each call consumes the front queued behaviour (first in, first out). The last
+remaining behaviour is sticky: it repeats for every later call. With
+`then_return(true)` followed by `then_return(false)`, the first call returns
+`true` and every later call returns `false`.
+
+A call with no queued behaviour is unexpected. It is recorded, reported as
+described below, and returns the neutral default of the return type.
+
+#### Typed collection answers
+
+An answer for a method that returns a typed collection must return an identically
+typed collection. An untyped literal is rejected even when its elements are
+correct: `Array[int]().is_same_typed([7])` is `false` in Godot 4.7, so an answer
+that returns `[7]` for an `Array[int]` return fails. Return
+`Array[int]` values constructed with that type.
+
+#### Failures
+
+The following conditions are framework errors, recorded as failures of the
+executing case at the caller's line rather than in the generated file. The
+double then returns the neutral default of its return type.
+
+| Condition | Message |
+|---|---|
+| Call with no queued behaviour | `unexpected call to Inventory.add` |
+| Answer returns the wrong type | `Inventory.add answer returned String, expected bool` |
+| `then_answer` callable has the wrong arity | `then_answer callable takes 1 arguments; expected 2`, with nothing queued |
+| `then_answer` callable is invalid | `... then_answer requires a valid callable`, with nothing queued |
+| `then_call_real` on an abstract method | `... cannot call an abstract method through then_call_real`, with nothing queued |
+
+The location is the first stack frame outside gdtest and the generated double,
+so a failure points at the line in the test that made the call or configured the
+double.
+
+#### Example
+
+The example project in `examples/basic` contains a source script, `inventory.gd`,
+and a configured double. `shop.gd` receives an `Inventory` through its
+constructor, and `inventory_double.test.gd` injects an `InventoryDouble`:
+
+```gdscript
+func test_queued_results_are_consumed_in_order_then_last_is_sticky() -> void:
+	var inventory: InventoryDouble = InventoryDouble.new(double_context(), 3)
+	var shop: Shop = Shop.new(inventory)
+	inventory.gdtest.add.then_return(true)
+	inventory.gdtest.add.then_return(false)
+	expect_true(shop.stock("apple"))
+	expect_false(shop.stock("pear"))
+	expect_false(shop.stock("plum"))
+	expect_equal(inventory.gdtest.add.call_count(), 3)
+
+
+func test_then_answer_async_result_is_awaited() -> void:
+	var inventory: InventoryDouble = InventoryDouble.new(double_context(), 3)
+	var shop: Shop = Shop.new(inventory)
+	inventory.gdtest.fetch_counts.then_answer(_snapshot_after_frame)
+	var report: Dictionary[String, int] = await shop.stock_report()
+	expect_equal(report, { "apple": 2 })
+```
+
+The file `examples/basic/inventory_double.test.gd` also covers `then_call_real`,
+`then_return()` on a void method, `calls()` arguments including a defaulted
+parameter, and `reset()`. The generated file `examples/basic/doubles/inventory_double.gd`
+is committed and checked by `scripts/check`.
+
 ## 15. Case status and precedence
 
 Public case statuses are:
@@ -896,7 +1103,8 @@ documented hooks and naming methods.
 The following Vest-facing concepts are not gdtest v1 APIs:
 
 - Lifecycle signals (`on_begin`, `on_case_begin`, and similar).
-- Runtime-generated mocks (`mock`, `when`, `get_calls_of`).
+- Runtime-generated mocks (`mock`, `when`, `get_calls_of`). Ahead-of-time generated
+  doubles (section 14.7) cover the typed subset of this use case.
 - Benchmark builders and measures.
 - Fluent `assert_that` objects.
 - Test mixin generation or user-configurable inheritance chains.
@@ -908,8 +1116,8 @@ The following Vest-facing concepts are not gdtest v1 APIs:
   `get_signal_emissions`). Case-scoped `watch_signal` probes (section 14.6)
   replace the non-persistent subset that migration can prove equivalent.
 
-Mocks may later be provided through ahead-of-time generation in Go. Signal
-capture may later return as a small engine-only helper. Their absence in v1 is
+Mocks are provided by ahead-of-time generated doubles (section 14.7), not by
+runtime synthesis. Signal capture may later return as a small engine-only helper. Their absence in v1 is
 deliberate and migration tooling must report uses precisely.
 
 ## 19. Vest migration map
@@ -936,7 +1144,7 @@ Vest runtime internals.
 | `assert_that` | Direct assertions | Rewrite simple chains; report others |
 | Lifecycle signals | Hooks | Report or rewrite only when unambiguous |
 | `Vest.timeout` | No v1 equivalent | Report |
-| Runtime mocks | No v1 equivalent | Report |
+| Runtime mocks (`mock`, `when`, `get_calls_of`) | Configured generated double (section 14.7) for the typed subset; otherwise hand-written | Report with a pointer to [docs/vest-migration.md](./docs/vest-migration.md); not converted mechanically |
 | Benchmarks | No v1 equivalent | Report |
 | `capture_signal(member_signal, literal_count)` in a `test_` function, with reads only as `get_signal_emissions(...).size()`, an index into the result, or an emptiness check | `var probe := watch_signal(member_signal)` with reads rewritten to `probe.emission_count()`, `probe.arguments_at(...)`, or `probe.emissions()` | Syntax-aware rewrite when unambiguous |
 | Persistent, aliased, nested, repeated-in-one-test, reassigned-owner, non-literal-count, or otherwise ambiguous signal capture | No v1 equivalent | Report and preserve |
