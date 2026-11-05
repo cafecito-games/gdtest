@@ -724,3 +724,22 @@ func _replace() -> void:
 	assert.Contains(t, string(result.Output), "capture_signal(_source.helper, 0)")
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 }
+
+func TestProjectDefinedSignalHelpersAreNotVestAPIs(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func capture_signal(_value: Variant, _count: int) -> void:
+	pass
+
+func test_project_helper() -> void:
+	capture_signal(_source.custom, 1)
+`)
+	result, err := Transform("tests/project_helper.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.custom, 1)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+	assert.NotContains(t, findingCodes(result.Findings), "unsupported.signal-capture")
+}

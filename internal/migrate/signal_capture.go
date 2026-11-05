@@ -60,7 +60,8 @@ type signalGroupKey struct {
 // to case-scoped probes. A signal's capture and every read of it convert together
 // or not at all, so a file never ends up with a probe and a dangling Vest read.
 func (t *transformer) signalCaptures(tree *ast.File) {
-	if !t.migratingVest {
+	t.signalHelpersDeclared = declaresSignalHelpers(tree)
+	if !t.migratingVest || t.signalHelpersDeclared {
 		return
 	}
 	parents := parentNodes(tree)
@@ -395,6 +396,19 @@ func redeclares(function *ast.FunctionDeclaration, name string) bool {
 		return true
 	})
 	return shadowed || declarations > 1
+}
+
+// declaresSignalHelpers reports a project function that reuses a Vest signal helper name.
+// Such calls resolve to project code, so they must not be treated as Vest APIs.
+func declaresSignalHelpers(tree *ast.File) bool {
+	found := false
+	ast.Inspect(tree, func(node ast.Node) bool {
+		if function, ok := node.(*ast.FunctionDeclaration); ok {
+			found = found || function.Name == "capture_signal" || function.Name == "get_signal_emissions"
+		}
+		return !found
+	})
+	return found
 }
 
 // declaresLocal reports whether the test function binds the name as a local or parameter,

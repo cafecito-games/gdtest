@@ -181,16 +181,17 @@ type edit struct {
 }
 
 type transformer struct {
-	path             string
-	source           []byte
-	functions        map[string]*ast.FunctionDeclaration
-	edits            []edit
-	findings         []Finding
-	wrappers         []string
-	unsupported      map[string]struct{}
-	migratingVest    bool
-	signalHandled    map[int]struct{}
-	reassignedOwners map[string]bool
+	path                  string
+	source                []byte
+	functions             map[string]*ast.FunctionDeclaration
+	edits                 []edit
+	findings              []Finding
+	wrappers              []string
+	unsupported           map[string]struct{}
+	migratingVest         bool
+	signalHandled         map[int]struct{}
+	reassignedOwners      map[string]bool
+	signalHelpersDeclared bool
 }
 
 func (t *transformer) directives(tree *ast.File) {
@@ -585,7 +586,7 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 			case "benchmark":
 				t.manualOnce(value.Span(), "unsupported.benchmark", "benchmarks have no gdtest v1 equivalent")
 			case "capture_signal", "get_signal_emissions":
-				if t.migratingVest && !t.isSignalHandled(value.Span()) {
+				if t.migratingVest && !t.signalHelpersDeclared && !t.isSignalHandled(value.Span()) {
 					t.manualOnce(value.Span(), signalCaptureCode, signalCaptureUse)
 				}
 			}
