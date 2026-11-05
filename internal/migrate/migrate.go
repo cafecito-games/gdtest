@@ -144,6 +144,7 @@ func Transform(path string, source []byte) (FileResult, error) {
 	state.hookTypes(tree)
 	state.parameterProviders(tree)
 	state.fluentAssertions(tree)
+	state.signalCaptures(tree)
 	state.utilitiesAndUnsupported(tree)
 	if len(state.wrappers) > 0 {
 		sort.Strings(state.wrappers)
@@ -180,14 +181,17 @@ type edit struct {
 }
 
 type transformer struct {
-	path          string
-	source        []byte
-	functions     map[string]*ast.FunctionDeclaration
-	edits         []edit
-	findings      []Finding
-	wrappers      []string
-	unsupported   map[string]struct{}
-	migratingVest bool
+	path                  string
+	source                []byte
+	functions             map[string]*ast.FunctionDeclaration
+	edits                 []edit
+	findings              []Finding
+	wrappers              []string
+	unsupported           map[string]struct{}
+	migratingVest         bool
+	signalHandled         map[int]struct{}
+	reassignedOwners      map[string]bool
+	signalHelpersDeclared bool
 }
 
 func (t *transformer) directives(tree *ast.File) {
@@ -219,7 +223,7 @@ var gdtestInheritedNames = map[string]struct{}{
 	"expect_not_approx": {}, "expect_null": {}, "expect_not_null": {}, "expect_empty": {},
 	"expect_not_empty": {}, "expect_contains": {}, "expect_does_not_contain": {},
 	"ok": {}, "fail": {}, "skip": {}, "todo": {}, "message": {}, "get_tree": {}, "sleep": {},
-	"until": {}, "time": {},
+	"until": {}, "time": {}, "watch_signal": {},
 	// GDTest is RefCounted, unlike VestTest's Object base.
 	"reference": {}, "unreference": {}, "get_reference_count": {},
 }
@@ -286,6 +290,8 @@ func (t *transformer) inheritedAPINameConflicts(tree *ast.File) {
 			for _, parameter := range value.Parameters {
 				report(parameter.Name, value, parameter.NameSpan, true)
 			}
+		case *ast.SignalDeclaration:
+			report(value.Name, value, value.NameSpan, false)
 		case *ast.VariableDeclaration:
 			report(value.Name, value, value.NameSpan, true)
 		case *ast.ForStatement:
@@ -580,7 +586,9 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 			case "benchmark":
 				t.manualOnce(value.Span(), "unsupported.benchmark", "benchmarks have no gdtest v1 equivalent")
 			case "capture_signal", "get_signal_emissions":
-				t.manualOnce(value.Span(), "unsupported.signal-capture", "signal capture has no gdtest v1 equivalent")
+				if t.migratingVest && !t.signalHelpersDeclared && !t.isSignalHandled(value.Span()) {
+					t.manualOnce(value.Span(), signalCaptureCode, signalCaptureUse)
+				}
 			}
 		case *ast.Identifier:
 			switch value.Name {

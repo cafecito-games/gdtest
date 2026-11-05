@@ -24,7 +24,7 @@ func TestDocumentedBasicExampleExecutes(t *testing.T) {
 	require.True(t, ok)
 	repository := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
 	root := t.TempDir()
-	for _, relative := range []string{"project.godot", "gdtest.json", "math.test.gd"} {
+	for _, relative := range []string{"project.godot", "gdtest.json", "math.test.gd", "signal_probe.test.gd"} {
 		data, err := os.ReadFile(filepath.Join(repository, "examples", "basic", relative))
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.Join(root, relative), data, 0o600))
@@ -37,5 +37,5 @@ func TestDocumentedBasicExampleExecutes(t *testing.T) {
 		"run", "--no-daemon", "--project", root,
 	}, app.IO{Out: &output, Err: &diagnostics})
 	require.Equal(t, app.ExitOK, code, "output:\n%s\ndiagnostics:\n%s", output.String(), diagnostics.String())
-	assert.Contains(t, output.String(), "3 passed")
+	assert.Contains(t, output.String(), "4 passed")
 }

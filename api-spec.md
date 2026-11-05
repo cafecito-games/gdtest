@@ -748,6 +748,65 @@ an error outcome distinct from an assertion failure when the worker can
 attribute it to the active case. If attribution is impossible or the worker
 dies, the daemon reports an infrastructure error naming the last active case.
 
+### 14.6 Signal probes
+
+`watch_signal(what: Signal) -> GDTestSignalProbe` connects a case-scoped recorder
+to `what` immediately and returns its probe. The probe records every emission in
+order until the case finishes. It never asserts on its own; tests compare the
+recorded values with the ordinary `expect_*` methods.
+
+```gdscript
+func test_reports_changed_values() -> void:
+	var probe: GDTestSignalProbe = watch_signal(source.changed)
+	source.set_value(3)
+	expect_equal(probe.emission_count(), 1)
+	expect_equal(probe.arguments_at(0), [3])
+```
+
+The probe's arity comes from the live owner's signal metadata
+(`Object.get_signal_list()`), so authors never pass an argument count. Signals
+with zero through eight arguments are supported. A signal whose metadata is
+missing, ambiguous, or wider than eight arguments is reported as a framework
+error and records nothing. Built-in and script-declared signals use the same
+path.
+
+Public members:
+
+- `emission_count() -> int` returns the number of recorded emissions.
+- `emissions() -> Array[GDTestInvocation]` returns a defensive copy of every
+  recorded invocation in emission order.
+- `arguments_at(index: int) -> Array[Variant]` returns a defensive copy of the
+  arguments of one emission. An index outside the recorded range is a framework
+  error that returns an empty array.
+- `wait_until_count(count: int, timeout_seconds: float = 0.0) -> bool` suspends
+  until at least `count` emissions are recorded and returns `true`. It returns
+  `false` when `timeout_seconds` expires or the probe stops recording first. A
+  timeout of `0.0` has no internal deadline; the case timeout remains
+  authoritative. A negative count, or a timeout that is negative or not finite,
+  is a framework error that returns `false` without waiting.
+- `stop_recording() -> void` disconnects the recorder. Repeated calls have no
+  further effect, and recorded emissions remain readable.
+
+`GDTestSignalProbe` is named for what it does, and `stop_recording` is the
+disconnect method. Godot's `Object.disconnect(signal, callable)` is a native
+method that GDScript cannot override with a zero-argument signature; see
+[ADR 0008](./docs/adr/0008-case-scoped-signal-probes.md).
+
+Each invocation is a `GDTestInvocation` with two read-only members:
+
+- `sequence: int` is the one-based position of the emission within its case.
+  Sequence numbers increase monotonically across every probe in one case.
+- `arguments: Array[Variant]` is a defensive copy of the emitted arguments in
+  signal parameter order.
+
+Probes belong to the case that created them. gdtest disconnects every probe
+after the case's `after_case` or `after_each` hook and before the case result
+is finalized, including timed-out and canceled cases. A connection made in one
+case is therefore absent in the next case that reuses the same worker and test
+instance. Calling `watch_signal` outside an executing case is a discovery error
+and returns an inert probe. A null signal, or one whose owner has been freed,
+is a framework error and returns an inert probe.
+
 ## 15. Case status and precedence
 
 Public case statuses are:
@@ -842,7 +901,9 @@ The following Vest-facing concepts are not gdtest v1 APIs:
 - Directory traversal, globbing, project settings, and runner-control helpers
   exposed through a test singleton.
 - Reusable timeout-budget objects equivalent to `Vest.timeout`.
-- Signal-capture helpers (`capture_signal`, `get_signal_emissions`).
+- Vest's global signal-to-array registry (`capture_signal`,
+  `get_signal_emissions`). Case-scoped `watch_signal` probes (section 14.6)
+  replace the non-persistent subset that migration can prove equivalent.
 
 Mocks may later be provided through ahead-of-time generation in Go. Signal
 capture may later return as a small engine-only helper. Their absence in v1 is
@@ -874,7 +935,8 @@ Vest runtime internals.
 | `Vest.timeout` | No v1 equivalent | Report |
 | Runtime mocks | No v1 equivalent | Report |
 | Benchmarks | No v1 equivalent | Report |
-| Signal capture | No v1 equivalent | Report |
+| `capture_signal(member_signal, literal_count)` in a `test_` function, with reads only as `get_signal_emissions(...).size()`, an index into the result, or an emptiness check | `var probe := watch_signal(member_signal)` with reads rewritten to `probe.emission_count()`, `probe.arguments_at(...)`, or `probe.emissions()` | Syntax-aware rewrite when unambiguous |
+| Persistent, aliased, nested, repeated-in-one-test, reassigned-owner, non-literal-count, or otherwise ambiguous signal capture | No v1 equivalent | Report and preserve |
 
 Vest's parameterized method form resembles:
 

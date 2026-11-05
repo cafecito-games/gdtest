@@ -418,3 +418,328 @@ func mustRead(t *testing.T, filename string) []byte {
 	require.NoError(t, err)
 	return data
 }
+
+func TestSignalCapturesConvertOnlyProvenBindingsAndPreserveAmbiguousUses(t *testing.T) {
+	t.Parallel()
+	input := fixture(t, "signal_capture.input.gd")
+	want := fixture(t, "signal_capture.expected.gd")
+	result, err := Transform("tests/signal_capture.test.gd", input)
+	require.NoError(t, err)
+	assert.True(t, result.Changed)
+	assert.Equal(t, string(want), string(result.Output))
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"rewrite.signal-capture",
+		"rewrite.signal-read", "rewrite.signal-read", "rewrite.signal-read",
+		"rewrite.signal-capture",
+		"rewrite.signal-capture",
+		"rewrite.signal-read",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"rewrite.signal-capture", "rewrite.signal-read",
+		"rewrite.signal-capture", "rewrite.signal-read",
+		"rewrite.signal-capture", "rewrite.signal-read", "rewrite.signal-read",
+		"unsupported.signal-capture",
+	}, findingCodes(result.Findings))
+	plan, err := discovery.Parse("tests/signal_capture.test.gd", result.Output)
+	require.NoError(t, err, "migrated output must satisfy gdtest's static discovery contract")
+	assert.Len(t, plan.Cases, 10)
+
+	again, err := Transform("tests/signal_capture.test.gd", result.Output)
+	require.NoError(t, err)
+	assert.False(t, again.Changed)
+	assert.Equal(t, result.Output, again.Output)
+}
+
+func TestSignalCapturesPreserveSourceWhenReadsCannotBeAppliedWhole(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func test_fluent() -> void:
+	capture_signal(source.changed, 1)
+	assert_that(get_signal_emissions(source.changed).size()).is_equal_to(0)
+
+func test_helper_read() -> void:
+	capture_signal(_source.changed, 1)
+	_check()
+
+func test_alias_helper_read() -> void:
+	var source := _source
+	capture_signal(source.changed, 1)
+	_check()
+
+func test_initializer_capture() -> void:
+	var result = capture_signal(_source.other, 1)
+	expect_equal(get_signal_emissions(_source.other).size(), 0)
+
+func _check() -> void:
+	expect_equal(get_signal_emissions(_source.changed).size(), 0)
+`)
+	result, err := Transform("tests/blocked.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.changed, 1)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.other, 1)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+	for _, finding := range result.Findings {
+		assert.NotEqual(t, "rewrite.signal-capture", finding.Code)
+	}
+}
+
+func TestSignalCapturesDoNotShadowUserDeclaredProbeHelper(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func watch_signal(_what: Signal) -> Variant:
+	return null
+
+func test_user_helper() -> void:
+	capture_signal(source.changed, 1)
+	expect_equal(get_signal_emissions(source.changed).size(), 0)
+`)
+	result, err := Transform("tests/shadow.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.NotContains(t, string(result.Output), "var changed_probe")
+	assert.Contains(t, findingCodes(result.Findings), "unsupported.signal-capture")
+}
+
+func TestSignalCapturesPreserveWhenAnUnmatchedLocalAliasIsRead(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func test_local_alias() -> void:
+	var changed_signal := source.changed
+	capture_signal(source.changed, 1)
+	expect_equal(get_signal_emissions(changed_signal).size(), 1)
+`)
+	result, err := Transform("tests/alias.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.Contains(t, string(result.Output), "get_signal_emissions(changed_signal)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
+
+func TestSignalProbeNamesAvoidLambdaParametersAndRootSignalsReportConflicts(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+signal watch_signal
+
+func test_lambda_parameter() -> void:
+	capture_signal(source.changed, 1)
+	var check := func(changed_probe: Variant) -> void:
+		expect_equal(get_signal_emissions(source.changed).size(), 1)
+	check.call(null)
+`)
+	result, err := Transform("tests/lambda.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.NotContains(t, string(result.Output), "var changed_probe :=")
+	assert.Contains(t, findingCodes(result.Findings), "unsupported.inherited-name-conflict")
+}
+
+func TestSignalCapturesPreserveShadowedOwnersAndNegativeIndexes(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func test_lambda_shadows_owner() -> void:
+	var source := Source.new()
+	capture_signal(source.changed, 1)
+	var check := func(source: Variant) -> void:
+		expect_equal(get_signal_emissions(source.changed).size(), 1)
+	check.call(null)
+
+func test_negative_index() -> void:
+	var source := Source.new()
+	capture_signal(source.changed, 1)
+	expect_equal(get_signal_emissions(source.changed)[-1][0], 1)
+`)
+	result, err := Transform("tests/shadow_index.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.Contains(t, string(result.Output), "get_signal_emissions(source.changed)[-1][0]")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
+
+func TestSignalMigrationIsScopedToVestFilesAndRejectsMutatingReads(t *testing.T) {
+	t.Parallel()
+	plain := []byte(`extends Node
+
+func capture_signal(_value: Variant, _count: int) -> void:
+	pass
+
+func test_local_helper() -> void:
+	capture_signal(source.changed, 1)
+`)
+	result, err := Transform("app/helper.gd", plain)
+	require.NoError(t, err)
+	assert.False(t, result.Changed)
+	assert.Empty(t, result.Findings)
+
+	mutated := []byte(`extends VestTest
+
+func test_indexed_write() -> void:
+	var source := Source.new()
+	capture_signal(source.changed, 1)
+	get_signal_emissions(source.changed)[0][1] = 5
+	get_signal_emissions(source.changed)[0].append(6)
+`)
+	mutatedResult, err := Transform("tests/mutated.test.gd", mutated)
+	require.NoError(t, err)
+	assert.Contains(t, string(mutatedResult.Output), "capture_signal(source.changed, 1)")
+	assert.NotContains(t, string(mutatedResult.Output), "watch_signal(")
+
+	matchShadow := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_match_binding() -> void:
+	capture_signal(_source.changed, 1)
+	match Source.new():
+		var _source:
+			expect_equal(get_signal_emissions(_source.changed).size(), 1)
+`)
+	matchResult, err := Transform("tests/match.test.gd", matchShadow)
+	require.NoError(t, err)
+	assert.Contains(t, string(matchResult.Output), "capture_signal(_source.changed, 1)")
+	assert.NotContains(t, string(matchResult.Output), "watch_signal(")
+}
+
+func TestSignalCapturesOutsideTheProbeArityRangeArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_too_wide() -> void:
+	capture_signal(_source.wide, 9)
+	expect_equal(get_signal_emissions(_source.wide).size(), 0)
+
+func test_within_range() -> void:
+	capture_signal(_source.narrow, 8)
+	expect_equal(get_signal_emissions(_source.narrow).size(), 0)
+`)
+	result, err := Transform("tests/arity.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.wide, 9)")
+	assert.Contains(t, string(result.Output), "var narrow_probe := watch_signal(_source.narrow)")
+}
+
+func TestIndexedAliasesAndSelfQualifiedReassignmentArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_indexed_alias() -> void:
+	capture_signal(_source.first, 1)
+	var emission := get_signal_emissions(_source.first)[0]
+	expect_equal(emission, [1])
+
+func test_self_reassignment() -> void:
+	capture_signal(_source.second, 0)
+	self._source = Source.new()
+	expect_equal(get_signal_emissions(_source.second).size(), 0)
+`)
+	result, err := Transform("tests/aliases.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.first, 1)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.second, 0)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
+
+func TestLambdaReadsAndNonAssertionHelpersArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_escaping_lambda() -> void:
+	capture_signal(_source.escaping, 0)
+	var later := func() -> void:
+		expect_equal(get_signal_emissions(_source.escaping).size(), 0)
+	later.call()
+
+func test_helper_mutation() -> void:
+	capture_signal(_source.helper, 1)
+	mutate_emission(get_signal_emissions(_source.helper)[0])
+`)
+	result, err := Transform("tests/escaping.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.escaping, 0)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.helper, 1)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
+
+func TestIdentityAssertionsKeepIndexedEmissionsPreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_identity() -> void:
+	capture_signal(_source.identity, 1)
+	expect_not_same(get_signal_emissions(_source.identity)[0], [1])
+`)
+	result, err := Transform("tests/identity.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.identity, 1)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
+
+func TestSignalCapturesInsideNestedClassesArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+class Inner:
+	func test_nested() -> void:
+		capture_signal(_source.nested, 0)
+		expect_equal(get_signal_emissions(_source.nested).size(), 0)
+`)
+	result, err := Transform("tests/nested.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.nested, 0)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
+
+func TestSignalCapturesPreserveOwnersReassignedByHelpers(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_helper_reassigns() -> void:
+	capture_signal(_source.helper, 0)
+	_replace()
+	expect_equal(get_signal_emissions(_source.helper).size(), 0)
+
+func _replace() -> void:
+	_source = Source.new()
+`)
+	result, err := Transform("tests/helper.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.helper, 0)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
+
+func TestProjectDefinedSignalHelpersAreNotVestAPIs(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func capture_signal(_value: Variant, _count: int) -> void:
+	pass
+
+func test_project_helper() -> void:
+	capture_signal(_source.custom, 1)
+`)
+	result, err := Transform("tests/project_helper.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.custom, 1)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+	assert.NotContains(t, findingCodes(result.Findings), "unsupported.signal-capture")
+}

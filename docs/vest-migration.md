@@ -31,9 +31,28 @@ Compatible assertion names and unrelated formatting are left alone. Run the migr
 
 ## Manual findings
 
-gdtest intentionally has no v1 equivalent for runtime-generated mocks, call-history stubbing, benchmarks, Vest signal-capture helpers, generated mixins, event callbacks, or arbitrary fluent matcher chains. These constructs remain in the source and are reported with a file, line, column, stable finding code, and explanation. A finding never silently deletes or weakens a test.
+gdtest intentionally has no v1 equivalent for runtime-generated mocks, call-history stubbing, benchmarks, generated mixins, event callbacks, or arbitrary fluent matcher chains. These constructs remain in the source and are reported with a file, line, column, stable finding code, and explanation. A finding never silently deletes or weakens a test.
 
-Signal behavior remains fully testable with native Godot connections. For example, a one-argument
+Signal captures are the exception that migrates. A `capture_signal(member_signal, literal_count)`
+statement that is a top-level statement of a `test_` function becomes a case-scoped
+`watch_signal` probe when every `get_signal_emissions(member_signal)` read in that function is a
+`.size()` call, an index into the result, or an emptiness check (`expect_empty`, `expect_not_empty`,
+or `expect_equal(..., [])`). Such reads become `emission_count()`, `arguments_at(...)`, and
+`emissions()` calls. The probe infers the signal's arity from Godot, so the migrator drops the
+count literal. Each signal converts all of its captures and reads together or leaves all of them
+untouched.
+
+The migrator preserves a capture and reports a precise finding when it cannot prove the rewrite:
+persistent or class-level captures, captures nested in a conditional block, owners reassigned inside
+the test, signals also read through an alias, repeated captures of one signal within one test,
+non-literal counts, captures inside helper functions that are not `test_` functions, local aliases of
+a read result, and whole-list comparisons with non-empty expected values. Because a read that lacks a
+matching capture may be an alias the migrator cannot see, one such read anywhere in a file keeps every
+signal in that file as written. Files that declare their own `capture_signal`, `get_signal_emissions`,
+or `watch_signal` function are left alone for signal migration. Migrated probes are disconnected
+automatically when each case ends.
+
+For a preserved capture, signal behavior remains testable with native Godot connections. For example, a one-argument
 capture can be migrated explicitly without adding a framework API:
 
 ```gdscript
@@ -48,7 +67,59 @@ subject.change()
 expect_equal(emissions, [[subject.value]])
 ```
 
-Keep a small project-local recorder when many fixtures need the same zero-, one-, or two-argument
+Keep a small project-local recorder when many preserved fixtures need the same zero-, one-, or two-argument
 pattern. This is intentionally an application helper rather than a gdtest v1 compatibility API.
 
 Dynamic tests, async tests, and supported focus markers continue to work when they use APIs covered by the gdtest runtime. Project-specific wrappers and configuration still require review; in particular, replace Vest CLI invocations in local scripts and CI with `gdtest run` after the migrated suite passes.
+
+## Converting preserved constructs by hand
+
+Anything the migrator reports and preserves can be converted by hand. Each recipe below names the gdtest API to use. The authoritative contract for every API is in `api-spec.md`.
+
+### Signal captures
+
+`watch_signal` replaces `capture_signal` once the signal is known. The probe infers arity from Godot, so drop the count argument.
+
+| Vest | gdtest |
+| --- | --- |
+| `capture_signal(owner.signal_name, n)` | `var probe: GDTestSignalProbe = watch_signal(owner.signal_name)` |
+| `get_signal_emissions(owner.signal_name).size()` | `probe.emission_count()` |
+| `get_signal_emissions(owner.signal_name)[i]` | `probe.arguments_at(i)` |
+| `get_signal_emissions(owner.signal_name)[i][j]` | `probe.arguments_at(i)[j]` |
+| `expect_empty(get_signal_emissions(...))` | `expect_empty(probe.emissions())` |
+| Wait for a later emission | `await probe.wait_until_count(n, timeout_seconds)` |
+
+Keep the probe in the test that creates it. Probes are disconnected when the case ends, so do not store one in a class member or reuse it in another test. If one test needs the whole argument list of a signal in a non-trivial shape, use `probe.emissions()` and compare each invocation's `arguments` explicitly. Do not wrap the list in a helper that outlives the case. Signals with more than eight arguments are not supported by the probe; test them with a native connection in a project-local helper.
+
+### Native connections for anything else
+
+When a capture cannot move to a probe, connect with Godot directly and record into a local array inside the test. This is always valid:
+
+```gdscript
+func test_reports_changed_values() -> void:
+	var recorded: Array[Variant] = []
+	var recorder: Callable = func(value: Variant) -> void:
+		recorded.append(value)
+	subject.changed.connect(recorder)
+	subject.change()
+	subject.changed.disconnect(recorder)
+	expect_equal(recorded, [subject.value])
+```
+
+Disconnect explicitly, because a native connection does not follow the case lifecycle.
+
+### Lifecycle signals
+
+Replace `on_begin`, `on_case_begin`, and similar lifecycle signals with the matching hooks described in `api-spec.md` section 8. Hooks run in a fixed order, so do not depend on signal connection order.
+
+### Fluent assertions
+
+Replace each chained matcher with one direct `expect_*` call with the same actual-first argument order. For multi-matcher chains, write one `expect_*` per matcher.
+
+### Runtime mocks and benchmarks
+
+gdtest has no runtime mock generator or benchmark API in v1. Replace a mock with a small hand-written fake class in the test file, and move benchmarks out of the gdtest suite.
+
+### Vest.timeout
+
+Remove `Vest.timeout` and pass explicit `timeout_seconds` to `until` or `wait_until_count`. Otherwise rely on the runner's case timeout, which bounds every case including a wait with no explicit deadline.
