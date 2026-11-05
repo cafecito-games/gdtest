@@ -41,6 +41,9 @@ func _init(
 
 
 ## Queues `answer` as the next call's result, reporting an invalid callable instead.
+## An asynchronous answer is awaited only when the doubled method is asynchronous.
+## For a synchronous method the answer must be synchronous, because Godot raises a
+## script error for a coroutine called without `await` and execution stops there.
 func then_answer(answer: Callable) -> void:
 	if not _require_open():
 		return

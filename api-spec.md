@@ -937,8 +937,14 @@ has a typed controller, reached as `double.gdtest.<method_name>`:
   and returns nothing. Configuration methods return `void` and do not chain.
 - `then_answer(answer: Callable) -> void` queues a callable that receives the
   forwarded arguments and returns the result. The callable's argument count must
-  equal the method's parameter count, including defaulted parameters. An
-  asynchronous answer is awaited.
+  equal the method's parameter count, including defaulted parameters. An answer
+  is awaited only when the doubled method is asynchronous, meaning the source
+  declaration awaits. An answer for a synchronous method must itself be
+  synchronous. A coroutine answer for a synchronous method raises Godot's script
+  error `Trying to call an async function without "await".` in the case, and
+  execution stops before any value returns. A generated method for a synchronous
+  source stays synchronous, so the source method's calling contract does not
+  change.
 - `then_call_real() -> void` queues a call to the source method through `super`.
   It is rejected for an abstract method.
 - `calls() -> Array[GDTestInvocation]` returns a defensive copy of every recorded

@@ -101,6 +101,7 @@ type analysis struct {
 // index must come from BuildIndex, and BuildIndex must have returned no diagnostics.
 func Analyze(index *Index, entry config.TestDouble) (Model, []Diagnostic) {
 	diagnostics := index.checkEntryPaths(entry)
+	diagnostics = append(diagnostics, index.checkClassName(entry)...)
 	model := Model{
 		SourceResource: resourcePrefix + entry.Source,
 		OutputResource: resourcePrefix + entry.Output,
@@ -137,6 +138,23 @@ func Analyze(index *Index, entry config.TestDouble) (Model, []Diagnostic) {
 	diagnostics = append(diagnostics, state.diagnostics...)
 	SortDiagnostics(diagnostics)
 	return model, diagnostics
+}
+
+// checkClassName reports a configured class_name that another project script
+// already declares. The entry's own output is excluded from the comparison,
+// because a previous run wrote that class_name into it.
+func (index *Index) checkClassName(entry config.TestDouble) []Diagnostic {
+	if entry.ClassName == "" {
+		return nil
+	}
+	existing, declared := index.classes[entry.ClassName]
+	if !declared || existing.path == entry.Output {
+		return nil
+	}
+	return []Diagnostic{{
+		Path:    config.Filename,
+		Message: "test_doubles class_name " + entry.ClassName + " is already declared by " + existing.path,
+	}}
 }
 
 // buildMethods returns the doubled methods in name order, plus the controller

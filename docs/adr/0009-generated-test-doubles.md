@@ -78,6 +78,17 @@ changes. A runtime misuse is a case failure at the caller's line, not in the gen
 unconfigured call, a wrong-typed answer, and a wrong-arity answer each fail the executing case and
 return the neutral default. A closed context records nothing into any case.
 
+## Limit: asynchronous answers on synchronous methods
+
+A generated method for a synchronous source declaration is a plain function. Godot raises
+`Trying to call an async function without "await".` as a script error when a coroutine
+Callable is called without `await`, and execution stops before any value returns. Making the
+generated method a coroutine would change the calling contract of the source method, so it is
+not done, and the renderer is unchanged. `then_answer` therefore awaits an answer only for an
+asynchronous method, and an answer for a synchronous method must be synchronous. The runtime
+cannot check this when the answer is queued, so the error surfaces in the case when the call is
+made.
+
 ## Consequences
 
 Users never write Vest-style runtime synthesis, and their doubles are ordinary, reviewable GDScript

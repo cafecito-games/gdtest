@@ -1,8 +1,10 @@
 package doubles
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,7 +16,6 @@ import (
 	"github.com/cafecito-games/gdparser/ast"
 	"github.com/cafecito-games/gdparser/parser"
 	"github.com/cafecito-games/gdparser/token"
-	"github.com/cafecito-games/gdtest/internal/pathglob"
 )
 
 // ownershipMarker matches the exact first line of a generated double. The
@@ -22,6 +23,11 @@ import (
 var ownershipMarker = regexp.MustCompile(`^# gdtest:generated-double v1 source=res://(\S+)$`)
 
 const resourcePrefix = "res://"
+
+// ownershipLineLimit bounds how much of an excluded script is read to find its
+// marker. A first line longer than this cannot be a marker, because the marker
+// pattern is a fixed prefix followed by one resource path.
+const ownershipLineLimit = 4096
 
 // GeneratedScript is a script whose first line carries the generated-double
 // ownership marker.
@@ -35,11 +41,15 @@ type GeneratedScript struct {
 // Index holds canonical paths and parsed trees, so it must be built from one
 // project root and used only while that tree is unchanged.
 type Index struct {
-	root        string
-	scripts     map[string]*script
-	failed      map[string]bool
-	classes     map[string]*script
-	diagnostics []Diagnostic
+	root    string
+	scripts map[string]*script
+	failed  map[string]bool
+	classes map[string]*script
+	// excludedOwned maps the project-relative path of each excluded script whose
+	// first line carries the ownership marker to the source it doubles. Excluded
+	// scripts are never parsed, so they appear here and nowhere else.
+	excludedOwned map[string]string
+	diagnostics   []Diagnostic
 }
 
 // script records the facts about one parsed file that analysis needs.
@@ -63,10 +73,13 @@ type member struct {
 }
 
 // BuildIndex parses every *.gd file under root, skipping .godot and .git
-// directories and any file or directory matched by exclude, which uses the
-// same glob semantics as test discovery. Failures to read or parse a file
-// become diagnostics; the index still contains every file that parsed. When
-// root cannot be resolved, the returned index is nil.
+// directories. A file or directory matched by exclude, which uses the same glob
+// semantics as test discovery, is not parsed and takes no part in class or
+// inheritance resolution, but its first line is still checked for the
+// ownership marker so that stale generated outputs under it are found.
+// Failures to read or parse a non-excluded file become diagnostics; the index
+// still contains every file that parsed. When root cannot be resolved, the
+// returned index is nil.
 func BuildIndex(root string, exclude []string) (*Index, []Diagnostic) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
@@ -77,14 +90,18 @@ func BuildIndex(root string, exclude []string) (*Index, []Diagnostic) {
 		return nil, []Diagnostic{{Path: root, Message: "resolve project root: " + err.Error()}}
 	}
 	index := &Index{
-		root:    canonical,
-		scripts: make(map[string]*script),
-		failed:  make(map[string]bool),
-		classes: make(map[string]*script),
+		root:          canonical,
+		scripts:       make(map[string]*script),
+		failed:        make(map[string]bool),
+		classes:       make(map[string]*script),
+		excludedOwned: make(map[string]string),
 	}
 	walkErr := filepath.WalkDir(canonical, func(current string, entry fs.DirEntry, walkErr error) error {
 		relative := relativeSlash(canonical, current)
 		if walkErr != nil {
+			if current != canonical && directoryExcluded(relative, exclude) {
+				return nil
+			}
 			index.diagnostics = append(index.diagnostics, Diagnostic{Path: relative, Message: "walk project: " + walkErr.Error()})
 			return nil
 		}
@@ -92,14 +109,16 @@ func BuildIndex(root string, exclude []string) (*Index, []Diagnostic) {
 			if current != canonical && (entry.Name() == ".godot" || entry.Name() == ".git") {
 				return fs.SkipDir
 			}
-			if current != canonical && pathglob.MatchesAny(relative+"/placeholder", exclude) {
-				return fs.SkipDir
-			}
 			return nil
 		}
-		if filepath.Ext(entry.Name()) == ".gd" && !pathglob.MatchesAny(relative, exclude) {
-			index.addFile(current, relative, entry)
+		if filepath.Ext(entry.Name()) != ".gd" {
+			return nil
 		}
+		if isExcluded(relative, exclude) {
+			index.addExcluded(current, relative)
+			return nil
+		}
+		index.addFile(current, relative, entry)
 		return nil
 	})
 	if walkErr != nil {
@@ -109,13 +128,17 @@ func BuildIndex(root string, exclude []string) (*Index, []Diagnostic) {
 	return index, index.diagnostics
 }
 
-// GeneratedScripts returns every script carrying the ownership marker, sorted by path.
+// GeneratedScripts returns every script carrying the ownership marker, including
+// scripts under excluded paths, sorted by path.
 func (index *Index) GeneratedScripts() []GeneratedScript {
 	var owned []GeneratedScript
 	for _, script := range index.scripts {
 		if script.generatedSource != "" {
 			owned = append(owned, GeneratedScript{Path: script.path, Source: script.generatedSource})
 		}
+	}
+	for relative, source := range index.excludedOwned {
+		owned = append(owned, GeneratedScript{Path: relative, Source: source})
 	}
 	sort.Slice(owned, func(left, right int) bool { return owned[left].Path < owned[right].Path })
 	return owned
@@ -158,6 +181,47 @@ func (index *Index) addFile(current string, relative string, entry fs.DirEntry) 
 		if _, exists := index.classes[scanned.className]; !exists {
 			index.classes[scanned.className] = scanned
 		}
+	}
+}
+
+// addExcluded records an excluded script as owned when its first line carries
+// the marker. The script is never parsed, and no read or link problem is
+// reported, so an excluded broken file cannot block generation. A symbolic link
+// that resolves outside the project is not read.
+func (index *Index) addExcluded(current string, relative string) {
+	resolved, err := filepath.EvalSymlinks(current)
+	if err != nil || !within(index.root, resolved) {
+		return
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	firstLine, err := readFirstLine(resolved)
+	if err != nil {
+		return
+	}
+	if source := generatedSourceOf(firstLine); source != "" {
+		index.excludedOwned[relative] = source
+	}
+}
+
+// readFirstLine returns the first line of filename, including its newline, and
+// stops reading at ownershipLineLimit bytes. A longer first line returns nothing.
+func readFirstLine(filename string) ([]byte, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	line, err := bufio.NewReaderSize(file, ownershipLineLimit).ReadSlice('\n')
+	switch {
+	case errors.Is(err, bufio.ErrBufferFull):
+		return nil, nil
+	case errors.Is(err, io.EOF), err == nil:
+		return line, nil
+	default:
+		return nil, err
 	}
 }
 

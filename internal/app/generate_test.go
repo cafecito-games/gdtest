@@ -106,6 +106,21 @@ func TestGenerateDoublesFailClosedWritesNothing(t *testing.T) {
 			files:         map[string]string{"src/inventory.gd": inventorySource, "src/other.gd": inventorySource},
 		},
 		{
+			name:          "class name declared by the source",
+			diagnostic:    "test_doubles class_name Inventory is already declared by src/inventory.gd",
+			configuration: `{"test_doubles":[{"source":"src/inventory.gd","output":"doubles/inventory_double.gd","class_name":"Inventory"}]}`,
+			files:         map[string]string{"src/inventory.gd": inventorySource},
+		},
+		{
+			name:          "class name declared by an unrelated script",
+			diagnostic:    "test_doubles class_name Ledger is already declared by src/ledger.gd",
+			configuration: `{"test_doubles":[{"source":"src/inventory.gd","output":"doubles/inventory_double.gd","class_name":"Ledger"}]}`,
+			files: map[string]string{
+				"src/inventory.gd": inventorySource,
+				"src/ledger.gd":    "class_name Ledger\nextends RefCounted\n",
+			},
+		},
+		{
 			name:          "escaping output path",
 			diagnostic:    "must not contain a parent directory segment",
 			configuration: `{"test_doubles":[{"source":"src/inventory.gd","output":"../escape.gd"}]}`,
@@ -249,6 +264,47 @@ func TestGenerateDoublesFailClosedWritesNothing(t *testing.T) {
 			assert.Equal(t, before, snapshotProject(t, root))
 		})
 	}
+}
+
+func TestGenerateDoublesConfiguredClassNameRerunChecksClean(t *testing.T) {
+	t.Parallel()
+
+	root := writeGenerateProject(t, `{"test_doubles":[{"source":"src/inventory.gd","output":"doubles/inventory_double.gd","class_name":"InventoryDouble"}]}`,
+		map[string]string{"src/inventory.gd": inventorySource})
+	require.Equal(t, ExitOK, mustGenerate(t, root))
+
+	exitCode, stdout, stderr := runGenerate(t, "--check", "--project", root)
+
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "0 double(s) out of date\n", stdout)
+	assert.Empty(t, stderr)
+}
+
+func TestGenerateDoublesExcludedOutputIsOwnedAndRemovedWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	const excludedConfiguration = `{"exclude":["vendor/**"],"test_doubles":[{"source":"src/inventory.gd","output":"vendor/doubles/inventory_double.gd","class_name":"InventoryDouble"}]}`
+	root := writeGenerateProject(t, excludedConfiguration, map[string]string{
+		"src/inventory.gd": inventorySource,
+		"vendor/broken.gd": "func (:\n",
+	})
+	require.Equal(t, ExitOK, mustGenerate(t, root))
+	assert.FileExists(t, filepath.Join(root, "vendor", "doubles", "inventory_double.gd"))
+	assert.FileExists(t, filepath.Join(root, "vendor", "doubles", "inventory_double.gd.uid"))
+	require.Equal(t, ExitOK, mustGenerate(t, root))
+
+	writeTestFile(t, root, "gdtest.json", `{"exclude":["vendor/**"],"test_doubles":[]}`)
+	before := snapshotProject(t, root)
+	exitCode, stdout, stderr := runGenerate(t, "--check", "--project", root)
+	require.Equal(t, ExitFailures, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "unexpected: vendor/doubles/inventory_double.gd\nunexpected: vendor/doubles/inventory_double.gd.uid\n", stdout)
+	assert.Equal(t, before, snapshotProject(t, root))
+
+	exitCode, stdout, stderr = runGenerate(t, "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "0 file(s) written; 2 file(s) removed\n", stdout)
+	assert.NoFileExists(t, filepath.Join(root, "vendor", "doubles", "inventory_double.gd"))
+	assert.NoFileExists(t, filepath.Join(root, "vendor", "doubles", "inventory_double.gd.uid"))
 }
 
 func TestGenerateDoublesCheckWithInvalidInputsExitsTwoBeforeStaleness(t *testing.T) {

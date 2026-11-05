@@ -5,10 +5,29 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/cafecito-games/gdtest/internal/config"
+	"github.com/cafecito-games/gdtest/internal/pathglob"
 )
+
+// isExcluded reports whether the project-relative slash path of a file matches
+// exclude, either directly or through one of its ancestor directories.
+func isExcluded(relative string, exclude []string) bool {
+	return pathglob.MatchesAny(relative, exclude) || directoryExcluded(path.Dir(relative), exclude)
+}
+
+// directoryExcluded reports whether directory, or one of its ancestors, matches
+// exclude. A directory matches when a placeholder file beneath it does.
+func directoryExcluded(directory string, exclude []string) bool {
+	for ; directory != "."; directory = path.Dir(directory) {
+		if pathglob.MatchesAny(directory+"/placeholder", exclude) {
+			return true
+		}
+	}
+	return false
+}
 
 // checkEntryPaths verifies that the source and output of entry stay inside the
 // canonical project root, including through symbolic links, and that an

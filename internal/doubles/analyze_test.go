@@ -389,3 +389,54 @@ func mustIndex(t *testing.T, root string) *Index {
 	require.Len(t, diagnostics, 1, "unrelated parse failure is reported by the index, not the entry")
 	return index
 }
+
+func TestAnalyzeRefusesConfiguredClassNameDeclaredByAnotherScript(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		files   map[string]string
+		message string
+	}{
+		{
+			name: "source declares the class name",
+			files: map[string]string{
+				"src/inventory.gd": "class_name Inventory\nextends RefCounted\n",
+			},
+			message: "test_doubles class_name Inventory is already declared by src/inventory.gd",
+		},
+		{
+			name: "unrelated script declares the class name",
+			files: map[string]string{
+				"src/inventory.gd": "extends RefCounted\n",
+				"src/ledger.gd":    "class_name Inventory\n",
+			},
+			message: "test_doubles class_name Inventory is already declared by src/ledger.gd",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, diagnostics := analyzeEntry(t, test.files, config.TestDouble{
+				Source:    "src/inventory.gd",
+				Output:    "doubles/inventory_double.gd",
+				ClassName: "Inventory",
+			})
+			require.Len(t, diagnostics, 1)
+			assert.Equal(t, config.Filename, diagnostics[0].Path)
+			assert.Equal(t, test.message, diagnostics[0].Message)
+		})
+	}
+}
+
+func TestAnalyzeAllowsOutputToKeepItsOwnClassName(t *testing.T) {
+	t.Parallel()
+
+	model, diagnostics := analyzeEntry(t, map[string]string{
+		"src/inventory.gd":            "extends RefCounted\n\nfunc count() -> int:\n\treturn 0\n",
+		"doubles/inventory_double.gd": "# gdtest:generated-double v1 source=res://src/inventory.gd\nclass_name Inventory\nextends RefCounted\n",
+	}, config.TestDouble{Source: "src/inventory.gd", Output: "doubles/inventory_double.gd", ClassName: "Inventory"})
+	assert.Empty(t, diagnostics)
+	assert.Equal(t, "Inventory", model.ClassName)
+}

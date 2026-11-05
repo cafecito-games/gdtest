@@ -85,3 +85,70 @@ func TestBuildIndexSymlinkedScriptOutsideRootIsDiagnosed(t *testing.T) {
 	assert.Contains(t, diagnostics[0].Message, "symlink resolves outside the project root")
 	assert.NotContains(t, index.classes, "External")
 }
+
+func TestBuildIndexFindsOwnershipInExcludedScriptsWithoutParsingThem(t *testing.T) {
+	t.Parallel()
+
+	marker := "# gdtest:generated-double v1 source=res://src/a.gd\n"
+	root := writeProject(t, map[string]string{
+		"vendor/owned.gd":       marker + "func (:\n",
+		"vendor/plain.gd":       "func (:\n",
+		"vendor/marker_late.gd": "\n" + marker,
+		"src/a.gd":              "class_name A\n",
+	})
+	index, diagnostics := BuildIndex(root, []string{"vendor/**"})
+	require.Empty(t, diagnostics)
+	assert.NotContains(t, index.scripts, "vendor/owned.gd")
+	assert.Equal(t, []GeneratedScript{{Path: "vendor/owned.gd", Source: "src/a.gd"}}, index.GeneratedScripts())
+}
+
+func TestBuildIndexExcludedScriptsDoNotResolveClasses(t *testing.T) {
+	t.Parallel()
+
+	index, diagnostics := BuildIndex(writeProject(t, map[string]string{
+		"src/a.gd":         "class_name Shared\n",
+		"vendor/dup.gd":    "class_name Shared\n",
+		"vendor/base.gd":   "extends \"res://nowhere.gd\"\n",
+		"vendor/deep/x.gd": "func (:\n",
+	}), []string{"vendor/**"})
+	require.Empty(t, diagnostics)
+	assert.Equal(t, "src/a.gd", index.classes["Shared"].path)
+	assert.Empty(t, index.GeneratedScripts())
+}
+
+func TestBuildIndexIgnoresUnsafeExcludedOwnershipWithoutDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	outside := t.TempDir()
+	marker := "# gdtest:generated-double v1 source=res://src/a.gd\n"
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "external.gd"), []byte(marker), 0o600))
+	root := writeProject(t, map[string]string{"vendor/keep.txt": "not script"})
+	require.NoError(t, os.Symlink(filepath.Join(outside, "external.gd"), filepath.Join(root, "vendor", "linked.gd")))
+	require.NoError(t, os.Symlink(filepath.Join(root, "missing.gd"), filepath.Join(root, "vendor", "dangling.gd")))
+
+	index, diagnostics := BuildIndex(root, []string{"vendor/**"})
+	assert.Empty(t, diagnostics)
+	assert.Empty(t, index.GeneratedScripts())
+}
+
+func TestDirectoryExcludedMatchesOnlyPlaceholderAncestors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		relative string
+		exclude  []string
+		want     bool
+	}{
+		{name: "file under double-star directory", relative: "vendor/a/b.gd", exclude: []string{"vendor/**"}, want: true},
+		{name: "file matched directly", relative: "src/broken.gd", exclude: []string{"**/broken.gd"}, want: true},
+		{name: "exact directory name does not prune", relative: "vendor/a.gd", exclude: []string{"vendor"}, want: false},
+		{name: "root file is never excluded by directory", relative: "a.gd", exclude: []string{"vendor/**"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, test.want, isExcluded(test.relative, test.exclude))
+		})
+	}
+}

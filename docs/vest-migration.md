@@ -162,7 +162,7 @@ Differences a converted test must account for:
 - Argument matchers (`with_args`, and `when` chains with matchers) have no equivalent. Assert on `calls()[i].arguments` instead.
 - Queued results are consumed first in, first out, and the last remaining result repeats for every later call. Call `reset()` to clear queued results and recorded calls before configuring a different sequence.
 - A call with no configured result is an unexpected call. It fails the case at the test's line and returns the neutral default. Configure every method the code under test calls, or use `then_call_real()` on a method that should run its real body.
-- Use `then_answer(callable)` for a computed result. The callable must accept the same number of arguments as the method, and an async callable is awaited.
+- Use `then_answer(callable)` for a computed result. The callable must accept the same number of arguments as the method, and an async callable is awaited only when the method is itself async. A synchronous method needs a synchronous callable.
 - Doubles do not replace an instance that already exists. Construct the double and pass it in.
 
 Move benchmarks out of the gdtest suite.
