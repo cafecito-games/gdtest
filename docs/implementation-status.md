@@ -278,3 +278,27 @@ ADR 0009.
 - Known pre-existing condition: Godot prints `ObjectDB instances were leaked at exit` for the
   example project run. The unmodified baseline examples (`math.test.gd`, `signal_probe.test.gd`)
   produce the same warning, so it is not introduced by the generated double.
+- Review hardening (each item names the test that proves it):
+  - Configured class_name collisions with real scripts exit `2`:
+    `TestAnalyzeRefusesConfiguredClassNameDeclaredByAnotherScript`,
+    `TestBuildIndexDiagnosesDuplicateClassName`, and
+    `TestGenerateDoublesRenamedOutputCollidingWithRealScriptFailsClosed`.
+  - Ownership under excluded paths is found without parsing the excluded file:
+    `TestBuildIndexFindsOwnershipInExcludedScriptsWithoutParsingThem` and
+    `TestGenerateDoublesExcludedOutputIsOwnedAndRemovedWhenUnconfigured`.
+  - Marker paths with spaces round-trip: `TestBuildIndexRecordsOwnershipForSourcePathsWithSpaces`
+    and `TestGenerateDoublesPathsWithSpacesRoundTrip`.
+  - `.godot` and `.git` segments are rejected in source and output paths, and indexing skips
+    those directories: `TestValidateTestDoublesRejectsInvalidEntries` and
+    `TestBuildIndexSkipsGodotAndGitDirectories`.
+  - Global enum returns are checked as enums: `TestAnalyzeReturnCheckTable`.
+  - Output rename convergence: generated doubles never enter the class map, so a renamed output
+    keeps its class_name and an interrupted rename converges:
+    `TestBuildIndexGeneratedDoublesNeverDeclareClasses`,
+    `TestGenerateDoublesRenamedOutputKeepsClassNameAndConverges`, and
+    `TestGenerateDoublesInterruptedRenameConvergesByRemovingOldOutput`.
+  - Removal preflight: every removal is proven before the first rename, so a failed probe or a
+    vanished owned file changes no target: `TestWriteRemovalProbeFailureChangesNoTarget`,
+    `TestWriteRefusesUnexpectedFileRemovedSincePrepare`, and
+    `TestGenerateDoublesUnremovableOwnedFileChangesNothing`, which uses real permissions and is
+    skipped under root.

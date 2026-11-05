@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 
@@ -261,12 +262,15 @@ func (osFileSystem) remove(path string) error {
 	return os.Remove(path)
 }
 
-// Write applies plan to the project at root. Every changed file is first staged
-// as a temporary beside its target. If any staging operation fails, every temporary
-// is removed and no target changes. Otherwise each changed .gd and then its
-// .gd.uid is renamed into place, and unexpected sidecars are removed before the
-// scripts they belong to. An interrupted run leaves a state that the next run
-// converges from. It returns the number of files written and removed.
+// Write applies plan to the project at root. Before any target changes, Write
+// proves every precondition it can: each path is contained, each changed file is
+// staged as a temporary beside its target, and each owned file to remove still
+// exists as a regular file in a directory where a temporary can be created and
+// removed. If any step fails, every temporary and probe is removed and no target
+// changes. Otherwise each changed .gd and then its .gd.uid is renamed into place,
+// and unexpected sidecars are removed before the scripts they belong to. An I/O
+// failure during the rename or remove phase can leave a partial state, and the
+// next run converges from it. It returns the number of files written and removed.
 func Write(root string, plan Plan) (int, int, error) {
 	return write(root, plan, osFileSystem{})
 }
@@ -294,6 +298,11 @@ func write(root string, plan Plan, files fileSystem) (int, int, error) {
 			return 0, 0, fmt.Errorf("stage %s: %w", relative, err)
 		}
 		staged = append(staged, temporary)
+	}
+
+	if err := proveRemovals(canonical, plan.Unexpected, files); err != nil {
+		removeAll(files, staged)
+		return 0, 0, err
 	}
 
 	written := 0
@@ -331,6 +340,38 @@ func removeAll(files fileSystem, temporaries []string) {
 	for _, temporary := range temporaries {
 		_ = files.remove(temporary)
 	}
+}
+
+// proveRemovals confirms that every unexpected file is still a regular file and
+// that each directory holding one accepts a temporary which can then be removed.
+// The probe goes through the staging seam, so a directory that cannot be written
+// or cleaned is refused before the first rename. A probe that is created and then
+// fails to remove is reported with the directory it lives in.
+func proveRemovals(canonical string, unexpected []string, files fileSystem) error {
+	probed := make(map[string]bool)
+	for _, relative := range unexpected {
+		target := filepath.Join(canonical, filepath.FromSlash(relative))
+		info, err := os.Lstat(target)
+		if err != nil {
+			return fmt.Errorf("prepare removal of %s: %w", relative, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("prepare removal of %s: not a regular file", relative)
+		}
+		directory := filepath.Dir(target)
+		if probed[directory] {
+			continue
+		}
+		probed[directory] = true
+		probe, err := files.stage(directory, nil)
+		if err != nil {
+			return fmt.Errorf("prepare removal in %s: %w", path.Dir(relative), err)
+		}
+		if err := files.remove(probe); err != nil {
+			return fmt.Errorf("prepare removal in %s: %w", path.Dir(relative), err)
+		}
+	}
+	return nil
 }
 
 // removalOrder places every .gd.uid before the script that owns it.

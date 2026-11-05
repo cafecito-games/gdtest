@@ -275,6 +275,66 @@ func TestPrepareRejectsSymlinkedOutputAndSidecar(t *testing.T) {
 	assert.Equal(t, "doubles/inventory_double.gd.uid", diagnostics[0].Path)
 }
 
+// failingProbe forwards every staging call to the real filesystem except the
+// zero-length probe that proveRemovals creates in directory.
+type failingProbe struct {
+	osFileSystem
+	directory string
+}
+
+func (failing failingProbe) stage(directory string, content []byte) (string, error) {
+	if directory == failing.directory && len(content) == 0 {
+		return "", errors.New("injected probe failure")
+	}
+	return failing.osFileSystem.stage(directory, content)
+}
+
+func TestWriteRemovalProbeFailureChangesNoTarget(t *testing.T) {
+	t.Parallel()
+
+	marker := "# gdtest:generated-double v1 source=res://src/gone.gd\n"
+	root := writeProject(t, map[string]string{
+		"src/inventory.gd":           applySource,
+		"doubles/gone_double.gd":     marker + "extends RefCounted\n",
+		"doubles/gone_double.gd.uid": "uid://gone\n",
+	})
+	plan, diagnostics := Prepare(root, applyProject(inventoryEntry()), "0.0.0-test")
+	require.Empty(t, diagnostics)
+	require.NotEmpty(t, plan.Changed)
+	require.Equal(t, []string{"doubles/gone_double.gd", "doubles/gone_double.gd.uid"}, plan.Unexpected)
+	before := snapshotFiles(t, root)
+
+	written, removed, err := write(root, plan, failingProbe{directory: filepath.Join(root, "doubles")})
+
+	require.ErrorContains(t, err, "prepare removal in doubles")
+	assert.Zero(t, written)
+	assert.Zero(t, removed)
+	assert.Equal(t, before, snapshotFiles(t, root))
+	assert.Empty(t, temporaryFiles(t, root))
+}
+
+func TestWriteRefusesUnexpectedFileRemovedSincePrepare(t *testing.T) {
+	t.Parallel()
+
+	marker := "# gdtest:generated-double v1 source=res://src/gone.gd\n"
+	root := writeProject(t, map[string]string{
+		"src/inventory.gd":       applySource,
+		"doubles/gone_double.gd": marker + "extends RefCounted\n",
+	})
+	plan, diagnostics := Prepare(root, applyProject(inventoryEntry()), "0.0.0-test")
+	require.Empty(t, diagnostics)
+	require.NoError(t, os.Remove(filepath.Join(root, "doubles", "gone_double.gd")))
+	before := snapshotFiles(t, root)
+
+	written, removed, err := Write(root, plan)
+
+	require.ErrorContains(t, err, "prepare removal of doubles/gone_double.gd")
+	assert.Zero(t, written)
+	assert.Zero(t, removed)
+	assert.Equal(t, before, snapshotFiles(t, root))
+	assert.Empty(t, temporaryFiles(t, root))
+}
+
 func modificationTimes(t *testing.T, root string) map[string]int64 {
 	t.Helper()
 	times := make(map[string]int64)

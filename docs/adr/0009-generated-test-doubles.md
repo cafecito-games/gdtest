@@ -78,6 +78,18 @@ changes. A runtime misuse is a case failure at the caller's line, not in the gen
 unconfigured call, a wrong-typed answer, and a wrong-arity answer each fail the executing case and
 return the neutral default. A closed context records nothing into any case.
 
+Writes have two phases. The preflight phase stages every changed file and proves that every owned
+file to remove is still a regular file in a directory where a temporary can be created and removed.
+A failure in that phase changes no target. The commit phase renames each staged file into place and
+then removes unexpected files, so an I/O error there can leave a partial state. Only the commit
+phase can leave that state, and the next run converges it, because ownership is re-derived from the
+disk and no state file has to be repaired.
+
+A generated double is not a project class. Its `class_name` comes from configuration, which enforces
+uniqueness across entries, so the index never registers it. A renamed output therefore keeps its
+class name without colliding with its own previous run, and a configured `class_name` that a real
+script declares still exits `2`.
+
 ## Limit: asynchronous answers on synchronous methods
 
 A generated method for a synchronous source declaration is a plain function. Godot raises

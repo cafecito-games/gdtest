@@ -307,6 +307,68 @@ func TestGenerateDoublesExcludedOutputIsOwnedAndRemovedWhenUnconfigured(t *testi
 	assert.NoFileExists(t, filepath.Join(root, "vendor", "doubles", "inventory_double.gd.uid"))
 }
 
+func TestGenerateDoublesRenamedOutputKeepsClassNameAndConverges(t *testing.T) {
+	t.Parallel()
+
+	root := writeGenerateProject(t, inventoryConfiguration, map[string]string{"src/inventory.gd": inventorySource})
+	require.Equal(t, ExitOK, mustGenerate(t, root))
+	writeTestFile(t, root, "gdtest.json", `{"test_doubles":[{"source":"src/inventory.gd","output":"doubles/new.gd","class_name":"InventoryDouble"}]}`)
+
+	exitCode, stdout, stderr := runGenerate(t, "--project", root)
+
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "2 file(s) written; 2 file(s) removed\n", stdout)
+	assert.FileExists(t, filepath.Join(root, "doubles", "new.gd"))
+	assert.FileExists(t, filepath.Join(root, "doubles", "new.gd.uid"))
+	assert.NoFileExists(t, filepath.Join(root, "doubles", "inventory_double.gd"))
+	assert.NoFileExists(t, filepath.Join(root, "doubles", "inventory_double.gd.uid"))
+
+	exitCode, stdout, stderr = runGenerate(t, "--check", "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "0 double(s) out of date\n", stdout)
+}
+
+func TestGenerateDoublesInterruptedRenameConvergesByRemovingOldOutput(t *testing.T) {
+	t.Parallel()
+
+	root := writeGenerateProject(t, inventoryConfiguration, map[string]string{"src/inventory.gd": inventorySource})
+	require.Equal(t, ExitOK, mustGenerate(t, root))
+	for _, suffix := range []string{"", ".uid"} {
+		content, err := os.ReadFile(filepath.Join(root, "doubles", "inventory_double.gd"+suffix))
+		require.NoError(t, err)
+		writeTestFile(t, root, "doubles/new.gd"+suffix, string(content))
+	}
+	writeTestFile(t, root, "gdtest.json", `{"test_doubles":[{"source":"src/inventory.gd","output":"doubles/new.gd","class_name":"InventoryDouble"}]}`)
+
+	exitCode, _, stderr := runGenerate(t, "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.NoFileExists(t, filepath.Join(root, "doubles", "inventory_double.gd"))
+	assert.NoFileExists(t, filepath.Join(root, "doubles", "inventory_double.gd.uid"))
+	assert.FileExists(t, filepath.Join(root, "doubles", "new.gd"))
+
+	exitCode, stdout, stderr := runGenerate(t, "--check", "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr=%q", stderr)
+	assert.Equal(t, "0 double(s) out of date\n", stdout)
+}
+
+func TestGenerateDoublesRenamedOutputCollidingWithRealScriptFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	root := writeGenerateProject(t, `{"test_doubles":[{"source":"src/inventory.gd","output":"doubles/new.gd","class_name":"InventoryDouble"}]}`, map[string]string{
+		"src/inventory.gd":            inventorySource,
+		"src/ledger.gd":               "class_name InventoryDouble\nextends RefCounted\n",
+		"doubles/inventory_double.gd": "# gdtest:generated-double v1 source=res://src/inventory.gd\nclass_name InventoryDouble\nextends RefCounted\n",
+	})
+	before := snapshotProject(t, root)
+
+	exitCode, stdout, stderr := runGenerate(t, "--project", root)
+
+	require.Equal(t, ExitError, exitCode)
+	assert.Empty(t, stdout)
+	assert.Contains(t, stderr, "test_doubles class_name InventoryDouble is already declared by src/ledger.gd")
+	assert.Equal(t, before, snapshotProject(t, root))
+}
+
 func TestGenerateDoublesCheckWithInvalidInputsExitsTwoBeforeStaleness(t *testing.T) {
 	t.Parallel()
 
@@ -442,6 +504,29 @@ func TestGenerateDoublesRemovedMarkerIsRefused(t *testing.T) {
 	require.Equal(t, ExitError, exitCode)
 	assert.Empty(t, stdout)
 	assert.Contains(t, stderr, "missing gdtest generated-double marker")
+	assert.Equal(t, before, snapshotProject(t, root))
+}
+
+func TestGenerateDoublesUnremovableOwnedFileChangesNothing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions do not restrict root")
+	}
+
+	root := writeGenerateProject(t, `{"test_doubles":[{"source":"src/inventory.gd","output":"lib/inventory_double.gd","class_name":"InventoryDouble"}]}`, map[string]string{
+		"src/inventory.gd":           inventorySource,
+		"doubles/gone_double.gd":     "# gdtest:generated-double v1 source=res://src/gone.gd\nextends RefCounted\n",
+		"doubles/gone_double.gd.uid": "uid://gone\n",
+	})
+	removalDirectory := filepath.Join(root, "doubles")
+	require.NoError(t, os.Chmod(removalDirectory, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(removalDirectory, 0o755) })
+	before := snapshotProject(t, root)
+
+	exitCode, stdout, stderr := runGenerate(t, "--project", root)
+
+	require.Equal(t, ExitError, exitCode, "stdout=%q stderr=%q", stdout, stderr)
+	assert.Empty(t, stdout)
+	assert.Contains(t, stderr, "prepare removal in doubles")
 	assert.Equal(t, before, snapshotProject(t, root))
 }
 

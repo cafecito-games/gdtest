@@ -877,6 +877,14 @@ Invalid inputs always win over out-of-date outputs. An invalid input is reported
 with a source location when one exists, and no entry is written unless every
 entry is valid.
 
+A write that fails before its first rename changes no file: every changed file
+is staged as a temporary beside its target, and every owned file to remove is
+confirmed to be a regular file in a directory that accepts a temporary which
+can then be removed. If any of these checks fails, the command exits `2`, removes
+its temporaries, and leaves the project as it was. A filesystem error during the
+rename or removal phase can leave some outputs installed. The next run converges
+that state from the files on disk.
+
 #### Output and ownership
 
 The first line of every generated script is the ownership marker:

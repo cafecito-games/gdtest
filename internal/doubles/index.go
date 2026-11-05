@@ -45,6 +45,10 @@ type Index struct {
 	root    string
 	scripts map[string]*script
 	failed  map[string]bool
+	// classes maps each class_name declared by a script that is not marker-owned.
+	// Generated doubles are excluded: their class_name is owned by configuration,
+	// which enforces uniqueness across entries, so they are never resolvable
+	// project classes.
 	classes map[string]*script
 	// excludedOwned maps the project-relative path of each excluded script whose
 	// first line carries the ownership marker to the source it doubles. Excluded
@@ -178,7 +182,7 @@ func (index *Index) addFile(current string, relative string, entry fs.DirEntry) 
 	}
 	index.scanStatements(scanned)
 	index.scripts[relative] = scanned
-	if scanned.className != "" {
+	if scanned.className != "" && scanned.generatedSource == "" {
 		if _, exists := index.classes[scanned.className]; !exists {
 			index.classes[scanned.className] = scanned
 		}
@@ -265,7 +269,7 @@ func (index *Index) scanDirective(scanned *script, directive *ast.Directive) {
 				"script declares more than one class_name"))
 			return
 		}
-		if existing, exists := index.classes[identifier.Name]; exists && existing != scanned {
+		if existing, exists := index.classes[identifier.Name]; exists && existing != scanned && scanned.generatedSource == "" {
 			index.diagnostics = append(index.diagnostics, spanDiagnostic(scanned.path, identifier.Span(),
 				"class_name "+identifier.Name+" is also declared by "+existing.path))
 		}

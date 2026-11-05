@@ -140,15 +140,16 @@ func Analyze(index *Index, entry config.TestDouble) (Model, []Diagnostic) {
 	return model, diagnostics
 }
 
-// checkClassName reports a configured class_name that another project script
-// already declares. The entry's own output is excluded from the comparison,
-// because a previous run wrote that class_name into it.
+// checkClassName reports a configured class_name that a project script which is
+// not a generated double already declares. Generated doubles never appear in the
+// class map, so a previous run's output, including one at a renamed path, never
+// blocks the class_name.
 func (index *Index) checkClassName(entry config.TestDouble) []Diagnostic {
 	if entry.ClassName == "" {
 		return nil
 	}
 	existing, declared := index.classes[entry.ClassName]
-	if !declared || existing.path == entry.Output {
+	if !declared {
 		return nil
 	}
 	return []Diagnostic{{

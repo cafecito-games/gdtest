@@ -75,6 +75,24 @@ func TestBuildIndexDiagnosesDuplicateClassName(t *testing.T) {
 	assert.Contains(t, diagnostics[0].Message, "class_name Shared is also declared by src/a.gd")
 }
 
+func TestBuildIndexGeneratedDoublesNeverDeclareClasses(t *testing.T) {
+	t.Parallel()
+
+	index, diagnostics := BuildIndex(writeProject(t, map[string]string{
+		"doubles/old.gd": "# gdtest:generated-double v1 source=res://src/a.gd\nclass_name Shared\n",
+		"src/a.gd":       "class_name Shared\n",
+	}), nil)
+	require.Empty(t, diagnostics)
+	assert.Equal(t, "src/a.gd", index.classes["Shared"].path)
+	assert.Equal(t, []GeneratedScript{{Path: "doubles/old.gd", Source: "src/a.gd"}}, index.GeneratedScripts())
+
+	index, diagnostics = BuildIndex(writeProject(t, map[string]string{
+		"doubles/old.gd": "# gdtest:generated-double v1 source=res://src/a.gd\nclass_name Only\n",
+	}), nil)
+	require.Empty(t, diagnostics)
+	assert.NotContains(t, index.classes, "Only")
+}
+
 func TestBuildIndexRejectsRootThatDoesNotExist(t *testing.T) {
 	t.Parallel()
 
