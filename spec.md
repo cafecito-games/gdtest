@@ -92,7 +92,8 @@ redesigning the public result model:
 - Runtime source generation for mocks. Test doubles are generated ahead of time
   by `gdtest generate doubles` from `gdtest.json` (section 9); the runtime never
   synthesizes script source.
-- Benchmarking APIs. They may be designed later as a separate concern.
+- Mixing performance measurements into correctness tests or enforcing wall-clock budgets.
+  Dedicated informational benchmarks are specified below as a separate concern.
 
 ## 5. High-level architecture
 
@@ -745,6 +746,12 @@ Test selection accepts:
 Unknown selectors are usage errors rather than silently empty successful runs,
 unless an explicit `--allow-empty` flag is supplied.
 
+Benchmark discovery is a parallel static-only manifest over configured `*.bench.gd` patterns.
+It resolves `GDTestBenchmark` inheritance, validates typed `benchmark_*` methods and hooks, and
+uses the same path/directory/glob/exact-ID selector semantics. Benchmark stable IDs are the
+normalized project-relative file plus the complete method name. Benchmark plans never contain
+absolute worktree paths or Godot objects.
+
 ## 16. GDScript public API
 
 [`api-spec.md`](./api-spec.md) is the implementation and conformance contract
@@ -781,6 +788,10 @@ type Executor interface {
 type EventSink interface {
     Emit(Event) error
 }
+
+type BenchmarkExecutor interface {
+    Bench(context.Context, BenchmarkPlan, BenchmarkEventSink) error
+}
 ```
 
 The concrete interface may differ, but:
@@ -793,6 +804,13 @@ The concrete interface may differ, but:
 
 Do not build a speculative plugin framework. Establish one clean internal
 boundary and implement the Godot executor first.
+
+Benchmark planning and event folding remain parallel to correctness-test folding. One leased
+persistent worker runs a benchmark's warmups and samples serially. Hooks, scheduling, worker
+startup, protocol serialization, and reporting are outside the timed interval. The worker uses a
+monotonic engine clock around each method invocation and streams immutable start/sample/finish
+events. A stale generation, cancellation, timeout, runtime error, crash, or incomplete sample set
+invalidates the result and cannot create a baseline entry.
 
 ## 18. Reporting and exit behavior
 
@@ -825,6 +843,15 @@ Parallel execution must not make report ordering nondeterministic. Sort final
 results by normalized file path and manifest order while still streaming
 immediate failure events when useful.
 
+`gdtest bench` uses the same project sessions, scheduler, worker bounds, worktree isolation, and
+exit codes. Its versioned result schema is shared by JSONL, terminal output, baseline persistence,
+and comparison. It contains the complete normalized sample array; min, median, p95, and max;
+iteration/sample counts; source generation and content fingerprint; product/runtime/protocol and
+Godot identities; OS, architecture, CPU identity when available, logical CPU count, and dirty
+worktree state. It never contains an absolute project path. Baselines decode strictly, sort by
+stable ID, and publish by same-directory atomic replacement. Comparison reports matching, added,
+and removed IDs and never changes exit status because of a timing delta.
+
 ## 19. Cancellation and failure recovery
 
 On client cancellation:
@@ -839,6 +866,10 @@ Worker startup and handshake may be retried once after an import/bootstrap or
 fresh-worker replacement. A case must not be silently retried after
 `case_started`; tests may have external side effects. A worker crash during an
 active case produces an infrastructure result naming the last known case.
+
+The same cancellation and exact-process recovery rules apply to benchmarks. Retrying after stale
+generation or worker replacement discards all samples from the obsolete attempt rather than
+merging partial distributions.
 
 The daemon must survive malformed worker messages, worker crashes, client
 disconnects, and deleted worktrees. Panics in one session must not crash the

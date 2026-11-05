@@ -25,7 +25,27 @@ Run everything or select one stable provider row:
 ./addons/gdtest/gdtest run 'tests/math.test.gd::test_adds[small]'
 ```
 
-The default configuration discovers `**/*.test.gd`. Optional strict `gdtest.json` keys are `tests`, `exclude`, `godot`, `jobs`, `warm_workers`, `worker_idle_timeout`, `worker_max_runs`, and `only_mode`. Unknown keys fail. Focus policies are `auto`, `ignore`, `require`, and `forbid`, configurable in the file or per invocation with `--only`.
+The default configuration discovers `**/*.test.gd` and `**/*.bench.gd`. Optional strict `gdtest.json` keys are `tests`, `benchmarks`, `exclude`, `godot`, `jobs`, `warm_workers`, `worker_idle_timeout`, `worker_max_runs`, and `only_mode`. Unknown keys fail. Focus policies are `auto`, `ignore`, `require`, and `forbid`, configurable in the file or per invocation with `--only`.
+
+Create a separate `bench/math.bench.gd` for informational performance measurements:
+
+```gdscript
+extends GDTestBenchmark
+
+
+func benchmark_vector_math() -> void:
+	var _value: Vector3 = Vector3.ONE.normalized()
+```
+
+Run it with the defaults or write/compare a canonical baseline. Comparison reports deltas and
+added/removed stable IDs but never fails because code became slower:
+
+```sh
+./addons/gdtest/gdtest bench
+./addons/gdtest/gdtest bench --warmup 5 --samples 50 --iterations 10
+./addons/gdtest/gdtest bench --write-baseline benchmark-baseline.json
+./addons/gdtest/gdtest bench --compare benchmark-baseline.json
+```
 
 User-wide resource policy lives in the operating system's user configuration directory as
 `gdtest/config.json` (for example, `~/Library/Application Support/gdtest/config.json` on macOS):
@@ -53,6 +73,7 @@ Useful commands:
 
 ```sh
 ./addons/gdtest/gdtest list tests/
+./addons/gdtest/gdtest bench bench/
 ./addons/gdtest/gdtest run --jobs 2 --isolation fresh tests/
 ./addons/gdtest/gdtest watch tests/math.test.gd
 ./addons/gdtest/gdtest warm

@@ -31,7 +31,7 @@ Compatible assertion names and unrelated formatting are left alone. Run the migr
 
 ## Manual findings
 
-gdtest has no v1 equivalent for benchmarks, generated mixins, event callbacks, or arbitrary fluent matcher chains. Runtime-generated mocks (`mock`, `when`, `get_calls_of`) are not converted mechanically; a typed double generated ahead of time from `gdtest.json` replaces the common uses, as described under "Runtime mocks and benchmarks" below. These constructs remain in the source and are reported with a file, line, column, stable finding code, and explanation. A finding never silently deletes or weakens a test.
+gdtest does not preserve Vest's fluent benchmark builder, generated mixins, event callbacks, or arbitrary fluent matcher chains. Benchmarks move to the dedicated `GDTestBenchmark` workflow by hand. Runtime-generated mocks (`mock`, `when`, `get_calls_of`) are not converted mechanically; a typed double generated ahead of time from `gdtest.json` replaces the common uses, as described under "Runtime mocks and benchmarks" below. These constructs remain in the source and are reported with a file, line, column, stable finding code, and explanation. A finding never silently deletes or weakens a test.
 
 Signal captures are the exception that migrates. A `capture_signal(member_signal, literal_count)`
 statement that is a top-level statement of a `test_` function becomes a case-scoped
@@ -165,7 +165,26 @@ Differences a converted test must account for:
 - Use `then_answer(callable)` for a computed result. The callable must accept the same number of arguments as the method, and an async callable is awaited only when the method is itself async. A synchronous method needs a synchronous callable.
 - Doubles do not replace an instance that already exists. Construct the double and pass it in.
 
-Move benchmarks out of the gdtest suite.
+Move each Vest benchmark out of the correctness suite into a `*.bench.gd` file that extends
+`GDTestBenchmark`. Replace the builder's measured callback with a typed zero-argument
+`benchmark_*() -> void` method. Move unmeasured builder setup into `before_benchmark` or
+`before_sample`, and choose `--warmup`, `--samples`, and `--iterations` at the CLI rather than in
+source. Do not translate Vest measures, budgets, or fluent configuration into assertions: gdtest
+reports the complete distribution and informational baseline deltas without a timing pass/fail.
+
+```gdscript
+extends GDTestBenchmark
+
+var _subject: Inventory
+
+
+func before_sample(_info: GDTestBenchmarkInfo) -> void:
+	_subject = Inventory.new()
+
+
+func benchmark_add_item() -> void:
+	_subject.add("apple", 1)
+```
 
 ### Vest.timeout
 

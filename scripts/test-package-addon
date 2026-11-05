@@ -186,6 +186,24 @@ EOF
         || fail "gpm-installed executable/runtime handshake failed:$'\n'$package_output"
     grep -qF "1 passed" <<< "$package_output" || fail "packaged handshake did not execute the passing test"
 
+    cat > "$host_project/tests/package.bench.gd" <<'EOF'
+extends GDTestBenchmark
+
+
+## Verifies the packaged benchmark API and persistent worker command.
+func benchmark_packaged_runtime() -> void:
+	var values: Array[int] = [3, 1, 2]
+	values.sort()
+EOF
+    benchmark_output=$("$host_project/addons/gdtest/gdtest" bench --no-daemon \
+        --project "$host_project" --warmup 1 --samples 2 --iterations 2 \
+        tests/package.bench.gd 2>&1) \
+        || fail "packaged benchmark command failed:$'\n'$benchmark_output"
+    grep -qF "tests/package.bench.gd::benchmark_packaged_runtime" <<< "$benchmark_output" \
+        || fail "packaged benchmark output omitted its stable ID:$'\n'$benchmark_output"
+    grep -qF "samples=2 iterations=2" <<< "$benchmark_output" \
+        || fail "packaged benchmark output omitted its sampling policy:$'\n'$benchmark_output"
+
 	doctor_binary="$host_project/addons/gdtest/gdtest"
 	doctor_home="$work/doctor-home"
 	mkdir -p "$doctor_home"

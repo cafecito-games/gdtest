@@ -7,6 +7,8 @@ Minimal Unix job:
 ```sh
 gpm install --host-only
 ./addons/gdtest/gdtest run --json | tee gdtest-results.jsonl
+./addons/gdtest/gdtest bench --json --write-baseline gdtest-benchmarks.json \
+  | tee gdtest-benchmark-events.jsonl
 ```
 
 Windows release/CI support is deferred until gdtest has a validated native
@@ -14,6 +16,11 @@ user-level daemon transport and a Windows CI runner. The package index does not
 advertise Windows executable slices in the meantime.
 
 `--host-only` materializes mandatory core and the implicit current-host executable. It does not alter the byte-identical lockfile. A normal install is also valid because the gdtest addon entry carries `platforms = []`.
+
+Benchmark deltas are informational. Preserve the baseline and JSONL artifacts for review, but do
+not treat a positive delta as a failing exit status. Configuration, malformed baseline, worker,
+protocol, cancellation, and incomplete-sample outcomes still use the normal infrastructure exit
+policy.
 
 Use `--only forbid` to reject focused tests in CI. Add `--fail-on-skip`, `--fail-on-todo`, or `--fail-on-void` when those otherwise non-failing outcomes should fail the job. Strict-policy violations retain their original summary counts, are listed in the final summary, and exit 1. Exit 2 means configuration, discovery, protocol, worker, or reporting failure; exit 130 means cancellation. Always retain daemon logs and the JSONL artifact for an infrastructure failure.
 

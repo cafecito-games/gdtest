@@ -26,10 +26,12 @@ type fakeWorker struct {
 	pid          int
 	generation   uint64
 	runs         int
+	benches      int
 	discovers    int
 	resets       int
 	closed       atomic.Bool
 	runHook      func(model.TestPlan, executor.EventSink) error
+	benchHook    func(model.BenchmarkPlan, executor.BenchmarkEventSink) error
 	discoverHook func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
 	resetErr     error
 	startupTime  map[string]int64
@@ -40,7 +42,17 @@ func (f *fakeWorker) Run(_ context.Context, plan model.TestPlan, sink executor.E
 	if f.runHook != nil {
 		return f.runHook(plan, sink)
 	}
-	return sink.Emit(model.Event{ProtocolVersion: 1, Type: model.EventRunFinished, RunID: plan.RunID})
+	return sink.Emit(model.Event{ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished, RunID: plan.RunID})
+}
+func (f *fakeWorker) Bench(_ context.Context, plan model.BenchmarkPlan, sink executor.BenchmarkEventSink) error {
+	f.benches++
+	if f.benchHook != nil {
+		return f.benchHook(plan, sink)
+	}
+	return sink.EmitBenchmark(model.BenchmarkEvent{
+		ProtocolVersion: model.ProtocolVersion, Type: model.EventBenchmarkRunFinished,
+		RunID: plan.RunID, Status: "pass", Generation: plan.Generation,
+	})
 }
 func (f *fakeWorker) Discover(ctx context.Context, plan model.TestPlan) (model.DiscoveryManifest, error) {
 	f.discovers++
@@ -82,7 +94,7 @@ func TestSessionServiceReusesWorker(t *testing.T) {
 	}
 	request := RunRequest{
 		SessionID: "session-project", Project: "/project", Godot: "godot",
-		Plan: model.TestPlan{ProtocolVersion: 1, RunID: "run-1", Generation: 1},
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "run-1", Generation: 1},
 	}
 	for index := range 2 {
 		request.Plan.RunID = "run-" + string(rune('1'+index))
@@ -107,6 +119,154 @@ func TestSessionServiceReusesWorker(t *testing.T) {
 	sessions := service.List()
 	require.Len(t, sessions, 1)
 	assert.Equal(t, uint64(2), sessions[0].Runs)
+}
+
+func TestSessionServiceBenchReusesWorkerAndResetsIt(t *testing.T) {
+	t.Parallel()
+
+	process := &fakeWorker{pid: 142, generation: 1}
+	service := newSessionService(func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+		return process, nil
+	})
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+	request := BenchRequest{
+		SessionID: "benchmark-session", Project: "/project", Godot: "godot",
+		Plan: model.BenchmarkPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "benchmark-run", Generation: 1,
+			Samples: 2, Iterations: 1,
+		},
+	}
+	payload, err := json.Marshal(request)
+	require.NoError(t, err)
+	events := 0
+	response, err := service.Handle(context.Background(), daemon.Request{
+		ID: "benchmark-request", Method: "session.bench", Payload: payload,
+	}, func(any) error { events++; return nil })
+	require.NoError(t, err)
+	assert.Equal(t, 1, events)
+	assert.Equal(t, 1, process.benches)
+	assert.Equal(t, 1, process.resets)
+	result, ok := response.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, 142, result["worker_pid"])
+}
+
+func TestSessionServiceBenchmarksAcrossWorktreesRespectGlobalWorkerBound(t *testing.T) {
+	t.Parallel()
+
+	const clients = 8
+	const maxWorkers = 2
+	var nextPID atomic.Int32
+	var active atomic.Int32
+	var maximum atomic.Int32
+	started := make(chan struct{}, maxWorkers)
+	release := make(chan struct{})
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: int(nextPID.Add(1)) + 2000, generation: options.Generation}
+		process.benchHook = func(plan model.BenchmarkPlan, sink executor.BenchmarkEventSink) error {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				observed := maximum.Load()
+				if current <= observed || maximum.CompareAndSwap(observed, current) {
+					break
+				}
+			}
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return sink.EmitBenchmark(model.BenchmarkEvent{
+				ProtocolVersion: model.ProtocolVersion, Type: model.EventBenchmarkRunFinished,
+				RunID: plan.RunID, Status: "pass", Generation: plan.Generation,
+			})
+		}
+		return process, nil
+	}, maxWorkers)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	errorsByClient := make(chan error, clients)
+	for index := range clients {
+		go func() {
+			payload, err := json.Marshal(BenchRequest{
+				SessionID: fmt.Sprintf("benchmark-worktree-%02d", index),
+				Project:   fmt.Sprintf("/dirty-worktree-%02d", index),
+				Godot:     "godot",
+				Plan: model.BenchmarkPlan{
+					ProtocolVersion: model.ProtocolVersion,
+					RunID:           fmt.Sprintf("benchmark-run-%02d", index),
+					Generation:      1,
+					Samples:         1,
+					Iterations:      1,
+				},
+			})
+			if err != nil {
+				errorsByClient <- err
+				return
+			}
+			_, err = service.Handle(context.Background(), daemon.Request{
+				ID: fmt.Sprintf("benchmark-request-%02d", index), Method: "session.bench", Payload: payload,
+			}, func(any) error { return nil })
+			errorsByClient <- err
+		}()
+	}
+	for range maxWorkers {
+		waitServiceSignal(t, started)
+	}
+	assert.Equal(t, maxWorkers, service.WorkerCount())
+	assert.Equal(t, int32(maxWorkers), maximum.Load())
+	close(release)
+	for range clients {
+		require.NoError(t, <-errorsByClient)
+	}
+	assert.Equal(t, int32(clients), nextPID.Load())
+}
+
+func TestSessionServiceBenchmarkCrashReplacementAndRecycling(t *testing.T) {
+	t.Parallel()
+
+	var processes []*fakeWorker
+	service := newSessionService(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 3000 + len(processes), generation: options.Generation}
+		if len(processes) == 0 {
+			process.benchHook = func(model.BenchmarkPlan, executor.BenchmarkEventSink) error {
+				return errors.New("benchmark worker crashed")
+			}
+		}
+		processes = append(processes, process)
+		return process, nil
+	})
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+	request := BenchRequest{
+		SessionID: "benchmark-recovery", Project: "/dirty-worktree", Godot: "godot",
+		WorkerMaxRuns: 1,
+		Plan: model.BenchmarkPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "benchmark-crash", Generation: 1,
+			Samples: 1, Iterations: 1,
+		},
+	}
+	invoke := func() error {
+		payload, err := json.Marshal(request)
+		require.NoError(t, err)
+		_, err = service.Handle(context.Background(), daemon.Request{
+			ID: request.Plan.RunID, Method: "session.bench", Payload: payload,
+		}, func(any) error { return nil })
+		return err
+	}
+
+	err := invoke()
+	require.ErrorContains(t, err, "benchmark worker crashed")
+	require.Len(t, processes, 1)
+	assert.True(t, processes[0].closed.Load())
+
+	request.Plan.RunID = "benchmark-replacement"
+	require.NoError(t, invoke())
+	require.Len(t, processes, 2)
+	require.Eventually(t, processes[1].closed.Load, time.Second, time.Millisecond, "worker_max_runs must recycle the successful replacement")
 }
 
 func TestSessionServiceEmitsStructuredLifecycleLogs(t *testing.T) {
@@ -512,7 +672,7 @@ func TestSessionServiceRejectsUnsafeOrIncompatiblePlans(t *testing.T) {
 		{
 			name: "protocol",
 			plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion + 1, RunID: "run", Generation: 1},
-			want: "protocol version 2 does not match 1",
+			want: fmt.Sprintf("protocol version %d does not match %d", model.ProtocolVersion+1, model.ProtocolVersion),
 		},
 		{
 			name: "traversal",
@@ -893,14 +1053,14 @@ func TestSessionServiceMarksChangedRunStaleAndReloadsBodyOnlyGeneration(t *testi
 		process := &fakeWorker{pid: 300 + len(processes), generation: options.Generation}
 		if !processChanged {
 			process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
-				if err := sink.Emit(model.Event{ProtocolVersion: 1, Type: model.EventRunStarted, RunID: plan.RunID}); err != nil {
+				if err := sink.Emit(model.Event{ProtocolVersion: model.ProtocolVersion, Type: model.EventRunStarted, RunID: plan.RunID}); err != nil {
 					return err
 				}
 				processChanged = true
 				if err := os.WriteFile(script, []byte("extends GDTest\nfunc test_value() -> void:\n\tvar changed: int = 1\n"), 0o600); err != nil {
 					return err
 				}
-				return sink.Emit(model.Event{ProtocolVersion: 1, Type: model.EventRunFinished, RunID: plan.RunID})
+				return sink.Emit(model.Event{ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished, RunID: plan.RunID})
 			}
 		}
 		processes = append(processes, process)
@@ -910,7 +1070,7 @@ func TestSessionServiceMarksChangedRunStaleAndReloadsBodyOnlyGeneration(t *testi
 
 	request := RunRequest{
 		SessionID: "generation-session", Project: root, Godot: "godot",
-		Plan: model.TestPlan{ProtocolVersion: 1, RunID: "changing-run", Generation: 1},
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "changing-run", Generation: 1},
 	}
 	var finished model.Event
 	emit := func(value any) error {
@@ -1072,7 +1232,7 @@ func TestSessionServiceRecyclesAtRunLimit(t *testing.T) {
 	}
 	payload, err := json.Marshal(RunRequest{
 		SessionID: "recycle", Project: "/project", Godot: "godot", WorkerMaxRuns: 1,
-		Plan: model.TestPlan{ProtocolVersion: 1, RunID: "run", Generation: 1},
+		Plan: model.TestPlan{ProtocolVersion: model.ProtocolVersion, RunID: "run", Generation: 1},
 	})
 	require.NoError(t, err)
 	_, err = service.Handle(context.Background(), daemon.Request{

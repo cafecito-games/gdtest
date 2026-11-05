@@ -13,11 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	gdtest "github.com/cafecito-games/gdtest"
+	benchmarking "github.com/cafecito-games/gdtest/internal/benchmark"
 	"github.com/cafecito-games/gdtest/internal/client"
 	"github.com/cafecito-games/gdtest/internal/config"
 	"github.com/cafecito-games/gdtest/internal/daemon"
@@ -27,6 +29,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/migrate"
 	"github.com/cafecito-games/gdtest/internal/model"
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
+	"github.com/cafecito-games/gdtest/internal/protocol"
 	"github.com/cafecito-games/gdtest/internal/reporter"
 	"github.com/cafecito-games/gdtest/internal/results"
 	"github.com/cafecito-games/gdtest/internal/scheduler"
@@ -105,6 +108,24 @@ type runOptions struct {
 	selectors   []string
 }
 
+type benchmarkOptions struct {
+	project       string
+	godot         string
+	json          bool
+	allowEmpty    bool
+	noDaemon      bool
+	isolation     string
+	jobs          int
+	jobsSet       bool
+	warmup        int
+	samples       int
+	iterations    int
+	compare       string
+	writeBaseline string
+	staleRetry    int
+	selectors     []string
+}
+
 type listOptions struct {
 	project    string
 	godot      string
@@ -142,6 +163,7 @@ func newRootCommand(streams IO, exitCode *int) *cobra.Command {
 	root.Flags().BoolVar(&showVersion, "version", false, "print version information")
 	root.AddCommand(
 		newInitCommand(streams),
+		newBenchCommand(streams, exitCode),
 		newRunCommand(streams, exitCode),
 		newListCommand(streams),
 		newWatchCommand(streams, exitCode),
@@ -183,6 +205,33 @@ func newRunCommand(streams IO, exitCode *int) *cobra.Command {
 		},
 	}
 	addRunFlags(command, &options)
+	return command
+}
+
+func newBenchCommand(streams IO, exitCode *int) *cobra.Command {
+	options := benchmarkOptions{warmup: 3, samples: 30, iterations: 1, isolation: "reuse"}
+	command := &cobra.Command{
+		Use:   "bench [selectors...]",
+		Short: "Run selected benchmarks",
+		Args:  cobra.ArbitraryArgs,
+		Run: func(command *cobra.Command, selectors []string) {
+			options.selectors = selectors
+			options.jobsSet = command.Flags().Changed("jobs")
+			*exitCode = runBenchmarks(command.Context(), options, streams)
+		},
+	}
+	addProjectFlag(command, &options.project)
+	command.Flags().StringVar(&options.godot, "godot", "", "Godot executable (overrides project and user configuration)")
+	command.Flags().BoolVar(&options.json, "json", false, "write JSON Lines benchmark events and results")
+	command.Flags().BoolVar(&options.allowEmpty, "allow-empty", false, "allow selectors that match no benchmarks")
+	command.Flags().BoolVar(&options.noDaemon, "no-daemon", false, "run orchestration in the foreground")
+	command.Flags().StringVar(&options.isolation, "isolation", "reuse", "worker isolation: reuse, recycle, fresh, or exclusive")
+	command.Flags().IntVar(&options.jobs, "jobs", 0, "maximum concurrent benchmark files (0 uses automatic concurrency)")
+	command.Flags().IntVar(&options.warmup, "warmup", 3, "discarded warmup samples per benchmark")
+	command.Flags().IntVar(&options.samples, "samples", 30, "measured samples per benchmark")
+	command.Flags().IntVar(&options.iterations, "iterations", 1, "method invocations normalized into each sample")
+	command.Flags().StringVar(&options.compare, "compare", "", "compare informationally with a benchmark baseline JSON file")
+	command.Flags().StringVar(&options.writeBaseline, "write-baseline", "", "atomically write canonical benchmark baseline JSON")
 	return command
 }
 
@@ -637,6 +686,357 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		return ExitError
 	}
 	return summaryExitCode(summary)
+}
+
+func runBenchmarks(ctx context.Context, options benchmarkOptions, streams IO) int {
+	if options.warmup < 0 || options.samples <= 0 || options.iterations <= 0 {
+		writeDiagnostic(streams.Err, "gdtest:", errors.New("warmup must be non-negative; samples and iterations must be positive"))
+		return ExitError
+	}
+	if _, err := scheduler.ParseIsolation(options.isolation); err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	if options.jobsSet && options.jobs < 0 {
+		writeDiagnostic(streams.Err, "gdtest:", errors.New("jobs must be non-negative"))
+		return ExitError
+	}
+	var baseline *benchmarking.ResultSet
+	if options.compare != "" {
+		data, err := os.ReadFile(options.compare)
+		if err != nil {
+			writeDiagnostic(streams.Err, "gdtest: benchmark baseline:", err)
+			return ExitError
+		}
+		decoded, err := benchmarking.Decode(data)
+		if err != nil {
+			writeDiagnostic(streams.Err, "gdtest: benchmark baseline:", err)
+			return ExitError
+		}
+		baseline = &decoded
+	}
+	root, err := projectRoot(options.project)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	projectConfig, err := loadProjectConfiguration(root)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	if options.godot != "" {
+		projectConfig.Godot = options.godot
+	}
+	if options.jobsSet {
+		projectConfig.Jobs = options.jobs
+	}
+	manifest, err := discovery.DiscoverBenchmarks(root, discovery.BenchmarkOptions{
+		Patterns: projectConfig.Benchmarks, Exclude: projectConfig.Exclude,
+	})
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	manifest, err = discovery.SelectBenchmarks(manifest, options.selectors, options.allowEmpty)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	benchmarkCount := 0
+	for _, file := range manifest.Files {
+		benchmarkCount += len(file.Benchmarks)
+	}
+	if benchmarkCount == 0 {
+		if !options.allowEmpty {
+			writeDiagnostic(streams.Err, "gdtest:", errors.New("no benchmarks selected; use --allow-empty to accept an empty selection"))
+			return ExitError
+		}
+		if options.json {
+			_ = json.NewEncoder(streams.Out).Encode(map[string]any{
+				"type":    "benchmark_results",
+				"results": benchmarking.ResultSet{SchemaVersion: benchmarking.SchemaVersion, Benchmarks: []benchmarking.Result{}},
+			})
+		} else {
+			_, _ = fmt.Fprintln(streams.Out, "No benchmarks selected.")
+		}
+		return ExitOK
+	}
+	sessionID, err := resolveSessionID(ctx, root, projectConfig)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	generation := uint64(1)
+	if !options.noDaemon {
+		generation, err = daemonGeneration(
+			ctx, sessionID, root, projectConfig.Godot,
+			time.Duration(projectConfig.WorkerIdleTimeout),
+		)
+		if err != nil {
+			writeDiagnostic(streams.Err, "gdtest:", err)
+			return ExitError
+		}
+	}
+	plan := model.BenchmarkPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: newID(), Generation: generation,
+		ContentFingerprint: manifest.ContentFingerprint,
+		Warmup:             options.warmup, Samples: options.samples, Iterations: options.iterations,
+		Files: manifest.Files,
+	}
+	collector := benchmarking.NewCollector(plan)
+	environment := benchmarkEnvironment(root)
+	stale := false
+	var encoder *json.Encoder
+	if options.json {
+		encoder = json.NewEncoder(streams.Out)
+		encoder.SetEscapeHTML(false)
+	}
+	sink := executor.BenchmarkEventSinkFunc(func(event model.BenchmarkEvent) error {
+		if event.Type == model.EventBenchmarkRunStarted {
+			applyBenchmarkEnvironment(&environment, event.Metadata)
+		}
+		stale = stale || event.Stale
+		if err := collector.EmitBenchmark(event); err != nil {
+			return err
+		}
+		if encoder != nil {
+			return encoder.Encode(event)
+		}
+		if event.Type == model.EventBenchmarkWorkerError {
+			_, err := fmt.Fprintf(streams.Out, "ERROR %s: %s\n", event.BenchmarkID, event.Message)
+			return err
+		}
+		return nil
+	})
+	_, err = executeBenchmarkPlan(
+		ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
+		time.Duration(projectConfig.WorkerIdleTimeout), projectConfig.Jobs, options.isolation,
+		projectConfig.WarmWorkers, plan, sink, options.noDaemon, streams,
+	)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return ExitCanceled
+		}
+		if isStaleGenerationError(err) && options.staleRetry == 0 {
+			options.staleRetry++
+			return runBenchmarks(ctx, options, streams)
+		}
+		writeDiagnostic(streams.Err, "gdtest: benchmark:", err)
+		return ExitError
+	}
+	if stale {
+		if options.staleRetry == 0 {
+			options.staleRetry++
+			return runBenchmarks(ctx, options, streams)
+		}
+		writeDiagnostic(streams.Err, "gdtest: benchmark:", errors.New("benchmark result is stale after retry"))
+		return ExitError
+	}
+	result, err := collector.Results(environment)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest: benchmark:", err)
+		return ExitError
+	}
+	if encoder != nil {
+		if err := encoder.Encode(struct {
+			Type    string                 `json:"type"`
+			Results benchmarking.ResultSet `json:"results"`
+		}{Type: "benchmark_results", Results: result}); err != nil {
+			writeDiagnostic(streams.Err, "gdtest: benchmark report:", err)
+			return ExitError
+		}
+	} else if err := writeBenchmarkTerminal(streams.Out, result); err != nil {
+		writeDiagnostic(streams.Err, "gdtest: benchmark report:", err)
+		return ExitError
+	}
+	if baseline != nil {
+		comparison := benchmarking.Compare(result, *baseline)
+		if encoder != nil {
+			if err := encoder.Encode(map[string]any{"type": "benchmark_comparison", "comparison": comparison}); err != nil {
+				writeDiagnostic(streams.Err, "gdtest: benchmark comparison:", err)
+				return ExitError
+			}
+		} else if err := writeBenchmarkComparison(streams.Out, comparison); err != nil {
+			writeDiagnostic(streams.Err, "gdtest: benchmark comparison:", err)
+			return ExitError
+		}
+	}
+	if options.writeBaseline != "" {
+		if err := benchmarking.WriteAtomic(options.writeBaseline, result); err != nil {
+			writeDiagnostic(streams.Err, "gdtest: benchmark baseline:", err)
+			return ExitError
+		}
+	}
+	return ExitOK
+}
+
+func executeBenchmarkPlan(
+	ctx context.Context,
+	sessionID string,
+	root string,
+	godot string,
+	workerMaxRuns int,
+	workerIdleTimeout time.Duration,
+	jobs int,
+	isolation string,
+	warmWorkers int,
+	plan model.BenchmarkPlan,
+	sink executor.BenchmarkEventSink,
+	noDaemon bool,
+	streams IO,
+) (map[string]time.Duration, error) {
+	started := time.Now()
+	if noDaemon {
+		timings := make(map[string]time.Duration)
+		workerStarted := time.Now()
+		process, err := worker.Start(ctx, worker.ProcessOptions{
+			Godot: godot, Project: root, SessionID: "foreground-benchmark-" + newID(),
+			Generation: plan.Generation, Stdout: streams.Err, Stderr: streams.Err,
+		})
+		timings["worker_acquisition_startup"] = time.Since(workerStarted)
+		if err != nil {
+			return nil, err
+		}
+		mergeNanosecondTimings(timings, process.TakeStartupTimings())
+		executionStarted := time.Now()
+		benchErr := process.Bench(ctx, plan, sink)
+		timings["foreground_worker_execution"] = time.Since(executionStarted)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutdownErr := process.Shutdown(shutdownCtx)
+		cancel()
+		timings["foreground_total"] = time.Since(started)
+		return timings, errors.Join(benchErr, shutdownErr)
+	}
+	daemonClient, err := compatibleClient(true)
+	if err != nil {
+		return nil, err
+	}
+	callStarted := time.Now()
+	response, err := daemonClient.Call(ctx, "session.bench", service.BenchRequest{
+		SessionID: sessionID, Project: root, Godot: godot, Plan: plan,
+		WorkerMaxRuns: workerMaxRuns, WorkerIdleNS: workerIdleTimeout.Nanoseconds(),
+		Jobs: jobs, WarmWorkers: warmWorkers, Isolation: isolation,
+	}, func(data json.RawMessage) error {
+		var event model.BenchmarkEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return fmt.Errorf("decode daemon benchmark event: %w", err)
+		}
+		return sink.EmitBenchmark(event)
+	})
+	if err != nil {
+		return nil, err
+	}
+	timings := map[string]time.Duration{"client_daemon_round_trip": time.Since(callStarted)}
+	var result struct {
+		Timings map[string]int64 `json:"timings_ns"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil {
+		return nil, fmt.Errorf("decode daemon benchmark response: %w", err)
+	}
+	mergeNanosecondTimings(timings, result.Timings)
+	return timings, nil
+}
+
+func benchmarkEnvironment(root string) benchmarking.Environment {
+	return benchmarking.Environment{
+		GDTestVersion: version.Product, RuntimeVersion: version.Product,
+		ModelProtocolVersion: model.ProtocolVersion, DaemonProtocolVersion: daemon.ProtocolVersion,
+		WorkerProtocolVersion: protocol.Version,
+		OS:                    runtime.GOOS, Architecture: runtime.GOARCH, CPUModel: cpuModel(),
+		LogicalCPUCount: runtime.NumCPU(), DirtyWorktree: dirtyWorktree(root),
+	}
+}
+
+func applyBenchmarkEnvironment(environment *benchmarking.Environment, metadata map[string]any) {
+	if environment == nil || metadata == nil {
+		return
+	}
+	if cpu, ok := metadata["cpu_model"].(string); ok && cpu != "" {
+		environment.CPUModel = cpu
+	}
+	if count, ok := metadata["logical_cpu_count"].(float64); ok && count > 0 {
+		environment.LogicalCPUCount = int(count)
+	}
+	info, ok := metadata["godot_version"].(map[string]any)
+	if !ok {
+		return
+	}
+	for _, key := range []string{"string", "full_name"} {
+		if value, exists := info[key].(string); exists && value != "" {
+			environment.GodotVersion = value
+			break
+		}
+	}
+	if value, exists := info["hash"].(string); exists {
+		environment.GodotHash = value
+	}
+}
+
+func cpuModel() string {
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			key, value, found := strings.Cut(line, ":")
+			if found && (strings.TrimSpace(key) == "model name" || strings.TrimSpace(key) == "Hardware") {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		if data, err := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output(); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return ""
+}
+
+func dirtyWorktree(root string) bool {
+	command := exec.Command("git", "-C", root, "status", "--porcelain", "--untracked-files=normal")
+	data, err := command.Output()
+	return err == nil && strings.TrimSpace(string(data)) != ""
+}
+
+func writeBenchmarkTerminal(writer io.Writer, result benchmarking.ResultSet) error {
+	if _, err := fmt.Fprintf(
+		writer, "environment: gdtest=%s runtime=%s protocols=%d/%d/%d godot=%s hash=%s os=%s arch=%s cpu=%s logical_cpus=%d dirty=%t\n",
+		result.Environment.GDTestVersion, result.Environment.RuntimeVersion,
+		result.Environment.ModelProtocolVersion, result.Environment.DaemonProtocolVersion,
+		result.Environment.WorkerProtocolVersion, result.Environment.GodotVersion, result.Environment.GodotHash,
+		result.Environment.OS, result.Environment.Architecture, result.Environment.CPUModel,
+		result.Environment.LogicalCPUCount, result.Environment.DirtyWorktree,
+	); err != nil {
+		return err
+	}
+	for _, item := range result.Benchmarks {
+		if _, err := fmt.Fprintf(
+			writer, "%s samples=%d iterations=%d min=%s median=%s p95=%s max=%s\n",
+			item.ID, item.SampleCount, item.Iterations,
+			time.Duration(item.Samples.MinNS), time.Duration(item.Samples.MedianNS),
+			time.Duration(item.Samples.P95NS), time.Duration(item.Samples.MaxNS),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeBenchmarkComparison(writer io.Writer, comparison benchmarking.Comparison) error {
+	for _, delta := range comparison.Matched {
+		if _, err := fmt.Fprintf(writer, "compare %s delta=%s (%+.2f%%)\n", delta.ID, time.Duration(delta.DeltaNS), delta.DeltaPercent); err != nil {
+			return err
+		}
+	}
+	for _, id := range comparison.Added {
+		if _, err := fmt.Fprintf(writer, "compare added %s\n", id); err != nil {
+			return err
+		}
+	}
+	for _, id := range comparison.Removed {
+		if _, err := fmt.Fprintf(writer, "compare removed %s\n", id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func summaryExitCode(summary results.Summary) int {
@@ -1164,7 +1564,7 @@ func versionString() string {
 }
 
 func usage(writer io.Writer) {
-	_, _ = fmt.Fprintln(writer, "usage: gdtest <init|run|list|watch|warm|doctor|migrate|daemon> [options]")
+	_, _ = fmt.Fprintln(writer, "usage: gdtest <init|run|bench|list|watch|warm|doctor|migrate|daemon> [options]")
 }
 
 func writeDiagnostic(writer io.Writer, prefix string, err error) {

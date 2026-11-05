@@ -123,7 +123,11 @@ unexpected_core_bin=$(grep -E '(^|/)bin/' <<< "$core_listing" | grep -vxF 'bin/.
 if [ -n "$unexpected_core_bin" ] || grep -qE '(^|/)(cmd|internal|fixtures|packaging)/|\.go$|(^|/)go\.(mod|sum)$|(^|/)spec\.md$' <<< "$core_listing"; then
     fail "core contains a host binary or build-time source"
 fi
-for required in LICENSE bin/.gdignore gdtest gdtest.cmd gdtest.gd version.gd worker.gd; do
+for required in \
+    LICENSE bin/.gdignore gdtest gdtest.cmd gdtest.gd version.gd worker.gd \
+    gdtest_benchmark.gd gdtest_benchmark_info.gd \
+    worker_benchmark_runner.gd worker_benchmark_task.gd
+do
     grep -qxF "$required" <<< "$core_listing" || fail "core is missing $required"
 done
 

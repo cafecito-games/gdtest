@@ -244,7 +244,7 @@ func verifyHandshake(
 			hello.GodotVersion["major"], hello.GodotVersion["minor"],
 		)
 	}
-	required := []string{"run", "discover", "ping", "cancel", "reload", "reset", "shutdown"}
+	required := []string{"run", "bench", "discover", "ping", "cancel", "reload", "reset", "shutdown"}
 	capabilities := make(map[string]struct{}, len(hello.Capabilities))
 	for _, capability := range hello.Capabilities {
 		capabilities[capability] = struct{}{}

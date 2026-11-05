@@ -1,1 +1,1 @@
-{"version":1,"type":"hello","token":"fixture-token","payload":{"runtime_version":"0.0.0-dev","worker_id":"worker-1","session_id":"session-1","generation":7,"project_path":"/tmp/project","godot_version":"4.7.2","capabilities":["run","cancel","reset"]}}
+{"version":2,"type":"hello","token":"fixture-token","payload":{"runtime_version":"0.0.0-dev","worker_id":"worker-1","session_id":"session-1","generation":7,"project_path":"/tmp/project","godot_version":"4.7.2","capabilities":["run","bench","cancel","reset"]}}

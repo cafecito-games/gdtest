@@ -36,6 +36,19 @@ type RunRequest struct {
 	Isolation     string         `json:"isolation,omitempty"`
 }
 
+// BenchRequest contains path-specific lease data and a path-neutral benchmark plan.
+type BenchRequest struct {
+	SessionID     string              `json:"session_id"`
+	Project       string              `json:"project"`
+	Godot         string              `json:"godot"`
+	Plan          model.BenchmarkPlan `json:"plan"`
+	WorkerMaxRuns int                 `json:"worker_max_runs,omitempty"`
+	WorkerIdleNS  int64               `json:"worker_idle_timeout_ns,omitempty"`
+	Jobs          int                 `json:"jobs,omitempty"`
+	WarmWorkers   int                 `json:"warm_workers,omitempty"`
+	Isolation     string              `json:"isolation,omitempty"`
+}
+
 // DiscoverRequest contains the path-specific lease data and path-neutral plan
 // used to complete engine-dependent discovery in a persistent worker.
 type DiscoverRequest struct {
@@ -73,6 +86,7 @@ type WarmRequest struct {
 
 type managedWorker interface {
 	Run(context.Context, model.TestPlan, executor.EventSink) error
+	Bench(context.Context, model.BenchmarkPlan, executor.BenchmarkEventSink) error
 	Discover(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
 	Ping(context.Context) error
 	Reset(context.Context) error
@@ -217,6 +231,36 @@ func (s *SessionService) Handle(ctx context.Context, request daemon.Request, emi
 		}
 		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, isolation, func(runCtx context.Context) (any, error) {
 			return s.run(runCtx, entry, value, isolation, emit, time.Since(submitted))
+		})
+	case "session.bench":
+		var value BenchRequest
+		if err := decodeStrict(request.Payload, &value); err != nil {
+			return nil, err
+		}
+		if value.SessionID == "" || value.Project == "" || value.Godot == "" || value.Plan.RunID == "" {
+			return nil, errors.New("bench needs session_id, project, godot, and plan.run_id")
+		}
+		if err := validateBenchmarkPlan(value.Plan); err != nil {
+			return nil, fmt.Errorf("invalid benchmark plan: %w", err)
+		}
+		isolation, err := scheduler.ParseIsolation(value.Isolation)
+		if err != nil {
+			return nil, err
+		}
+		entry, err := s.get(value.SessionID, value.Project, value.Godot, value.WorkerIdleNS)
+		if err != nil {
+			return nil, err
+		}
+		submitted := time.Now()
+		result, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile source before benchmark: %w", err)
+		}
+		if err := requireCurrentGeneration(value.Plan.Generation, result.Update.Generation); err != nil {
+			return nil, err
+		}
+		return s.schedule(ctx, value.SessionID, value.Plan.Generation, scheduler.Interactive, isolation, func(runCtx context.Context) (any, error) {
+			return s.bench(runCtx, entry, value, isolation, emit, time.Since(submitted))
 		})
 	case "session.discover":
 		var value DiscoverRequest
@@ -838,6 +882,82 @@ func (s *SessionService) run(
 	return map[string]any{"worker_pid": pid, "reused": reused, "timings_ns": timings}, nil
 }
 
+func (s *SessionService) bench(
+	ctx context.Context,
+	entry *session,
+	request BenchRequest,
+	isolation scheduler.Isolation,
+	emit daemon.EmitFunc,
+	queueWait time.Duration,
+) (any, error) {
+	started := time.Now()
+	timings := map[string]int64{"queue_wait": queueWait.Nanoseconds()}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	reconcileStarted := time.Now()
+	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Filesystem)
+	timings["generation_reconcile"] = time.Since(reconcileStarted).Nanoseconds()
+	if err != nil {
+		return nil, fmt.Errorf("reconcile source at benchmark start: %w", err)
+	}
+	if err := requireCurrentGeneration(request.Plan.Generation, latest.Update.Generation); err != nil {
+		return nil, err
+	}
+	if isolation == scheduler.Fresh {
+		s.discardWorker(entry)
+	}
+	workerStarted := time.Now()
+	process, err := s.ensureWorker(ctx, entry, request.Plan.Generation)
+	timings["worker_acquisition_startup"] = time.Since(workerStarted).Nanoseconds()
+	if err != nil {
+		return nil, err
+	}
+	mergeStartupTimings(timings, process)
+	s.logLifecycle("benchmark_started", entry, process, request.Plan.RunID, nil)
+	sink := executor.BenchmarkEventSinkFunc(func(event model.BenchmarkEvent) error {
+		if entry.source != nil {
+			stamp := entry.source.Stamp(request.Plan.Generation)
+			event.Stale = stamp.Stale
+			if stamp.Stale {
+				if event.Metadata == nil {
+					event.Metadata = make(map[string]any)
+				}
+				event.Metadata["requested_generation"] = stamp.Requested
+				event.Metadata["current_generation"] = stamp.Current
+			}
+		}
+		return emit(event)
+	})
+	executionStarted := time.Now()
+	if err := process.Bench(ctx, request.Plan, sink); err != nil {
+		s.logLifecycle("benchmark_failed", entry, process, request.Plan.RunID, map[string]any{"error": err.Error()})
+		s.discardWorker(entry)
+		return nil, err
+	}
+	timings["worker_execution_serialization"] = time.Since(executionStarted).Nanoseconds()
+	reused := entry.workerRuns > 0
+	entry.runs++
+	entry.workerRuns++
+	entry.lastUsed = time.Now().UTC()
+	entry.lifecycle.Touch(entry.lastUsed)
+	resetStarted := time.Now()
+	if err := process.Reset(ctx); err != nil {
+		s.discardWorker(entry)
+		return nil, fmt.Errorf("reset worker after benchmark: %w", err)
+	}
+	timings["worker_reset"] = time.Since(resetStarted).Nanoseconds()
+	timings["daemon_total"] = time.Since(started).Nanoseconds()
+	pid := process.PID()
+	memoryExceeded, memoryErr := s.recordWorkerMemory(entry)
+	if isolation == scheduler.Recycle || isolation == scheduler.Fresh ||
+		(request.WorkerMaxRuns > 0 && entry.workerRuns >= uint64(request.WorkerMaxRuns)) ||
+		(s.memoryBudgetMB > 0 && (memoryErr != nil || memoryExceeded)) {
+		s.recycleWorker(entry)
+	}
+	s.logLifecycle("benchmark_finished", entry, process, request.Plan.RunID, nil)
+	return map[string]any{"worker_pid": pid, "reused": reused, "timings_ns": timings}, nil
+}
+
 func mergeWorkerTimings(timings map[string]int64, metadata map[string]any) {
 	value, ok := metadata["timings_usec"]
 	if !ok {
@@ -1408,6 +1528,34 @@ func validatePlan(planValue model.TestPlan) error {
 	for _, file := range planValue.Files {
 		if err := validateProjectPath(file.Path); err != nil {
 			return fmt.Errorf("file %q: %w", file.Path, err)
+		}
+	}
+	return nil
+}
+
+func validateBenchmarkPlan(plan model.BenchmarkPlan) error {
+	if plan.ProtocolVersion != model.ProtocolVersion {
+		return fmt.Errorf("protocol version %d does not match %d", plan.ProtocolVersion, model.ProtocolVersion)
+	}
+	if plan.Generation == 0 {
+		return errors.New("generation must be positive")
+	}
+	if plan.Warmup < 0 || plan.Samples <= 0 || plan.Iterations <= 0 {
+		return errors.New("warmup must be non-negative and samples and iterations must be positive")
+	}
+	seen := make(map[string]struct{})
+	for _, file := range plan.Files {
+		if err := validateProjectPath(file.Path); err != nil {
+			return fmt.Errorf("file %q: %w", file.Path, err)
+		}
+		for _, item := range file.Benchmarks {
+			if item.ID == "" || item.MethodName == "" {
+				return errors.New("benchmark entries need IDs and method names")
+			}
+			if _, exists := seen[item.ID]; exists {
+				return fmt.Errorf("duplicate benchmark ID %q", item.ID)
+			}
+			seen[item.ID] = struct{}{}
 		}
 	}
 	return nil

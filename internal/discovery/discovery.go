@@ -160,6 +160,14 @@ func Select(manifest Manifest, selectors []string, allowEmpty bool) (Manifest, e
 	if len(selectors) == 0 {
 		return manifest, nil
 	}
+	normalized := make([]string, len(selectors))
+	for index, selector := range selectors {
+		clean, err := normalizeDiscoverySelector(selector)
+		if err != nil {
+			return Manifest{}, err
+		}
+		normalized[index] = clean
+	}
 	selected := Manifest{
 		Scripts:               manifest.Scripts,
 		StructuralFingerprint: manifest.StructuralFingerprint,
@@ -169,9 +177,9 @@ func Select(manifest Manifest, selectors []string, allowEmpty bool) (Manifest, e
 	for _, file := range manifest.Files {
 		out := model.FilePlan{Path: file.Path}
 		fileSelected := false
-		for index, selector := range selectors {
+		for index, selector := range normalized {
 			pathMatch := selector == file.Path || strings.HasPrefix(file.Path, strings.TrimSuffix(selector, "/")+"/")
-			globMatched, _ := path.Match(selector, file.Path)
+			globMatched := pathglob.Match(selector, file.Path)
 			if pathMatch || globMatched {
 				known[index] = true
 				fileSelected = true
@@ -182,7 +190,7 @@ func Select(manifest Manifest, selectors []string, allowEmpty bool) (Manifest, e
 				out.Cases = append(out.Cases, testCase)
 				continue
 			}
-			for index, selector := range selectors {
+			for index, selector := range normalized {
 				if selector == testCase.ID {
 					known[index] = true
 					out.Cases = append(out.Cases, testCase)
@@ -207,4 +215,33 @@ func Select(manifest Manifest, selectors []string, allowEmpty bool) (Manifest, e
 		return Manifest{}, errors.New("selectors matched no tests")
 	}
 	return selected, nil
+}
+
+func normalizeDiscoverySelector(selector string) (string, error) {
+	original := selector
+	selector = strings.ReplaceAll(selector, `\`, "/")
+	if selector == "" {
+		return "", errors.New("selector must not be empty")
+	}
+	if strings.HasPrefix(selector, "/") ||
+		(len(selector) >= 3 && selector[1] == ':' && selector[2] == '/') {
+		return "", fmt.Errorf("selector %q must be project-relative", original)
+	}
+	selector = strings.TrimPrefix(selector, "res://")
+	selector = strings.TrimPrefix(selector, "./")
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(selector)))
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("selector %q escapes the project root", original)
+	}
+	if strings.ContainsAny(clean, "*?[") {
+		for _, part := range strings.Split(clean, "/") {
+			if part == "**" {
+				continue
+			}
+			if _, err := path.Match(part, ""); err != nil {
+				return "", fmt.Errorf("invalid selector %q: %w", original, err)
+			}
+		}
+	}
+	return clean, nil
 }

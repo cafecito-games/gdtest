@@ -17,6 +17,7 @@ func TestLoadDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "godot", config.Godot)
 	assert.Len(t, config.Tests, 1)
+	assert.Equal(t, []string{"**/*.bench.gd"}, config.Benchmarks)
 }
 
 func TestLoadRejectsUnknownKey(t *testing.T) {
