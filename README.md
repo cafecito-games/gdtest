@@ -23,10 +23,8 @@ Commit `addons.toml` and `addons.lock`; do not commit `.gpm-state.toml`. Run the
 
 CI and disposable worktrees can use `gpm install --host-only`; ordinary CI installation always uses `gpm install`, never `gpm update`. Windows release slices are intentionally deferred until the user-level daemon has a validated Windows transport and Windows CI coverage; the current release set is macOS and Linux arm64/x86_64.
 
-The `--host-tool` capability was implemented for gpm on branch `feat/host-tool-platforms`,
-implementation commit `80a6244` with real sliced-transaction coverage at `67e8265`; use a gpm
-release containing those changes. With an older gpm, add the equivalent manifest entry and run
-`gpm install`:
+The `--host-tool` capability is available in gpm 0.6.0 and newer. With an older gpm, add the
+equivalent manifest entry and run `gpm install`:
 
 ```toml
 [addons.gdtest]
@@ -81,4 +79,4 @@ Migration uses gdparser syntax spans, preserves unsupported source, and reports 
 
 ## Development
 
-Go 1.26, Godot 4.7, gdkit 0.10.0 or newer, golangci-lint v2, and gpm 0.5.1 or newer are required. Run `scripts/check` before committing. See [CONTRIBUTING.md](CONTRIBUTING.md) for packaging, benchmarks, and the complete local workflow.
+Go 1.26, Godot 4.7, gdkit 0.10.0 or newer, golangci-lint v2, and gpm 0.6.0 or newer are required. Run `scripts/check` before committing. See [CONTRIBUTING.md](CONTRIBUTING.md) for packaging, benchmarks, and the complete local workflow.

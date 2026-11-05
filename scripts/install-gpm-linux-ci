@@ -2,7 +2,7 @@
 # Install the exact released gpm binary used by Linux packaging jobs.
 set -euo pipefail
 
-version="0.5.1"
+version="0.6.0"
 destination="${1:-}"
 
 if [ -z "$destination" ] || [ $# -ne 1 ]; then
@@ -17,11 +17,11 @@ fi
 case "$(uname -m)" in
 	x86_64 | amd64)
 		architecture="amd64"
-		sha256="beaba7bc7aa2d05dba09989530fda8240ca53ce2202a63c58f682a8de3527299"
+		sha256="7de5f1f721312a697ede46b4ff8454d0759261b6fe2f6a8b66cba3c1a809a5ad"
 		;;
 	aarch64 | arm64)
 		architecture="arm64"
-		sha256="eb807f6326bf038cf7b2b23f80ef43724196eecb8cecd507e8b55019a448948a"
+		sha256="4bdb17ec6cc93449051703171104882ee7b143dba4a23ccc2f1f8aa47f33bcd1"
 		;;
 	*)
 		echo "unsupported Linux architecture: $(uname -m)" >&2

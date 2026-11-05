@@ -6,7 +6,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-minimum_gpm="0.5.1"
+minimum_gpm="0.6.0"
 
 fail() {
     echo "FAIL: $*" >&2

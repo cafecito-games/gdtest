@@ -38,7 +38,7 @@ tests on Linux instead of accepting their explicit no-Godot skip path. The packa
 same engine to execute the installed Linux host slice and verify its runtime handshake.
 
 Packaging and release jobs install gpm through `scripts/install-gpm-linux-ci`, which verifies the
-architecture-specific v0.5.1 release archive and requires the binary to report that exact version.
+architecture-specific v0.6.0 release archive and requires the binary to report that exact version.
 Installing the module with `go install` is intentionally insufficient because gpm release versions
 are injected while building release assets and a module-built executable reports `dev`.
 

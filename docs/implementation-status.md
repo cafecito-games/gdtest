@@ -13,7 +13,7 @@ blocked release work.
 | 3. Worktrees and scheduler | Verified | Canonical Git worktree identity, isolated sessions, fair bounded scheduling, four isolation policies, per-file concurrency, global worker bound, LRU/idle/run/age/memory recycling, and multi-worktree stress coverage. Each process has opaque private `user://` storage removed on exit; memory measurement failure conservatively recycles the worker. See ADR 0006. |
 | 4. Discovery and generations | Verified with ADR | Static and dynamic discovery, stable IDs/locations, selectors, dependency analysis, reusable parsed-AST/static/dependency/dynamic artifacts, authoritative reconciliation, stale events, and watch mode are implemented. Any source-generation change replaces the worker instead of attempting unverifiable in-process reload; see ADR 0005. Real Godot generation and dynamic-discovery tests pass. |
 | 5. Selection and migration | Verified | Engine-completed selection, dynamic-only files, path/directory/glob/name/focus selectors, conservative affected selection, and gdparser-span Vest migration with atomic writes and precise unsupported-context findings. Nested-class scope, nested SceneTree access, inherited-name warning annotations, migration goldens, a mechanically migrated real-Godot fixture, and the complete 682-file Uzir migration audit pass. |
-| 6. Hardening and packaging | Locally verified; external releases pending | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, pinned Linux Godot end-to-end CI, profiling, supported-engine validation, and the specified performance corpora are implemented and verified. Publishing the prerequisite gpm and gdtest releases remains prohibited external work; Windows is explicitly deferred in ADR 0004. |
+| 6. Hardening and packaging | Locally verified; gdtest release pending | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, level-filtered bounded lifecycle logs, exact package-tree verification, pinned Linux Godot end-to-end CI, profiling, supported-engine validation, and the specified performance corpora are implemented and verified. The prerequisite host-tool behavior is released in gpm 0.6.0; publishing and consuming the gdtest release remains external work. Windows is explicitly deferred in ADR 0004. |
 
 All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 
@@ -21,7 +21,7 @@ All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 
 | Criterion | Status | Evidence or remaining work |
 | --- | --- | --- |
-| 1. Versioned gpm release install | Externally pending | Local staged release installation is verified; publishing and consuming a real GitHub release is prohibited in this session. |
+| 1. Versioned gpm release install | gdtest release pending | Local staged release installation is verified, and gpm 0.6.0 supplies the released atomic host-tool command. Publishing and consuming the first gdtest GitHub release remains. |
 | 2. Warm worker reuse | Verified | Separate daemon requests reuse one authenticated worker PID without startup on the second run's critical path. Multi-file requests reuse bounded lanes rather than launching one process per file. |
 | 3. Case streaming and linear serialization | Verified | Immutable events stream and are folded once. Size-swept 1,000/5,000/10,000 serialization and rich-failure benchmarks, deterministic encoded-size linearity tests, and real 10,000-assertion/10,000-case corpora pass. |
 | 4. Conflicting worktree isolation | Verified | Real dirty linked-worktree integration observes each worktree's own source and stable path-relative IDs. |
@@ -34,7 +34,7 @@ All Go tests use Testify assertions. The CLI is implemented with Cobra v1.10.2.
 | 11. Consumer worktree cleanliness | Verified | Init/gpm ownership and scratch-install tests pass. Uzir was migrated only in the isolated `local/gdtest-dogfood` worktree; its main worktree remained clean. |
 | 12. Backend-neutral executor boundary | Verified | `internal/executor` consumes serializable plans/events independently of Godot and reporters. |
 | 13. Reproducible sliced package | Verified | Core plus four macOS/Linux slices stage reproducibly; host-only and all-platform scratch installs pass after removal of unvalidated Windows slices. |
-| 14. Atomic host-tool installation | Locally verified; release pending | Sibling `godot-addon-manager` branch `feat/host-tool-platforms`, implementation commit `80a6244` and transaction-test commit `67e8265`, atomically writes `platforms = []` and installs real packaged core plus only the current-host slice despite mobile/web project targets. A released gpm containing the change does not yet exist. |
+| 14. Atomic host-tool installation | Released and verified in gpm | gpm PR #58 merged implementation commit `80a6244` and transaction-test commit `67e8265`; gpm 0.6.0 atomically writes `platforms = []` and installs real packaged core plus only the current-host slice despite mobile/web project targets. Its release workflow, checksums, version output, and `--host-tool` help were verified against the published macOS arm64 artifact. End-to-end installation from the public gdtest release completes with criterion 1. |
 | 15. Canonical local/CI policy | Verified for current revision | `scripts/check`, prek, and CI share the required gates, select shipped runtime files, and deliberate malformed fixtures prove the gates fail. |
 
 ## Current verification evidence
@@ -66,9 +66,13 @@ Completed on 2026-11-05 for the current hardening batch:
   `scripts/test-package-addon 0.0.0-completion-audit` passed after the final hardening changes,
   including byte-for-byte reproducibility, exact slice contents, repeat-install cleanliness,
   host-only/default/all-platform scratch installs, and an installed 4.7.2 worker handshake.
-- A read-only release audit on 2026-11-05 found no `cafecito-games/gdtest` GitHub releases and
-  confirmed gpm v0.5.1 remains the latest published gpm release. Thus acceptance criteria 1 and
-  14 require only the prohibited publication of the already verified local release changes.
+- gpm PR #58 passed its build/test and lint jobs, merged at commit `7be106f`, and released as
+  v0.6.0 by successful workflow run `42015313749`. The published macOS arm64 archive matched its
+  checksum, reported `gpm version 0.6.0`, and exposed the exact `--host-tool` contract; the pinned
+  Linux installer downloaded and executed both published x86-64 and arm64 archives in clean
+  architecture-matched containers. `scripts/package-addon 0.0.0-gpm-0.6-audit` and
+  `scripts/test-package-addon 0.0.0-gpm-0.6-audit` then passed with the released macOS binary.
+  gdtest itself still has no release.
 - `scripts/package-addon 0.0.0-hardening` and `scripts/test-package-addon 0.0.0-hardening` passed
   with reproducible core/macOS/Linux slices, exact selected-tree reassembly, version handshakes,
   clean first Godot import, and host-only/default/all-platform scratch installs.
@@ -127,7 +131,7 @@ Completed on 2026-11-05 for the current hardening batch:
   golangci-lint, the complete race suite, and `prek run --all-files`. The command-level test uses
   a real reproducible slice package and verifies the documented one-command transaction, explicit
   empty addon platforms, host-only materialization, machine-independent complete lock pins, and
-  rollback coverage; released gpm 0.5.1 still lacks `--host-tool`.
+  rollback coverage; the commits are now available in released gpm 0.6.0.
 - `scripts/check`, `prek run --all-files`, `scripts/package-addon
   0.0.0-worker-pool-audit`, and `scripts/test-package-addon
   0.0.0-worker-pool-audit` pass after the bounded worker-pool and isolation changes. The package
@@ -136,9 +140,9 @@ Completed on 2026-11-05 for the current hardening batch:
 - A pristine Linux arm64 container installed checksum-pinned stock Godot
   `4.7.2.stable.official.ed1daf0bf` and passed the race-enabled integration, shared protocol, and
   worker/API suites. It exposed and fixed a protocol-fixture dependency on a pre-existing global
-  class cache. The same container installed the checksum-pinned gpm 0.5.1 release binary and
-  passed `scripts/test-package-addon 0.0.0-linux-arm64-audit`, including execution of the packaged
-  Linux arm64 host binary. CI and release workflows now use those verified release installers;
+  class cache. The same container installed the then-current checksum-pinned gpm 0.5.1 release
+  binary and passed `scripts/test-package-addon 0.0.0-linux-arm64-audit`, including execution of
+  the packaged Linux arm64 host binary. CI and release workflows now use verified release installers;
   the prior `go install` command produced `gpm version dev` and could not satisfy the packaging
   version gate. The x86-64 installer paths independently verified both release-asset digests and
   exact Godot/gpm version output under Linux emulation. CI installs gdkit from its pinned v0.10.0
