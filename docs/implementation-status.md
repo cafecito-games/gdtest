@@ -302,3 +302,7 @@ ADR 0009.
     `TestWriteRefusesUnexpectedFileRemovedSincePrepare`, and
     `TestGenerateDoublesUnremovableOwnedFileChangesNothing`, which uses real permissions and is
     skipped under root.
+  - Marker-owned scripts are recognized before parsing, so a generated file with a corrupted body
+    is still regenerated or removed: `TestGenerateDoublesCorruptedOwnedOutputIsRegeneratedAndRemovable`.
+  - Outputs that differ only in case are rejected as duplicates, because they name one file on
+    case-insensitive filesystems: `TestValidateTestDoublesRejectsInvalidEntries`.

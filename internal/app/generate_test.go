@@ -488,6 +488,36 @@ func TestGenerateDoublesRemovedEntryIsUnexpectedThenRemoved(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(root, "doubles", "inventory_double.gd.uid"))
 }
 
+func TestGenerateDoublesCorruptedOwnedOutputIsRegeneratedAndRemovable(t *testing.T) {
+	t.Parallel()
+
+	root := writeGenerateProject(t, inventoryConfiguration, map[string]string{"src/inventory.gd": inventorySource})
+	require.Equal(t, ExitOK, mustGenerate(t, root))
+	output := filepath.Join(root, "doubles", "inventory_double.gd")
+	generated, err := os.ReadFile(output)
+	require.NoError(t, err)
+	marker := strings.SplitN(string(generated), "\n", 2)[0]
+	require.NoError(t, os.WriteFile(output, []byte(marker+"\nfunc (:\n"), 0o644))
+
+	exitCode, stdout, stderr := runGenerate(t, "--check", "--project", root)
+	require.Equal(t, ExitFailures, exitCode, "stderr: %s", stderr)
+	assert.Equal(t, "stale: doubles/inventory_double.gd\n", stdout)
+
+	exitCode, stdout, stderr = runGenerate(t, "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr: %s", stderr)
+	assert.Equal(t, "1 file(s) written; 0 file(s) removed\n", stdout)
+	repaired, err := os.ReadFile(output)
+	require.NoError(t, err)
+	assert.Equal(t, generated, repaired)
+
+	require.NoError(t, os.WriteFile(output, []byte(marker+"\nfunc (:\n"), 0o644))
+	writeTestFile(t, root, "gdtest.json", `{"test_doubles":[]}`)
+	exitCode, stdout, stderr = runGenerate(t, "--project", root)
+	require.Equal(t, ExitOK, exitCode, "stderr: %s", stderr)
+	assert.Equal(t, "0 file(s) written; 2 file(s) removed\n", stdout)
+	assert.NoFileExists(t, output)
+}
+
 func TestGenerateDoublesRemovedMarkerIsRefused(t *testing.T) {
 	t.Parallel()
 

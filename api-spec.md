@@ -851,7 +851,9 @@ whitespace, must not contain a double quote or a control character (a code
 below `0x20` or `0x7f`), and must not contain a `.godot` or `.git` segment at
 any depth, because those directories are never indexed and an output placed
 there could not be found again. Every `source` and every `output` must be
-unique across entries. Unknown fields are rejected. Each error names the entry
+unique across entries; outputs are compared ignoring case, because paths that
+differ only in case name one file on case-insensitive filesystems. Unknown
+fields are rejected. Each error names the entry
 index, for example `test_doubles[1].output`.
 
 #### Command

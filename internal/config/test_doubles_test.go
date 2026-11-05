@@ -131,6 +131,18 @@ func TestValidateTestDoublesRejectsInvalidEntries(t *testing.T) {
 			want: `test_doubles[1].output: "doubles/a.gd" duplicates test_doubles[0].output`,
 		},
 		{
+			name: "output differing only in case",
+			doubles: `[{"source": "src/a.gd", "output": "doubles/a.gd"},
+				{"source": "src/b.gd", "output": "doubles/A.gd"}]`,
+			want: `test_doubles[1].output: "doubles/A.gd" duplicates test_doubles[0].output`,
+		},
+		{
+			name: "output differing from a source only in case",
+			doubles: `[{"source": "src/a.gd", "output": "doubles/a.gd"},
+				{"source": "src/b.gd", "output": "SRC/A.gd"}]`,
+			want: `test_doubles[1].output: "SRC/A.gd" is also test_doubles[0].source`,
+		},
+		{
 			name: "output equals source",
 			doubles: `[{"source": "src/a.gd", "output": "doubles/a.gd"},
 				{"source": "src/b.gd", "output": "src/a.gd"}]`,

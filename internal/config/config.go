@@ -163,10 +163,13 @@ func validateTestDoubles(doubles []TestDouble) error {
 			return fmt.Errorf("test_doubles[%d].source: %q duplicates test_doubles[%d].source", index, double.Source, first)
 		}
 		sources[double.Source] = index
-		if first, exists := outputs[double.Output]; exists {
+		// Outputs are compared case-insensitively because two paths differing only
+		// in case name one file on case-insensitive filesystems such as macOS.
+		folded := strings.ToLower(double.Output)
+		if first, exists := outputs[folded]; exists {
 			return fmt.Errorf("test_doubles[%d].output: %q duplicates test_doubles[%d].output", index, double.Output, first)
 		}
-		outputs[double.Output] = index
+		outputs[folded] = index
 		if double.ClassName == "" {
 			continue
 		}
@@ -178,8 +181,14 @@ func validateTestDoubles(doubles []TestDouble) error {
 		}
 		classNames[double.ClassName] = index
 	}
+	foldedSources := make(map[string]int, len(doubles))
 	for index, double := range doubles {
-		if first, exists := sources[double.Output]; exists {
+		if _, exists := foldedSources[strings.ToLower(double.Source)]; !exists {
+			foldedSources[strings.ToLower(double.Source)] = index
+		}
+	}
+	for index, double := range doubles {
+		if first, exists := foldedSources[strings.ToLower(double.Output)]; exists {
 			return fmt.Errorf("test_doubles[%d].output: %q is also test_doubles[%d].source", index, double.Output, first)
 		}
 	}

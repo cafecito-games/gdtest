@@ -50,25 +50,25 @@ type Index struct {
 	// which enforces uniqueness across entries, so they are never resolvable
 	// project classes.
 	classes map[string]*script
-	// excludedOwned maps the project-relative path of each excluded script whose
-	// first line carries the ownership marker to the source it doubles. Excluded
-	// scripts are never parsed, so they appear here and nowhere else.
-	excludedOwned map[string]string
-	diagnostics   []Diagnostic
+	// owned maps the project-relative path of each script whose first line
+	// carries the ownership marker to the source it doubles. Owned scripts are
+	// never parsed, so a corrupted generated file can still be regenerated or
+	// removed, and they appear here and nowhere else.
+	owned       map[string]string
+	diagnostics []Diagnostic
 }
 
 // script records the facts about one parsed file that analysis needs.
 type script struct {
-	path            string
-	source          []byte
-	tree            *ast.File
-	className       string
-	extends         ast.Expression
-	generatedSource string
-	functions       []*ast.FunctionDeclaration
-	enums           map[string]bool
-	innerClasses    map[string]bool
-	members         []member
+	path         string
+	source       []byte
+	tree         *ast.File
+	className    string
+	extends      ast.Expression
+	functions    []*ast.FunctionDeclaration
+	enums        map[string]bool
+	innerClasses map[string]bool
+	members      []member
 }
 
 // member is a top-level declaration whose name a generated double must not reuse.
@@ -95,11 +95,11 @@ func BuildIndex(root string, exclude []string) (*Index, []Diagnostic) {
 		return nil, []Diagnostic{{Path: root, Message: "resolve project root: " + err.Error()}}
 	}
 	index := &Index{
-		root:          canonical,
-		scripts:       make(map[string]*script),
-		failed:        make(map[string]bool),
-		classes:       make(map[string]*script),
-		excludedOwned: make(map[string]string),
+		root:    canonical,
+		scripts: make(map[string]*script),
+		failed:  make(map[string]bool),
+		classes: make(map[string]*script),
+		owned:   make(map[string]string),
 	}
 	walkErr := filepath.WalkDir(canonical, func(current string, entry fs.DirEntry, walkErr error) error {
 		relative := relativeSlash(canonical, current)
@@ -137,12 +137,7 @@ func BuildIndex(root string, exclude []string) (*Index, []Diagnostic) {
 // scripts under excluded paths, sorted by path.
 func (index *Index) GeneratedScripts() []GeneratedScript {
 	var owned []GeneratedScript
-	for _, script := range index.scripts {
-		if script.generatedSource != "" {
-			owned = append(owned, GeneratedScript{Path: script.path, Source: script.generatedSource})
-		}
-	}
-	for relative, source := range index.excludedOwned {
+	for relative, source := range index.owned {
 		owned = append(owned, GeneratedScript{Path: relative, Source: source})
 	}
 	sort.Slice(owned, func(left, right int) bool { return owned[left].Path < owned[right].Path })
@@ -166,6 +161,10 @@ func (index *Index) addFile(current string, relative string, entry fs.DirEntry) 
 		index.diagnostics = append(index.diagnostics, Diagnostic{Path: relative, Message: "read script: " + err.Error()})
 		return
 	}
+	if owner := generatedSourceOf(source); owner != "" {
+		index.owned[relative] = owner
+		return
+	}
 	tree, err := gdparser.ParseFile(relative, source)
 	if err != nil {
 		index.failed[relative] = true
@@ -173,16 +172,15 @@ func (index *Index) addFile(current string, relative string, entry fs.DirEntry) 
 		return
 	}
 	scanned := &script{
-		path:            relative,
-		source:          source,
-		tree:            tree,
-		generatedSource: generatedSourceOf(source),
-		enums:           make(map[string]bool),
-		innerClasses:    make(map[string]bool),
+		path:         relative,
+		source:       source,
+		tree:         tree,
+		enums:        make(map[string]bool),
+		innerClasses: make(map[string]bool),
 	}
 	index.scanStatements(scanned)
 	index.scripts[relative] = scanned
-	if scanned.className != "" && scanned.generatedSource == "" {
+	if scanned.className != "" {
 		if _, exists := index.classes[scanned.className]; !exists {
 			index.classes[scanned.className] = scanned
 		}
@@ -207,7 +205,7 @@ func (index *Index) addExcluded(current string, relative string) {
 		return
 	}
 	if source := generatedSourceOf(firstLine); source != "" {
-		index.excludedOwned[relative] = source
+		index.owned[relative] = source
 	}
 }
 
@@ -269,7 +267,7 @@ func (index *Index) scanDirective(scanned *script, directive *ast.Directive) {
 				"script declares more than one class_name"))
 			return
 		}
-		if existing, exists := index.classes[identifier.Name]; exists && existing != scanned && scanned.generatedSource == "" {
+		if existing, exists := index.classes[identifier.Name]; exists && existing != scanned {
 			index.diagnostics = append(index.diagnostics, spanDiagnostic(scanned.path, identifier.Span(),
 				"class_name "+identifier.Name+" is also declared by "+existing.path))
 		}
