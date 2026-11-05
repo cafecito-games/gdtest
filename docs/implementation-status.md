@@ -277,9 +277,10 @@ ADR 0009.
   `doubles/inventory_double.gd` and its `.uid` are committed and not hand-edited. The injection
   test `inventory_double.test.gd` covers sticky FIFO results, sync and async `then_answer`,
   `then_call_real`, void `then_return()`, `calls()` arguments with a defaulted parameter, and
-  `reset()`. `gdtest run --no-daemon` on the example reports `10 passed, 0 failed, 0 errors` across
-  the example's files, of which the inventory test contributes six. The integration test
-  `TestDocumentedBasicExampleExecutes` asserts the `10 passed` count and passes under `-race`.
+  `reset()`. Alongside `callback_probe.test.gd`, `gdtest run --no-daemon` on the example reports
+  `12 passed, 0 failed, 0 errors` across the example's files, of which the inventory test
+  contributes six. The integration test `TestDocumentedBasicExampleExecutes` asserts the `12 passed`
+  count and passes under `-race`.
 - Gate: `scripts/check` runs `generate doubles --check --project examples/basic` after the build
   step. A one-byte change to the generated file exits `1` and reports `stale:`. Removing the marker
   line exits `2` with a refusal. Restoring the file exits `0`.
@@ -348,3 +349,52 @@ ADR 0009.
   - An owned output is never removed while it is the same file as a configured output spelled
     differently, including through a directory symbolic link inside the project:
     `TestGenerateDoublesOutputThroughDirectorySymlinkStaysOwned`.
+
+## Case-scoped callback probes
+
+Implements `GDTest.callback_probe(argument_count: int = 0) -> GDTestCallbackProbe` from issue #5
+and `api-spec.md` section 14.9, unifying probe ledger, defensive argument snapshotting, and
+asynchronous `wait_until_count` handling across `GDTestSignalProbe` and `GDTestCallbackProbe` in
+`addons/gdtest/probe_ledger.gd`.
+
+- Shared ledger and cross-source ordering: `GDTestSignalProbe`, `GDTestCallbackProbe`, and
+  `GDTestDoubleContext` allocate from one case-local monotonic sequence counter on `GDTest`, so
+  `GDTestInvocation.sequence` orders signal emissions, callback invocations, and generated double
+  calls within a case and resets on the next case.
+- Closure retention and persistent-worker isolation: `GDTestCallbackProbe.callback()` builds an
+  exact-arity (`0..8`) closure in a static helper that captures only an internal `_CallbackGate`.
+  Closing the probe at case end severs `_CallbackGate` and `CaseContext` references to the ledger,
+  `GDTest` instance, `SceneTree`, and failure sink. Late calls on a retained `Callable` mutate no
+  probe state, emit no cross-case diagnostic or stderr output, and increment a bounded (1,024-cap)
+  counter surfaced in `run_finished` metadata and logged by `SessionService` at `debug` severity
+  (`worker_late_callbacks`).
+- Real-Godot conformance (`internal/worker/callback_probe_godot_test.go`):
+  - `fixtures/godot/api/callback_probes.test.gd` (11 passing cases): default zero arity, synchronous
+    recording before returning to caller, arities `0..8`, defensive `GDTestInvocation` and nested
+    collection snapshots, async completion/error waits, immediate return when satisfied, positive
+    deadline expiry returning `false` without assertion failure, pending wait wakeup on `close()`,
+    idempotent `close()`, cross-source sequence ordering across `watch_signal`, `callback_probe`,
+    and `InventoryDouble`, sequence reset across cases, and deterministic `WeakRef` release of both
+    `GDTest` and `GDTestCallbackProbe` while `probe.callback()` stays retained.
+  - `fixtures/godot/api/callback_probe_failures.test.gd` (9 error cases): negative arity, arity
+    above eight, negative count, negative/infinite/NaN timeouts, negative and out-of-range
+    `arguments_at` indices, and invalid index after mid-case `close()` each report source-located
+    framework errors at the exact test call site.
+  - `fixtures/godot/api/callback_probe_outside_case.test.gd`,
+    `fixtures/godot/api/callback_probe_class_initializer.test.gd`, and
+    `fixtures/godot/api/callback_probe_suite_hook.test.gd`: outside-case creation in providers,
+    member initializers, and suite hooks returns a closed inert probe with an invalid `Callable()`
+    and reports source-located `worker.discovery` diagnostics in both `Discover` and `Run`.
+  - `fixtures/godot/api/callback_probe_leak.test.gd` and
+    `fixtures/godot/api/callback_probe_timeout.test.gd`: retained callbacks invoked >1,024 times in
+    later cases and subsequent runs on the same persistent worker PID pass with bounded
+    `late_callback_invocations: 1024` metadata (omitted on clean runs) while `WeakRef` proves the
+    prior run's suite was freed; unbounded `wait_until_count(1)` yields cleanly to external worker
+    `CaseTimeout`.
+- Migration, examples, and packaging: `internal/migrate` registers `callback_probe` and
+  `double_context` in `gdtestInheritedNames` (`TestMigrationReportsCallbackProbeAndDoubleContextNameConflicts`)
+  without adding new Vest API conversions, `docs/vest-migration.md` documents the manual callback
+  probe recipe, `examples/basic/callback_probe.test.gd` executes under
+  `TestDocumentedBasicExampleExecutes`, and `scripts/package-addon 0.0.0-issue-5` plus
+  `scripts/test-package-addon 0.0.0-issue-5` passed alongside `scripts/check` on Godot 4.7.2 and
+  gpm 0.6.0, verifying the shipped core files and packaged `callback_probe` runtime handshake.

@@ -1,4 +1,4 @@
-## Immutable record of one signal emission captured by a case-scoped probe.
+## Immutable record of one signal, callback, or test-double invocation captured in a case.
 class_name GDTestInvocation
 extends RefCounted
 
@@ -7,7 +7,7 @@ var sequence: int:
 	get:
 		return _sequence
 
-## Defensive copy of the emitted arguments in signal parameter order.
+## Defensive copy of the recorded arguments in parameter order.
 var arguments: Array[Variant]:
 	get:
 		return _arguments.duplicate(true)

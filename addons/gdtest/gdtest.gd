@@ -2,6 +2,8 @@
 class_name GDTest
 extends RefCounted
 
+## Internal shared case-scoped probe ledger.
+const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
 const _STATUS_RANK: Dictionary[String, int] = {
 	"void": 0,
 	"pass": 1,
@@ -28,6 +30,7 @@ var _gdtest_tree: SceneTree
 var _gdtest_failure_sink: Callable
 var _gdtest_case_active: bool = false
 var _gdtest_registration_active: bool = false
+var _gdtest_registration_completed: bool = false
 var _gdtest_status: String = "void"
 var _gdtest_assertions: int = 0
 var _gdtest_failures: Array[Variant] = []
@@ -43,6 +46,9 @@ var _gdtest_case_ordinals: Dictionary[int, int] = {}
 var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
 var _gdtest_signal_probes: Array[GDTestSignalProbe] = []
+var _gdtest_callback_probes: Array[GDTestCallbackProbe] = []
+var _gdtest_probe_context: RefCounted = null
+var _gdtest_outside_probe_context: RefCounted = null
 var _gdtest_double_context: GDTestDoubleContext = null
 var _gdtest_sequence: int = 0
 
@@ -461,28 +467,37 @@ func time() -> float:
 func watch_signal(what: Signal) -> GDTestSignalProbe:
 	var location: Dictionary[String, Variant] = _user_location()
 	if not _require_case("watch_signal"):
-		return GDTestSignalProbe.detached(
-				_gdtest_tree,
-				Callable(self, &"_gdtest_allocate_sequence"),
-				Callable(self, &"_report_probe_error"),
-				Callable(self, &"_user_location")
-		)
-	var probe: GDTestSignalProbe = GDTestSignalProbe.create(
+		return GDTestSignalProbe._gdtest_detached(_ensure_outside_probe_context())
+	var probe: GDTestSignalProbe = GDTestSignalProbe._gdtest_create(
 			what,
-			_gdtest_tree,
-			Callable(self, &"_gdtest_allocate_sequence"),
-			Callable(self, &"_report_probe_error"),
-			Callable(self, &"_user_location"),
+			_ensure_case_probe_context(),
 			location
 	)
 	_gdtest_signal_probes.append(probe)
 	return probe
 
 
+## Creates a case-scoped exact-arity `Callable` recorder for the executing case.
+##
+## Signal probes, callback probes, and generated doubles created in one case share
+## one monotonic invocation sequence, and every probe closes when the case finishes.
+func callback_probe(argument_count: int = 0) -> GDTestCallbackProbe:
+	var location: Dictionary[String, Variant] = _user_location()
+	if not _require_case("callback_probe"):
+		return GDTestCallbackProbe._gdtest_detached(_ensure_outside_probe_context())
+	var probe: GDTestCallbackProbe = GDTestCallbackProbe._gdtest_create(
+			argument_count,
+			_ensure_case_probe_context(),
+			location
+	)
+	_gdtest_callback_probes.append(probe)
+	return probe
+
+
 ## Returns the executing case's double context, creating it on first use.
 ##
-## Doubles and signal probes created in one case share one call sequence, so their
-## recorded invocations can be ordered against each other.
+## Doubles, signal probes, and callback probes created in one case share one call
+## sequence, so their recorded invocations can be ordered against each other.
 func double_context() -> GDTestDoubleContext:
 	if not _require_case("double_context"):
 		return GDTestDoubleContext.closed()
@@ -509,7 +524,8 @@ func _gdtest_begin_registration() -> void:
 	_gdtest_active_definition.clear()
 	_gdtest_suite_ordinals.clear()
 	_gdtest_case_ordinals.clear()
-	_gdtest_discovery_errors.clear()
+	if _gdtest_registration_completed:
+		_gdtest_discovery_errors.clear()
 
 
 func _gdtest_finish_registration() -> void:
@@ -519,6 +535,7 @@ func _gdtest_finish_registration() -> void:
 	_gdtest_suite_stack.clear()
 	_gdtest_active_definition.clear()
 	_gdtest_registration_active = false
+	_gdtest_registration_completed = true
 
 
 func _gdtest_run_definition(definition: Dictionary[String, Variant]) -> void:
@@ -541,8 +558,14 @@ func _gdtest_manifest() -> Dictionary[String, Variant]:
 	return {
 		"cases": _gdtest_dynamic_cases.duplicate(true),
 		"suites": _gdtest_dynamic_suites.duplicate(true),
-		"errors": _gdtest_discovery_errors,
+		"errors": _gdtest_discovery_errors.duplicate(true),
 	}
+
+
+func _gdtest_drain_discovery_errors() -> Array[Variant]:
+	var drained: Array[Variant] = _gdtest_discovery_errors.duplicate(true)
+	_gdtest_discovery_errors.clear()
+	return drained
 
 
 func _gdtest_begin_case() -> void:
@@ -554,12 +577,16 @@ func _gdtest_begin_case() -> void:
 	_gdtest_messages.clear()
 	_gdtest_outcome_data.clear()
 	_gdtest_signal_probes.clear()
+	_gdtest_callback_probes.clear()
+	_gdtest_probe_context = null
 	_gdtest_double_context = null
 
 
 func _gdtest_end_case() -> Dictionary[String, Variant]:
 	_gdtest_release_signal_probes()
+	_gdtest_release_callback_probes()
 	_gdtest_release_double_context()
+	_gdtest_release_probe_context()
 	_gdtest_case_active = false
 	return {
 		"status": _gdtest_status,
@@ -813,10 +840,49 @@ func _gdtest_allocate_sequence() -> int:
 	return _gdtest_sequence
 
 
+func _ensure_case_probe_context() -> RefCounted:
+	if _gdtest_probe_context == null:
+		_gdtest_probe_context = ProbeLedger.CaseContext.open(
+				_gdtest_tree,
+				Callable(self, &"_gdtest_allocate_sequence"),
+				Callable(self, &"_report_probe_error"),
+				Callable(self, &"_user_location")
+		)
+	return _gdtest_probe_context
+
+
+func _ensure_outside_probe_context() -> RefCounted:
+	if _gdtest_outside_probe_context == null:
+		_gdtest_outside_probe_context = ProbeLedger.CaseContext.inactive(
+				_gdtest_tree,
+				Callable(self, &"_report_probe_error"),
+				Callable(self, &"_user_location")
+		)
+	return _gdtest_outside_probe_context
+
+
 func _gdtest_release_signal_probes() -> void:
 	for probe: GDTestSignalProbe in _gdtest_signal_probes:
 		probe.stop_recording()
 	_gdtest_signal_probes.clear()
+
+
+func _gdtest_release_callback_probes() -> void:
+	for probe: GDTestCallbackProbe in _gdtest_callback_probes:
+		probe.close()
+	_gdtest_callback_probes.clear()
+
+
+func _gdtest_release_probe_context() -> void:
+	if _gdtest_probe_context != null:
+		_gdtest_probe_context.detach()
+	_gdtest_probe_context = null
+
+
+func _gdtest_release_outside_probes() -> void:
+	if _gdtest_outside_probe_context != null:
+		_gdtest_outside_probe_context.detach()
+	_gdtest_outside_probe_context = null
 
 
 func _gdtest_release_double_context() -> void:

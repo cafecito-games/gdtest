@@ -239,6 +239,25 @@ static func discovery_error(value: Variant, default_file: String) -> Dictionary[
 	}
 
 
+## Normalizes every runtime discovery diagnostic in `values` against `default_file`.
+static func discovery_errors(values: Array[Variant], default_file: String) -> Array[Variant]:
+	var normalized: Array[Variant] = []
+	for value: Variant in values:
+		normalized.append(discovery_error(value, default_file))
+	return normalized
+
+
+## Orders two strings lexicographically by raw UTF-8 bytes.
+static func utf8_less(left: String, right: String) -> bool:
+	var left_bytes: PackedByteArray = left.to_utf8_buffer()
+	var right_bytes: PackedByteArray = right.to_utf8_buffer()
+	var shared_size: int = mini(left_bytes.size(), right_bytes.size())
+	for index: int in range(shared_size):
+		if left_bytes[index] != right_bytes[index]:
+			return left_bytes[index] < right_bytes[index]
+	return left_bytes.size() < right_bytes.size()
+
+
 ## Validates the plan-wide focused-test execution policy.
 static func only_policy_error(only_mode: String, has_focus: bool) -> String:
 	match only_mode:
@@ -259,19 +278,23 @@ static func run_finished(
 		duration_usec: int,
 		preparation_usec: int,
 		execution_usec: int,
-		serialization_usec: int
+		serialization_usec: int,
+		late_callback_invocations: int = 0
 ) -> Dictionary[String, Variant]:
+	var metadata: Dictionary[String, Variant] = {
+		"timings_usec": {
+			"script_load_dynamic_definition": preparation_usec,
+			"hooks_cases": execution_usec,
+			"result_serialization": serialization_usec,
+		},
+	}
+	if late_callback_invocations > 0:
+		metadata["late_callback_invocations"] = late_callback_invocations
 	return {
 		"status": status,
 		"counts": counts,
 		"duration_ns": duration_usec * 1000,
-		"metadata": {
-			"timings_usec": {
-				"script_load_dynamic_definition": preparation_usec,
-				"hooks_cases": execution_usec,
-				"result_serialization": serialization_usec,
-			},
-		},
+		"metadata": metadata,
 	}
 
 

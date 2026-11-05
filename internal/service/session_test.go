@@ -338,8 +338,87 @@ func TestLifecycleLogLevelsPreserveFailuresAtStrictThresholds(t *testing.T) {
 	assert.Equal(t, "error", lifecycleLogLevel("run_failed"))
 	assert.Equal(t, "error", lifecycleLogLevel("source_reconcile_error"))
 	assert.Equal(t, "debug", lifecycleLogLevel("worker_reused"))
+	assert.Equal(t, "debug", lifecycleLogLevel("worker_late_callbacks"))
 	assert.Equal(t, "debug", lifecycleLogLevel("discovery_finished"))
 	assert.Equal(t, "info", lifecycleLogLevel("worker_started"))
+}
+
+func TestSessionServiceLogsLateCallbackInvocationsAtDebugLevel(t *testing.T) {
+	t.Parallel()
+
+	var nextPID atomic.Int32
+	nextPID.Store(400)
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		pid := int(nextPID.Add(1))
+		return &fakeWorker{
+			pid:        pid,
+			generation: options.Generation,
+			runHook: func(plan model.TestPlan, sink executor.EventSink) error {
+				return sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion,
+					Type:            model.EventRunFinished,
+					RunID:           plan.RunID,
+					Status:          "pass",
+					Generation:      plan.Generation,
+					Metadata:        map[string]any{"late_callback_invocations": float64(5)},
+				})
+			},
+		}, nil
+	}, 2)
+	service.sourceFactory = nil
+	var logMu sync.Mutex
+	var records []map[string]any
+	service.log = func(record map[string]any) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		records = append(records, record)
+	}
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	singlePayload, err := json.Marshal(RunRequest{
+		SessionID: "late-callbacks", Project: "/project", Godot: "godot",
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "single-run",
+			Generation:      1,
+			Files:           []model.FilePlan{{Path: "a.test.gd"}},
+		},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "single-run", Method: "session.run", Payload: singlePayload,
+	}, func(any) error { return nil })
+	require.NoError(t, err)
+
+	multiPayload, err := json.Marshal(RunRequest{
+		SessionID: "late-callbacks", Project: "/project", Godot: "godot", Jobs: 2,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion,
+			RunID:           "multi-run",
+			Generation:      1,
+			Files:           []model.FilePlan{{Path: "a.test.gd"}, {Path: "b.test.gd"}},
+		},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "multi-run", Method: "session.run", Payload: multiPayload,
+	}, func(any) error { return nil })
+	require.NoError(t, err)
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	var lateRecords []map[string]any
+	for _, record := range records {
+		if record["event"] == "worker_late_callbacks" {
+			lateRecords = append(lateRecords, record)
+		}
+	}
+	require.Len(t, lateRecords, 3)
+	for _, record := range lateRecords {
+		assert.Equal(t, "debug", record["level"])
+		assert.Equal(t, int64(5), record["late_callback_invocations"])
+		assert.Equal(t, "late-callbacks", record["session_id"])
+	}
 }
 
 func TestSessionServiceRecyclesWorkerAtConfiguredAge(t *testing.T) {

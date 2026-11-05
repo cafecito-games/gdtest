@@ -743,3 +743,24 @@ func test_project_helper() -> void:
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 	assert.NotContains(t, findingCodes(result.Findings), "unsupported.signal-capture")
 }
+
+func TestMigrationReportsCallbackProbeAndDoubleContextNameConflicts(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func callback_probe() -> void:
+	pass
+
+func test_conflicts() -> void:
+	var double_context := 1
+	expect_equal(double_context, 1)
+`)
+	result, err := Transform("tests/probe_conflicts.test.gd", source)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
+	}, findingCodes(result.Findings))
+	assert.Contains(t, string(result.Output), `@warning_ignore("shadowed_variable_base_class")`)
+}
