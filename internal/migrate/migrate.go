@@ -222,7 +222,8 @@ var gdtestInheritedNames = map[string]struct{}{
 	"expect_not_equal": {}, "expect_same": {}, "expect_not_same": {}, "expect_approx": {},
 	"expect_not_approx": {}, "expect_null": {}, "expect_not_null": {}, "expect_empty": {},
 	"expect_not_empty": {}, "expect_contains": {}, "expect_does_not_contain": {},
-	"ok": {}, "fail": {}, "skip": {}, "todo": {}, "message": {}, "get_tree": {}, "sleep": {},
+	"expect_that": {},
+	"ok":          {}, "fail": {}, "skip": {}, "todo": {}, "message": {}, "get_tree": {}, "sleep": {},
 	"until": {}, "time": {}, "watch_signal": {}, "callback_probe": {}, "double_context": {},
 	// GDTest is RefCounted, unlike VestTest's Object base.
 	"reference": {}, "unreference": {}, "get_reference_count": {},
@@ -471,13 +472,24 @@ func (t *transformer) fluentAssertions(tree *ast.File) {
 		}
 		standalone = append(standalone, statement.Expression.Span())
 		if len(chain.matchers) != 1 {
-			t.manual(statement.Expression.Span(), "unsupported.fluent-assertion", "fluent assertion chains with multiple matchers require manual conversion")
+			t.manual(
+				statement.Expression.Span(),
+				"unsupported.fluent-assertion",
+				"fluent assertion chains with multiple matchers require manual conversion; split into direct expect_* calls or write a GDTestMatcher with expect_that (see docs/vest-migration.md)",
+			)
 			return false
 		}
 		matcher := chain.matchers[0]
 		target, arguments, ok := directMatcher(matcher.name, chain.actual, matcher.arguments)
 		if !ok {
-			t.manual(matcher.span, "unsupported.fluent-assertion", fmt.Sprintf("fluent matcher %q has no safe direct rewrite", matcher.name))
+			t.manual(
+				matcher.span,
+				"unsupported.fluent-assertion",
+				fmt.Sprintf(
+					"fluent matcher %q has no safe direct rewrite; use direct expect_* assertions or write a GDTestMatcher with expect_that (see docs/vest-migration.md)",
+					matcher.name,
+				),
+			)
 			return false
 		}
 		parts := make([]string, 0, len(arguments))

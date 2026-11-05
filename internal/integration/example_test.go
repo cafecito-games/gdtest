@@ -36,6 +36,7 @@ func TestDocumentedBasicExampleExecutes(t *testing.T) {
 		"inventory.gd",
 		"shop.gd",
 		"inventory_double.test.gd",
+		"custom_matcher.test.gd",
 		"doubles/inventory_double.gd",
 	} {
 		data, err := os.ReadFile(filepath.Join(repository, "examples", "basic", filepath.FromSlash(relative)))
@@ -50,7 +51,7 @@ func TestDocumentedBasicExampleExecutes(t *testing.T) {
 		"run", "--no-daemon", "--project", root,
 	}, app.IO{Out: &output, Err: &diagnostics})
 	require.Equal(t, app.ExitOK, code, "output:\n%s\ndiagnostics:\n%s", output.String(), diagnostics.String())
-	assert.Contains(t, output.String(), "12 passed")
+	assert.Contains(t, output.String(), "14 passed")
 
 	output.Reset()
 	diagnostics.Reset()

@@ -5,6 +5,8 @@
   "exclude": [".git/**", ".godot/**", ".gdkit/**"],
   "classifications": [
     {"pattern": "addons/gdtest/gdtest.gd", "layer": "api", "feature": "runtime"},
+    {"pattern": "addons/gdtest/gdtest_matcher.gd", "layer": "api", "feature": "runtime"},
+    {"pattern": "addons/gdtest/gdtest_match_result.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/gdtest_benchmark.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/*_info.gd", "layer": "api", "feature": "runtime"},
     {"pattern": "addons/gdtest/gdtest_invocation.gd", "layer": "api", "feature": "runtime"},

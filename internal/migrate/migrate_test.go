@@ -764,3 +764,61 @@ func test_conflicts() -> void:
 	}, findingCodes(result.Findings))
 	assert.Contains(t, string(result.Output), `@warning_ignore("shadowed_variable_base_class")`)
 }
+
+func TestMigrationReportsExpectThatNameConflicts(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func expect_that() -> void:
+	pass
+
+func test_conflicts() -> void:
+	var expect_that: bool = true
+	expect_true(expect_that)
+`)
+	result, err := Transform("tests/expect_that_conflicts.test.gd", source)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.inherited-name-conflict",
+		"rewrite.inherited-name-conflict",
+	}, findingCodes(result.Findings))
+	assert.Contains(t, string(result.Output), `@warning_ignore("shadowed_variable_base_class")`)
+}
+
+func TestUnsupportedFluentAssertionGuidancePointsToExpectThatAndRecipe(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func test_unsupported_fluent() -> void:
+	assert_that(order).is_custom_predicate(42)
+	assert_that(order).is_not_null().is_equal_to(expected_order)
+`)
+	result, err := Transform("tests/fluent_guidance.test.gd", source)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"unsupported.fluent-assertion",
+		"unsupported.fluent-assertion",
+	}, findingCodes(result.Findings))
+	require.Len(t, result.Findings, 3)
+
+	singleUnknown := result.Findings[1]
+	assert.Equal(t, Warning, singleUnknown.Severity)
+	assert.Equal(t, "unsupported.fluent-assertion", singleUnknown.Code)
+	assert.Contains(t, singleUnknown.Message, `fluent matcher "is_custom_predicate" has no safe direct rewrite`)
+	assert.Contains(t, singleUnknown.Message, "write a GDTestMatcher with expect_that")
+	assert.Contains(t, singleUnknown.Message, "docs/vest-migration.md")
+
+	multiMatcher := result.Findings[2]
+	assert.Equal(t, Warning, multiMatcher.Severity)
+	assert.Equal(t, "unsupported.fluent-assertion", multiMatcher.Code)
+	assert.Contains(t, multiMatcher.Message, "fluent assertion chains with multiple matchers require manual conversion")
+	assert.Contains(t, multiMatcher.Message, "write a GDTestMatcher with expect_that")
+	assert.Contains(t, multiMatcher.Message, "docs/vest-migration.md")
+
+	again, err := Transform("tests/fluent_guidance.test.gd", result.Output)
+	require.NoError(t, err)
+	assert.False(t, again.Changed)
+	assert.Equal(t, string(result.Output), string(again.Output))
+}

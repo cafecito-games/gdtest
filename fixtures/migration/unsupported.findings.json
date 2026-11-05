@@ -10,5 +10,5 @@
   {"path":"tests/unsupported.test.gd","line":12,"column":2,"severity":"warning","code":"unsupported.signal-capture","message":"signal capture has no gdtest v1 equivalent"},
   {"path":"tests/unsupported.test.gd","line":12,"column":23,"severity":"warning","code":"unsupported.lifecycle-signal","message":"Vest lifecycle signals require manual hook migration"},
   {"path":"tests/unsupported.test.gd","line":13,"column":2,"severity":"warning","code":"unsupported.timeout","message":"Vest.timeout has no gdtest v1 equivalent"},
-  {"path":"tests/unsupported.test.gd","line":14,"column":2,"severity":"warning","code":"unsupported.fluent-assertion","message":"fluent assertion chains with multiple matchers require manual conversion"}
+  {"path":"tests/unsupported.test.gd","line":14,"column":2,"severity":"warning","code":"unsupported.fluent-assertion","message":"fluent assertion chains with multiple matchers require manual conversion; split into direct expect_* calls or write a GDTestMatcher with expect_that (see docs/vest-migration.md)"}
 ]

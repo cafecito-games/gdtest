@@ -39,6 +39,39 @@ worktree identities plus crash replacement and recycling. On 2026-11-05, `script
 `scripts/package-addon 0.0.0-issue-6`, and `scripts/test-package-addon 0.0.0-issue-6` all passed;
 the package checks used the repository's checksum-pinned gpm 0.6.0 installer.
 
+## Structured custom matchers
+
+Introduces typed custom matcher support through `GDTestMatcher`, `GDTestMatchResult`, and `GDTest.expect_that` per `api-spec.md` section 10.10.
+The design allows projects to encapsulate domain assertions without reintroducing mutable fluent builder objects or
+weakening built-in assertion performance. Custom matchers synchronously evaluate actual values, produce immutable
+factory-constructed match results, and emit standard `assertion_failed` events with caller-located diagnostics,
+serialized actual and expected values, and composed failure explanations.
+
+- Runtime GDScript (`addons/gdtest/gdtest_matcher.gd`, `addons/gdtest/gdtest_match_result.gd`, `addons/gdtest/gdtest.gd`):
+  - `GDTestMatcher` defines `name() -> String`, default `match(actual) -> GDTestMatchResult`, and static `_gdtest_evaluate(actual, matcher) -> GDTestMatchResult`.
+  - `GDTestMatchResult` exposes getter-only `is_match`, `message`, `expected`, and `has_expected` properties (with no setters), factory methods `matched()` and `unmatched(...)`, and defensive container cloning up to depth 16 with cycle detection using `is_same` ancestor tracking, preserving collection typing (`Array[T]`, `Dictionary[K, V]`) and avoiding duplicate `Object` allocations.
+  - `GDTest.expect_that` evaluates passing assertions with zero stack trace capture and zero diagnostic payload allocations. On failure or outside-case calls, it emits source-located diagnostics pointing directly at the caller's `expect_that` site, validating matcher and result contracts fail-closed with assertion `"expect_that"` without incrementing valid assertion counts.
+  - Classified in `.gdkit/architecture.json` under layer `api` and feature `runtime`.
+- Example project (`examples/basic/custom_matcher.test.gd`):
+  - Demonstrates domain-object matchers (`MatchesReceipt`) and collection predicates (`AllStockAbove`).
+  - Integrated into `TestDocumentedBasicExampleExecutes` in `internal/integration/example_test.go`, verifying all 14 basic example cases pass cleanly under `-race`.
+- Packaging and quality gates (`scripts/package-addon`, `scripts/test-package-addon`, `scripts/test-quality-gates`):
+  - `scripts/package-addon` core slice includes `addons/gdtest/gdtest_matcher.gd` and `addons/gdtest/gdtest_match_result.gd`.
+  - `scripts/test-package-addon` verifies runtime class availability and basic matcher evaluation via `tests/package.test.gd`.
+  - `scripts/test-quality-gates` proves the untyped matcher gate rejects a deliberately untyped matcher.
+- Vest migration (`internal/migrate/migrate.go`, `docs/vest-migration.md`):
+  - Registers `expect_that` in `gdtestInheritedNames`.
+  - Updated `unsupported.fluent-assertion` finding text and guidance in `docs/vest-migration.md` with concrete manual conversion recipes to `expect_that`.
+  - Regression tested in `internal/migrate/migrate_test.go` (`TestMigrationReportsExpectThatNameConflicts` and `TestUnsupportedFluentAssertionGuidancePointsToExpectThatAndRecipe`) and `fixtures/migration/unsupported.findings.json`.
+- Event reporting and results folding (`internal/results`, `internal/reporter`):
+  - Unit tests in `internal/reporter/reporter_test.go` (`TestTerminalPrintsCustomMatcherFailures` and `TestJSONLPrintsCustomMatcherFailures`).
+  - Unit tests in `internal/results/results_test.go` (`TestCollectorFoldsCustomMatcherAssertionFailures`).
+- Real Godot worker tests and fixtures (`internal/worker/custom_matcher_godot_test.go`, `fixtures/godot/api/`):
+  - `fixtures/godot/api/custom_matchers.test.gd`: passing matchers, single invocation, assertion accumulation, getter-only immutability, and typed container cloning preservation (`TestGodotCustomMatcherPassingAndAssertionCounting`).
+  - `fixtures/godot/api/custom_matcher_failures.test.gd`: mismatches with/without expected values, caller prefixes, location attribution, defensive collections, cycle detection, and fail-closed validation matrix (`TestGodotCustomMatcherFailuresAndFailClosedMatrix`).
+  - `fixtures/godot/api/invalid/untyped_matchers.test.gd` and error methods: runtime script error handling, coroutine rejection, and persistent worker reset (`TestGodotCustomMatcherRuntimeErrorsAndWorkerReset`).
+  - `fixtures/godot/api/custom_matcher_outside_case.test.gd` and `fixtures/godot/api/custom_matcher_suite_hook.test.gd`: outside-case and suite-hook misuse rejection (`TestGodotCustomMatcherOutsideCaseRejection`).
+
 ## Acceptance criteria
 
 | Criterion | Status | Evidence or remaining work |

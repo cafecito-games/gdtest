@@ -164,3 +164,91 @@ func TestOutcomePolicyIgnoresEnabledStatusesWithZeroCases(t *testing.T) {
 	assert.Empty(t, summary.PolicyFailures)
 	assert.False(t, summary.HasFailures())
 }
+
+func TestCollectorFoldsCustomMatcherAssertionFailures(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollector()
+	caseID := "tests/custom.test.gd::test_matchers"
+	require.NoError(t, collector.Emit(model.Event{
+		Type:   model.EventCaseStarted,
+		TestID: caseID,
+		Name:   "test_matchers",
+	}))
+
+	failures := []model.Event{
+		{
+			Type:      model.EventAssertionFail,
+			TestID:    caseID,
+			Assertion: "matches_order",
+			Message:   "order item differs",
+			Location:  &model.Location{File: "tests/custom.test.gd", Line: 20},
+			Actual:    &model.WireValue{Type: "string", Value: "orange"},
+			Expected:  &model.WireValue{Type: "string", Value: "apple"},
+		},
+		{
+			Type:      model.EventAssertionFail,
+			TestID:    caseID,
+			Assertion: "is_valid_format",
+			Message:   "text format is invalid",
+			Location:  &model.Location{File: "tests/custom.test.gd", Line: 25},
+			Actual:    &model.WireValue{Type: "string", Value: "abc"},
+			Expected:  nil,
+		},
+		{
+			Type:      model.EventAssertionFail,
+			TestID:    caseID,
+			Assertion: "matches_cleared",
+			Message:   "expected state to be cleared",
+			Location:  &model.Location{File: "tests/custom.test.gd", Line: 30},
+			Actual:    &model.WireValue{Type: "string", Value: "active"},
+			Expected:  &model.WireValue{Type: "null", Value: nil},
+		},
+		{
+			Type:      model.EventAssertionFail,
+			TestID:    caseID,
+			Assertion: "matches_threshold",
+			Message:   "inventory limit: count exceeds maximum",
+			Location:  &model.Location{File: "tests/custom.test.gd", Line: 35},
+			Actual:    &model.WireValue{Type: "int", Value: "10"},
+			Expected:  &model.WireValue{Type: "int", Value: "5"},
+		},
+	}
+
+	for _, failure := range failures {
+		require.NoError(t, collector.Emit(failure))
+	}
+
+	require.NoError(t, collector.Emit(model.Event{
+		Type:       model.EventCaseFinished,
+		TestID:     caseID,
+		Name:       "test_matchers",
+		Status:     "fail",
+		Assertions: 4,
+	}))
+
+	summary := collector.Summary()
+	assert.Equal(t, 1, summary.Failed)
+	require.Len(t, summary.Cases, 1)
+
+	caseResult := summary.Cases[0]
+	assert.Equal(t, caseID, caseResult.ID)
+	assert.Equal(t, "fail", caseResult.Status)
+	assert.Equal(t, 4, caseResult.Assertions)
+	require.Len(t, caseResult.Failures, 4)
+
+	assert.Equal(t, "matches_order", caseResult.Failures[0].Assertion)
+	assert.Equal(t, "order item differs", caseResult.Failures[0].Message)
+	assert.NotNil(t, caseResult.Failures[0].Expected)
+
+	assert.Equal(t, "is_valid_format", caseResult.Failures[1].Assertion)
+	assert.Nil(t, caseResult.Failures[1].Expected)
+
+	assert.Equal(t, "matches_cleared", caseResult.Failures[2].Assertion)
+	require.NotNil(t, caseResult.Failures[2].Expected)
+	assert.Equal(t, "null", caseResult.Failures[2].Expected.Type)
+	assert.Nil(t, caseResult.Failures[2].Expected.Value)
+
+	assert.Equal(t, "matches_threshold", caseResult.Failures[3].Assertion)
+	assert.Equal(t, "inventory limit: count exceeds maximum", caseResult.Failures[3].Message)
+}
