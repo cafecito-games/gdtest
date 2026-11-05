@@ -2,6 +2,8 @@ package reporter
 
 import (
 	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/cafecito-games/gdtest/internal/model"
@@ -167,4 +169,125 @@ func TestJSONLSummaryIncludesFrameworkErrors(t *testing.T) {
 			"canceled": 0
 		}
 	}`, output.String())
+}
+
+func TestTerminalPrintsCustomMatcherFailures(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewTerminal(&output)
+
+	// Failure with expected value
+	require.NoError(t, reporter.Emit(model.Event{
+		Type:      model.EventAssertionFail,
+		TestID:    "tests/matcher.test.gd::test_case",
+		Assertion: "matches_order",
+		Message:   "item differs",
+		Location:  &model.Location{File: "tests/matcher.test.gd", Line: 15},
+		Expected:  &model.WireValue{Type: "string", Value: "apple"},
+		Actual:    &model.WireValue{Type: "string", Value: "orange"},
+	}))
+
+	// Failure without expected value
+	require.NoError(t, reporter.Emit(model.Event{
+		Type:      model.EventAssertionFail,
+		TestID:    "tests/matcher.test.gd::test_case",
+		Assertion: "is_valid",
+		Message:   "value is not valid",
+		Location:  &model.Location{File: "tests/matcher.test.gd", Line: 20},
+		Actual:    &model.WireValue{Type: "string", Value: "bad"},
+	}))
+
+	// Failure with expected = null
+	require.NoError(t, reporter.Emit(model.Event{
+		Type:      model.EventAssertionFail,
+		TestID:    "tests/matcher.test.gd::test_case",
+		Assertion: "matches_cleared",
+		Message:   "expected null",
+		Location:  &model.Location{File: "tests/matcher.test.gd", Line: 25},
+		Expected:  &model.WireValue{Type: "null", Value: nil},
+		Actual:    &model.WireValue{Type: "string", Value: "lingering"},
+	}))
+
+	// Caller-prefixed message
+	require.NoError(t, reporter.Emit(model.Event{
+		Type:      model.EventAssertionFail,
+		TestID:    "tests/matcher.test.gd::test_case",
+		Assertion: "matches_threshold",
+		Message:   "stock check: count below minimum",
+		Location:  &model.Location{File: "tests/matcher.test.gd", Line: 30},
+		Expected:  &model.WireValue{Type: "int", Value: "10"},
+		Actual:    &model.WireValue{Type: "int", Value: "3"},
+	}))
+
+	text := output.String()
+	assert.Contains(t, text, "FAIL tests/matcher.test.gd::test_case (tests/matcher.test.gd:15): item differs (expected=\"apple\", actual=\"orange\")")
+	assert.Contains(t, text, "FAIL tests/matcher.test.gd::test_case (tests/matcher.test.gd:20): value is not valid (actual=\"bad\")")
+	assert.NotContains(t, text, "value is not valid (expected=")
+	assert.Contains(t, text, "FAIL tests/matcher.test.gd::test_case (tests/matcher.test.gd:25): expected null (expected=null, actual=\"lingering\")")
+	assert.Contains(t, text, "FAIL tests/matcher.test.gd::test_case (tests/matcher.test.gd:30): stock check: count below minimum (expected=\"10\", actual=\"3\")")
+}
+
+func TestJSONLPrintsCustomMatcherFailures(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewJSONL(&output)
+
+	events := []model.Event{
+		{
+			Type:      model.EventAssertionFail,
+			TestID:    "tests/custom.test.gd::test_matcher",
+			Assertion: "matches_order",
+			Message:   "custom label: item mismatch",
+			Location:  &model.Location{File: "tests/custom.test.gd", Line: 42},
+			Actual:    &model.WireValue{Type: "string", Value: "banana"},
+			Expected:  &model.WireValue{Type: "string", Value: "apple"},
+		},
+		{
+			Type:      model.EventAssertionFail,
+			TestID:    "tests/custom.test.gd::test_matcher",
+			Assertion: "is_empty_state",
+			Message:   "state should be cleared",
+			Location:  &model.Location{File: "tests/custom.test.gd", Line: 48},
+			Actual:    &model.WireValue{Type: "string", Value: "full"},
+			Expected:  &model.WireValue{Type: "null", Value: nil},
+		},
+		{
+			Type:      model.EventAssertionFail,
+			TestID:    "tests/custom.test.gd::test_matcher",
+			Assertion: "predicate_check",
+			Message:   "predicate failed",
+			Location:  &model.Location{File: "tests/custom.test.gd", Line: 54},
+			Actual:    &model.WireValue{Type: "int", Value: "99"},
+			Expected:  nil,
+		},
+	}
+
+	for _, event := range events {
+		require.NoError(t, reporter.Emit(event))
+	}
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	require.Len(t, lines, 3)
+
+	var first map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &first))
+	assert.Equal(t, "assertion_failed", first["type"])
+	assert.Equal(t, "matches_order", first["assertion"])
+	assert.Equal(t, "custom label: item mismatch", first["message"])
+	assert.NotNil(t, first["expected"])
+	assert.NotNil(t, first["actual"])
+
+	var second map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &second))
+	assert.Equal(t, "is_empty_state", second["assertion"])
+	expectedValue := second["expected"].(map[string]any)
+	assert.Equal(t, "null", expectedValue["type"])
+	assert.Nil(t, expectedValue["value"])
+
+	var third map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &third))
+	assert.Equal(t, "predicate_check", third["assertion"])
+	assert.Nil(t, third["expected"])
 }

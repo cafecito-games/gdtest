@@ -32,6 +32,19 @@ printf '\nfunc invalid_untyped(value):\n\tvar result = value\n\treturn result\n'
 	>>"$lint_root/addons/gdtest/gdtest.gd"
 expect_failure lint gdkit lint check --minimum-version 0.10.0 "$lint_root"
 
+matcher_lint_root=$(new_fixture matcher_lint)
+cat > "$matcher_lint_root/examples/malformed_matcher.gd" <<'EOF'
+class_name MalformedMatcher
+extends GDTestMatcher
+
+func name():
+	return "malformed"
+
+func match(actual):
+	return actual
+EOF
+expect_failure matcher_lint gdkit lint check --minimum-version 0.10.0 "$matcher_lint_root"
+
 format_root=$(new_fixture format)
 printf '\nfunc badly_formatted( )->void: pass\n' >>"$format_root/addons/gdtest/gdtest.gd"
 expect_failure format gdkit format check --minimum-version 0.10.0 --diff "$format_root"

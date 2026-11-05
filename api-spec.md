@@ -606,8 +606,114 @@ Structured status, source location, and actual/expected roles are stable.
 
 Vest's `assert_that(value)` fluent assertion object is not part of gdtest v1.
 It allocates an object for a convenience that direct assertions already cover.
-The migration tool may rewrite simple fluent chains into direct assertions and
-must report chains it cannot translate safely.
+Reusable domain assertions that emit structured diagnostics are written using
+custom matchers via `expect_that` (section 10.10). The migration tool may
+rewrite simple fluent chains into direct assertions and must report chains it
+cannot translate safely.
+
+### 10.10 Custom matchers
+
+Projects may define domain-specific assertions by subclassing `GDTestMatcher`
+and evaluating candidates with `expect_that`:
+
+```gdscript
+func expect_that(actual: Variant, matcher: GDTestMatcher, message: String = "") -> void
+```
+
+#### Matcher protocol
+
+A custom matcher extends `GDTestMatcher` and provides two methods:
+
+```gdscript
+class_name GDTestMatcher
+extends RefCounted
+
+func name() -> String
+func match(actual: Variant) -> GDTestMatchResult
+```
+
+- `name() -> String`: returns a non-empty, non-whitespace string identifying the
+  assertion in test reports and failure diagnostics.
+- `match(actual: Variant) -> GDTestMatchResult`: synchronously evaluates `actual`
+  and returns a `GDTestMatchResult` constructed via `GDTestMatchResult.matched()`
+  or `GDTestMatchResult.unmatched(...)`.
+
+#### Match result
+
+Evaluation outcomes are represented by immutable `GDTestMatchResult` instances:
+
+```gdscript
+class_name GDTestMatchResult
+extends RefCounted
+
+static func matched() -> GDTestMatchResult
+static func unmatched(message: String, expected: Variant = null, has_expected: bool = false) -> GDTestMatchResult
+
+var is_match: bool: get
+var message: String: get
+var expected: Variant: get
+var has_expected: bool: get
+```
+
+Properties are getter-only. Container values (`Array`, `Dictionary`, and all
+`Packed*Array` variants) are cloned defensively with recursion bounded to depth
+16 and ancestor cycle detection to preserve container typing and prevent
+post-evaluation caller mutations or cyclic structures from altering diagnostics.
+
+#### Execution and failure reporting
+
+1. Passing `expect_that` calls execute without capturing a call stack or allocating
+   failure diagnostic payloads. On assertion failures or invalid outside-case
+   calls, `expect_that` records the caller's source location, ensuring diagnostics
+   point directly at the `expect_that` call site.
+2. If called outside an active test case, `expect_that` records a source-located
+   framework error without invoking `matcher`.
+3. If `matcher` is null, unoverridden, returns an empty name, returns null, or
+   returns an invalid result (such as via direct `GDTestMatchResult.new()` or an
+   empty mismatch message), `expect_that` records a source-located assertion
+   failure with assertion `"expect_that"` without incrementing the valid
+   assertion count.
+4. On a passing match, `_gdtest_assertions` increments by 1 and case status is
+   promoted to `"pass"`.
+5. On a mismatch, `_gdtest_assertions` increments by 1, and an `assertion_failed`
+   event is recorded with `assertion = matcher.name()`, actual value, optional
+   expected value, and composed message (`"<caller>: <explanation>"` when
+   `message` is non-empty).
+
+#### Runnable example
+
+```gdscript
+extends GDTest
+
+class HasEvenLength:
+	extends GDTestMatcher
+
+	func name() -> String:
+		return "has_even_length"
+
+	func match(actual: Variant) -> GDTestMatchResult:
+		if not actual is Array and not actual is String:
+			return GDTestMatchResult.unmatched("expected Array or String")
+		var length: int = actual.size() if actual is Array else (actual as String).length()
+		if length % 2 == 0:
+			return GDTestMatchResult.matched()
+		return GDTestMatchResult.unmatched("length is odd", length, true)
+
+
+func test_custom_matcher() -> void:
+	expect_that([1, 2, 3, 4], HasEvenLength.new())
+	expect_that("sample", HasEvenLength.new(), "length check")
+```
+
+When custom matchers declare typed method signatures or return types in GDScript,
+Godot 4.7's virtual machine validates type boundaries directly: passing an
+incompatible type to a typed `match(actual: ...)` parameter or returning a
+wrong type from a typed `match(...) -> GDTestMatchResult` triggers an engine
+runtime script error (`status = "error"`). Untyped or dynamic matchers that
+violate the matcher protocol fail closed through runtime framework validation,
+producing source-located assertion failures (`status = "fail"` on assertion
+`"expect_that"`).
+
 
 ## 11. Explicit outcomes
 
@@ -1238,6 +1344,7 @@ The following names/patterns are reserved by gdtest:
 - `get_suite_name`
 - `callback_probe`, the test method that creates a case-scoped callback recorder.
 - `double_context`, the test method that returns a case's double context.
+- `expect_that`, the test method that evaluates a custom matcher.
 - `gdtest` and `GDTestControls`, the controller member and class that generated
   test doubles expose.
 - Lifecycle hook names in section 8.
@@ -1257,7 +1364,7 @@ The following Vest-facing concepts are not gdtest v1 APIs:
 - Runtime-generated mocks (`mock`, `when`, `get_calls_of`). Ahead-of-time generated
   doubles (section 14.7) cover the typed subset of this use case.
 - Vest's fluent benchmark builders and measure objects. Use the dedicated API in section 14.8.
-- Fluent `assert_that` objects.
+- Fluent `assert_that` objects. Reusable domain assertions are implemented as custom matchers via `GDTestMatcher` and `expect_that` (section 10.10).
 - Test mixin generation or user-configurable inheritance chains.
 - Public mutable suite/result definition objects.
 - Directory traversal, globbing, project settings, and runner-control helpers
@@ -1292,7 +1399,7 @@ Vest runtime internals.
 | `await Vest.sleep(x)` | `await sleep(x)` | Mechanical |
 | `await Vest.until(...)` | `await until(...)` | Mechanical |
 | Vest default-argument parameter provider | `<test>__cases` provider | Syntax-aware rewrite |
-| `assert_that` | Direct assertions | Rewrite simple chains; report others |
+| `assert_that` | Direct assertions or custom matcher (`expect_that`) | Rewrite simple chains; report others with a pointer to [docs/vest-migration.md](./docs/vest-migration.md) |
 | Lifecycle signals | Hooks | Report or rewrite only when unambiguous |
 | `Vest.timeout` | No v1 equivalent | Report |
 | Runtime mocks (`mock`, `when`, `get_calls_of`) | Configured generated double (section 14.7) for the typed subset; otherwise hand-written | Report with a pointer to [docs/vest-migration.md](./docs/vest-migration.md); not converted mechanically |
@@ -1359,6 +1466,9 @@ The runtime is conformant when tests prove all of the following:
     warmups are discarded, and normalized raw samples reproduce every reported statistic.
 18. Benchmark IDs, results, baselines, and comparisons remain project-relative and stable across
     equivalent worktrees.
+19. Custom matchers (`GDTestMatcher`, `GDTestMatchResult`, `expect_that`) execute synchronous domain checks,
+    enforce fail-closed contracts, attribute failure locations to the caller, and defend against post-evaluation
+    collection mutation.
 
 Examples and API documentation in the repository must be executable
 conformance fixtures rather than untested prose snippets wherever practical.

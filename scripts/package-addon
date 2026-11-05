@@ -126,6 +126,7 @@ fi
 for required in \
     LICENSE bin/.gdignore gdtest gdtest.cmd gdtest.gd version.gd worker.gd \
     gdtest_invocation.gd gdtest_signal_probe.gd gdtest_callback_probe.gd probe_ledger.gd \
+    gdtest_matcher.gd gdtest_match_result.gd \
     gdtest_double_context.gd gdtest_double_method.gd \
     gdtest_benchmark.gd gdtest_benchmark_info.gd \
     worker_benchmark_runner.gd worker_benchmark_task.gd

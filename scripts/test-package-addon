@@ -172,12 +172,22 @@ if command -v godot >/dev/null 2>&1; then
 extends GDTest
 
 
+## Packaged custom matcher ensuring runtime classes are exported in the core slice.
+class AlwaysMatches extends GDTestMatcher:
+	func name() -> String:
+		return "always_matches"
+
+	func match(_actual: Variant) -> GDTestMatchResult:
+		return GDTestMatchResult.matched()
+
+
 ## Verifies the gpm-installed runtime and host executable handshake.
 func test_packaged_handshake() -> void:
 	var probe: GDTestCallbackProbe = callback_probe(1)
 	probe.callback().call("ready")
 	expect_equal(probe.invocation_count(), 1)
 	expect_equal(probe.arguments_at(0), ["ready"])
+	expect_that("sample", AlwaysMatches.new())
 EOF
 	import_output=$(godot --headless --editor --path "$host_project" --quit 2>&1) \
 		|| fail "Godot could not import the packaged addon:$'\n'$import_output"

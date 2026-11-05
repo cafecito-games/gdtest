@@ -70,10 +70,9 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 	var sibling_key: String = str(parent_id.length()) + ":" + parent_id + name
 	var sibling_ordinal: int = _gdtest_suite_ordinals.get(sibling_key, 0)
 	_gdtest_suite_ordinals[sibling_key] = sibling_ordinal + 1
-	var suite_id: String = parent_id + (
-			"/" if not parent_id.is_empty()
-			else ""
-	) + _encode_component(name) + "@" + str(sibling_ordinal)
+	var delimiter: String = "/" if not parent_id.is_empty() else ""
+	var encoded_name: String = _encode_component(name)
+	var suite_id: String = parent_id + delimiter + encoded_name + "@" + str(sibling_ordinal)
 	var info := GDTestSuiteInfo.new(
 			suite_id,
 			name,
@@ -359,6 +358,33 @@ func expect_does_not_contain(value: Variant, item: Variant, message: String = ""
 			value,
 			item,
 			true
+	)
+
+
+## Evaluates `actual` with `matcher` and records an assertion.
+func expect_that(actual: Variant, matcher: GDTestMatcher, message: String = "") -> void:
+	if not _require_case("expect_that"):
+		return
+	var outcome: GDTestMatchResult = GDTestMatcher._gdtest_evaluate(actual, matcher)
+	if not outcome._gdtest_is_valid():
+		_record_failure(
+				"expect_that",
+				_framework_message(message, outcome._gdtest_invalid_reason()),
+				GDTestMatchResult._gdtest_clone_value(actual),
+				null,
+				false
+		)
+		return
+	_gdtest_assertions += 1
+	if outcome.is_match:
+		_promote_status("pass")
+		return
+	_record_failure(
+			outcome._gdtest_assertion(),
+			_framework_message(message, outcome.message),
+			GDTestMatchResult._gdtest_clone_value(actual),
+			outcome.expected,
+			outcome.has_expected
 	)
 
 
@@ -705,14 +731,11 @@ func _record_assertion(
 	if passed:
 		_promote_status("pass")
 		return
-	var default_message: String = assertion + " failed"
-	_record_failure(
-			assertion,
-			custom_message if not custom_message.is_empty() else default_message,
-			actual,
-			expected,
-			has_expected
+	var failure_message: String = (
+			custom_message if not custom_message.is_empty()
+			else assertion + " failed"
 	)
+	_record_failure(assertion, failure_message, actual, expected, has_expected)
 
 
 func _record_failure(
@@ -884,18 +907,14 @@ func _gdtest_release_probe_context() -> void:
 	_gdtest_probe_context = null
 
 
-func _gdtest_release_outside_probes() -> void:
-	if _gdtest_outside_probe_context != null:
-		_gdtest_outside_probe_context.detach()
-	_gdtest_outside_probe_context = null
-
-
 func _gdtest_dispose() -> void:
 	_gdtest_release_signal_probes()
 	_gdtest_release_callback_probes()
 	_gdtest_release_double_context()
 	_gdtest_release_probe_context()
-	_gdtest_release_outside_probes()
+	if _gdtest_outside_probe_context != null:
+		_gdtest_outside_probe_context.detach()
+	_gdtest_outside_probe_context = null
 	_gdtest_dynamic_cases.clear()
 	_gdtest_dynamic_suites.clear()
 	_gdtest_definition_roots.clear()

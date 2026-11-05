@@ -141,7 +141,60 @@ Replace `on_begin`, `on_case_begin`, and similar lifecycle signals with the matc
 
 ### Fluent assertions
 
-Replace each chained matcher with one direct `expect_*` call with the same actual-first argument order. For multi-matcher chains, write one `expect_*` per matcher.
+Vest's fluent `assert_that` assertion builder is not present in gdtest. The migration tool mechanically rewrites single-matcher chains where a direct equivalent exists (such as `assert_that(actual).is_equal_to(expected)` to `expect_equal(actual, expected)`).
+
+For unsupported chains flagged with `unsupported.fluent-assertion`, choose one of two patterns:
+
+#### 1. Split multi-matcher chains into direct assertions
+
+When a chain combines multiple standard checks, replace each matcher with a direct assertion in actual-first order:
+
+```gdscript
+# Vest source:
+assert_that(order.items).is_not_empty().has_size(3)
+
+# gdtest manual conversion:
+expect_not_empty(order.items)
+expect_equal(order.items.size(), 3)
+```
+
+#### 2. Implement a custom matcher for domain assertions
+
+When tests assert complex domain invariants across properties or collections, define a reusable `GDTestMatcher` subclass and evaluate it with `expect_that`:
+
+```gdscript
+# Vest source with custom or chained matcher:
+assert_that(receipt).matches_order("potion", 3, 150)
+
+# gdtest manual conversion:
+class MatchesOrder extends GDTestMatcher:
+	var _item: String
+	var _quantity: int
+	var _total_cents: int
+
+	func _init(item: String, quantity: int, total_cents: int) -> void:
+		_item = item
+		_quantity = quantity
+		_total_cents = total_cents
+
+	func name() -> String:
+		return "matches_order"
+
+	func match(actual: Variant) -> GDTestMatchResult:
+		if typeof(actual) != TYPE_OBJECT or not is_instance_valid(actual) or not actual is Receipt:
+			return GDTestMatchResult.unmatched("expected Receipt")
+		var receipt: Receipt = actual
+		if receipt.item != _item:
+			return GDTestMatchResult.unmatched("item differs", _item, true)
+		if receipt.quantity != _quantity:
+			return GDTestMatchResult.unmatched("quantity differs", _quantity, true)
+		if receipt.total_cents != _total_cents:
+			return GDTestMatchResult.unmatched("total differs", _total_cents, true)
+		return GDTestMatchResult.matched()
+
+# In the test case:
+expect_that(receipt, MatchesOrder.new("potion", 3, 150))
+```
 
 ### Runtime mocks and benchmarks
 
