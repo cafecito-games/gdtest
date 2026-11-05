@@ -12,6 +12,7 @@ const (
 	signalCaptureCode  = "unsupported.signal-capture"
 	signalCaptureUnset = ""
 	signalCaptureUse   = "signal capture has no gdtest v1 equivalent"
+	probeHelperName    = "watch_signal"
 )
 
 type signalCapture struct {
@@ -110,6 +111,19 @@ func (t *transformer) signalCaptures(tree *ast.File) {
 	scopeNames := make(map[*ast.FunctionDeclaration]map[string]struct{})
 	for _, group := range groups {
 		reason := t.signalGroupBlocker(group)
+		var names map[string]struct{}
+		if reason == signalCaptureUnset {
+			function := group.captures[0].function
+			cached, exists := scopeNames[function]
+			if !exists {
+				cached = declaredNames(tree, function)
+				scopeNames[function] = cached
+			}
+			names = cached
+			if _, taken := names[probeHelperName]; taken {
+				reason = "the generated call " + probeHelperName + " would resolve to a user declaration"
+			}
+		}
 		if reason != signalCaptureUnset {
 			for _, capture := range group.captures {
 				t.manualOnce(capture.call.Span(), signalCaptureCode, "signal capture requires manual migration: "+reason)
@@ -118,12 +132,6 @@ func (t *transformer) signalCaptures(tree *ast.File) {
 				t.manualOnce(read.node.Span(), signalCaptureCode, "signal read requires manual migration: "+reason)
 			}
 			continue
-		}
-		function := group.captures[0].function
-		names, exists := scopeNames[function]
-		if !exists {
-			names = declaredNames(tree, function)
-			scopeNames[function] = names
 		}
 		t.convertSignalGroup(group, names)
 	}
@@ -335,7 +343,7 @@ func (t *transformer) convertSignalGroup(group *signalGroup, names map[string]st
 	capture := group.captures[0]
 	probe := uniqueName(capture.member.Property+"_probe", names)
 	names[probe] = struct{}{}
-	expression := "watch_signal(" + capture.text + ")"
+	expression := probeHelperName + "(" + capture.text + ")"
 	if len(group.reads) > 0 {
 		expression = "var " + probe + " := " + expression
 	}

@@ -488,3 +488,21 @@ func _check() -> void:
 		assert.NotEqual(t, "rewrite.signal-capture", finding.Code)
 	}
 }
+
+func TestSignalCapturesDoNotShadowUserDeclaredProbeHelper(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func watch_signal(_what: Signal) -> Variant:
+	return null
+
+func test_user_helper() -> void:
+	capture_signal(source.changed, 1)
+	expect_equal(get_signal_emissions(source.changed).size(), 0)
+`)
+	result, err := Transform("tests/shadow.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.NotContains(t, string(result.Output), "var changed_probe")
+	assert.Contains(t, findingCodes(result.Findings), "unsupported.signal-capture")
+}

@@ -248,3 +248,17 @@ func test_freed_owner_preserves_recorded_values() -> void:
 	probe.stop_recording()
 	probe.stop_recording()
 	expect_equal(probe.emission_count(), 1)
+
+
+## Snapshots nested collections at emission so later mutation cannot change recorded values.
+func test_nested_arguments_are_snapshotted() -> void:
+	var probe: GDTestSignalProbe = watch_signal(_source.one)
+	var payload: Array[int] = [1]
+	_source.one.emit(payload)
+	payload[0] = 2
+	var recorded: Array[Variant] = probe.arguments_at(0)
+	expect_equal(recorded, [[1]])
+	var nested: Array[Variant] = recorded[0]
+	nested[0] = 3
+	expect_equal(probe.arguments_at(0), [[1]])
+	probe.stop_recording()

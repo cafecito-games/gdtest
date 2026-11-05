@@ -10,7 +10,7 @@ var sequence: int:
 ## Defensive copy of the emitted arguments in signal parameter order.
 var arguments: Array[Variant]:
 	get:
-		return _arguments.duplicate()
+		return _arguments.duplicate(true)
 
 var _sequence: int
 var _arguments: Array[Variant]
@@ -18,4 +18,4 @@ var _arguments: Array[Variant]
 
 func _init(sequence_value: int, arguments_value: Array[Variant]) -> void:
 	_sequence = sequence_value
-	_arguments = arguments_value.duplicate()
+	_arguments = arguments_value.duplicate(true)
