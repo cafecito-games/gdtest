@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/cafecito-games/gdparser/ast"
+	"github.com/cafecito-games/gdtest/internal/astcache"
 	"github.com/cafecito-games/gdtest/internal/cache"
 	"github.com/cafecito-games/gdtest/internal/discovery"
 	"github.com/cafecito-games/gdtest/internal/generation"
@@ -63,8 +65,17 @@ func discoverWithStore(
 		return discovery.Manifest{}, fmt.Errorf("encode discovery content identity: %w", err)
 	}
 	key := cache.Key(version.BuildID(), parserVersion(), configuration, content)
-	encoded, err := store.GetOrCompute(ctx, key, func(context.Context) ([]byte, error) {
-		manifest, discoverErr := discovery.Discover(root, options)
+	parser, err := astcache.New(store, version.BuildID(), parserVersion())
+	if err != nil {
+		return discovery.Manifest{}, err
+	}
+	discover := func(discoverCtx context.Context) (discovery.Manifest, error) {
+		return discovery.DiscoverWithParser(root, options, func(relative string, source []byte) (*ast.File, error) {
+			return parser.Parse(discoverCtx, relative, source)
+		})
+	}
+	encoded, err := store.GetOrCompute(ctx, key, func(computeCtx context.Context) ([]byte, error) {
+		manifest, discoverErr := discover(computeCtx)
 		if discoverErr != nil {
 			return nil, discoverErr
 		}
@@ -77,7 +88,7 @@ func discoverWithStore(
 	if err != nil {
 		// The cache envelope may be intact while its application payload is not.
 		// Recompute rather than trusting or exposing a malformed analysis result.
-		manifest, discoverErr := discovery.Discover(root, options)
+		manifest, discoverErr := discover(ctx)
 		if discoverErr != nil {
 			return discovery.Manifest{}, discoverErr
 		}

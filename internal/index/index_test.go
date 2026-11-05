@@ -29,6 +29,25 @@ func TestDiscoverUsesPathNeutralContentIdentity(t *testing.T) {
 	assert.Equal(t, "example.test.gd::test_value", first.Files[0].Cases[0].ID)
 }
 
+func TestDiscoverReusesParsedASTWhenAggregateConfigurationChanges(t *testing.T) {
+	t.Parallel()
+	root := fixture(t)
+	store, err := cache.Open(t.TempDir(), 1<<20)
+	require.NoError(t, err)
+
+	_, err = discoverWithStore(context.Background(), root, discovery.Options{
+		Patterns: []string{"**/*.test.gd"},
+	}, store)
+	require.NoError(t, err)
+	assert.Equal(t, 2, cacheEntryCount(t, store.Root()), "one AST and one aggregate manifest")
+
+	_, err = discoverWithStore(context.Background(), root, discovery.Options{
+		Patterns: []string{"example.test.gd"},
+	}, store)
+	require.NoError(t, err)
+	assert.Equal(t, 3, cacheEntryCount(t, store.Root()), "configuration miss must reuse the AST entry")
+}
+
 func TestDecodeManifestRejectsMalformedApplicationPayload(t *testing.T) {
 	t.Parallel()
 	for _, payload := range [][]byte{
@@ -53,4 +72,20 @@ func fixture(t *testing.T) string {
 	write("project.godot", "[application]\n")
 	write("example.test.gd", "extends GDTest\nfunc test_value() -> void:\n\tpass\n")
 	return root
+}
+
+func cacheEntryCount(t *testing.T, root string) int {
+	t.Helper()
+	count := 0
+	err := filepath.WalkDir(root, func(name string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && filepath.Ext(name) == ".json" {
+			count++
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	return count
 }

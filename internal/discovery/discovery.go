@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/cafecito-games/gdparser"
+	"github.com/cafecito-games/gdparser/ast"
 	"github.com/cafecito-games/gdtest/internal/model"
 )
 
@@ -31,10 +32,22 @@ type Options struct {
 	Exclude  []string
 }
 
+// ParseFunc parses one project-relative GDScript source. Cached discovery may
+// provide a content-addressed implementation while direct callers use gdparser.
+type ParseFunc func(relative string, source []byte) (*ast.File, error)
+
 // Discover walks root and builds a deterministic static index. All GDScript
 // files participate in inheritance and dependency resolution, while only
 // matching GDTest descendants contribute executable plans.
 func Discover(root string, options Options) (Manifest, error) {
+	return DiscoverWithParser(root, options, gdparser.ParseFile)
+}
+
+// DiscoverWithParser performs discovery with an injected syntax-tree parser.
+func DiscoverWithParser(root string, options Options, parse ParseFunc) (Manifest, error) {
+	if parse == nil {
+		return Manifest{}, errors.New("discovery parser is nil")
+	}
 	if len(options.Patterns) == 0 {
 		options.Patterns = []string{"**/*.test.gd"}
 	}
@@ -69,7 +82,7 @@ func Discover(root string, options Options) (Manifest, error) {
 		if err != nil {
 			return Manifest{}, fmt.Errorf("read %s: %w", relative, err)
 		}
-		tree, err := gdparser.ParseFile(relative, data)
+		tree, err := parse(relative, data)
 		if err != nil {
 			return Manifest{}, fmt.Errorf("parse %s: %w", relative, err)
 		}

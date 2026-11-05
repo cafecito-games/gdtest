@@ -11,7 +11,7 @@ blocked release work.
 | 1. Foreground vertical slice | Verified | Go 1.26 module, Cobra CLI, backend-neutral plans/events, gdparser discovery, typed GDScript runtime, authenticated Godot worker, streaming terminal/JSONL reporters, canonical quality script, and real passing/failing Godot fixtures. `scripts/check` and the real-Godot protocol/API tests pass on the current revision. |
 | 2. Persistent daemon | Verified | Build-isolated daemon namespace, locking/auto-start, client streaming/cancellation, persistent worker commands, status/sessions/logs/stop/doctor, bounded output capture, and crash replacement. Integration tests reuse one PID and replace only the canceled/crashed lease. |
 | 3. Worktrees and scheduler | Verified | Canonical Git worktree identity, isolated sessions, fair bounded scheduling, four isolation policies, per-file concurrency, global worker bound, LRU/idle/run/age/memory recycling, and multi-worktree stress coverage. Memory measurement failure conservatively recycles the worker. |
-| 4. Discovery and generations | Verified with ADR | Static and dynamic discovery, stable IDs/locations, selectors, dependency analysis, atomic content-addressed caches, authoritative reconciliation, stale events, and watch mode are implemented. Any source-generation change replaces the worker instead of attempting unverifiable in-process reload; see ADR 0005. Real Godot generation and dynamic-discovery tests pass. |
+| 4. Discovery and generations | Verified with ADR | Static and dynamic discovery, stable IDs/locations, selectors, dependency analysis, reusable parsed-AST/static/dependency/dynamic artifacts, authoritative reconciliation, stale events, and watch mode are implemented. Any source-generation change replaces the worker instead of attempting unverifiable in-process reload; see ADR 0005. Real Godot generation and dynamic-discovery tests pass. |
 | 5. Selection and migration | Verified | Engine-completed selection, dynamic-only files, path/directory/glob/name/focus selectors, conservative affected selection, and gdparser-span Vest migration with atomic writes and precise unsupported-context findings. Nested-class scope, nested SceneTree access, inherited-name warning annotations, migration goldens, a mechanically migrated real-Godot fixture, and the complete 682-file Uzir migration audit pass. |
 | 6. Hardening and packaging | In progress | Runtime errors, built-in assertions, cooperative and non-yielding case timeouts, language-neutral protocol fixtures, strict void/todo/skip policies, memory-bound stress, complete assertion-failure conformance, client reconnect, structured lifecycle logs, exact package-tree verification, and the specified performance corpora are implemented and verified. The remaining completion work is the final requirement-by-requirement audit and any gaps it exposes; Windows is explicitly deferred in ADR 0004. |
 
@@ -58,6 +58,13 @@ Completed on 2026-11-04 for the current hardening batch:
   and real-Godot 10,000-assertion/10,000-dynamic-case corpora.
 - The current migration regression fixture executes three real-Godot cases after rewriting nested
   `Vest.get_tree()` access and strict inherited-name conflicts.
+- Parsed GDScript AST artifacts are versioned by tool/parser identity and relative path plus source
+  content, reject corrupt payloads, publish atomically through the shared cache, and are reused when
+  aggregate discovery configuration changes. Static manifests retain per-script metadata and
+  dependency fragments; compatible dynamic manifests remain separately generation-rebound. The
+  focused race tests and `scripts/check` pass. Two consecutive foreground discoveries of all 682
+  Uzir files emitted identical 8,238-case manifests; the persisted cache-hit run took 4.12 seconds
+  and did not invoke Godot.
 
 ## Uzir customer dogfood
 
