@@ -231,10 +231,11 @@ func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Nod
 	return read
 }
 
-// gdtestAssertionNames are the GDTest assertions that compare a value and never keep a reference to it.
+// gdtestAssertionNames are the GDTest value assertions whose result is unchanged by a copy of the
+// compared value. Identity assertions are excluded because a copy never satisfies them.
 var gdtestAssertionNames = map[string]bool{
 	"expect": true, "expect_not": true, "expect_true": true, "expect_false": true,
-	"expect_equal": true, "expect_not_equal": true, "expect_same": true, "expect_not_same": true,
+	"expect_equal": true, "expect_not_equal": true,
 	"expect_approx": true, "expect_not_approx": true, "expect_null": true, "expect_not_null": true,
 	"expect_empty": true, "expect_not_empty": true, "expect_contains": true, "expect_does_not_contain": true,
 }
