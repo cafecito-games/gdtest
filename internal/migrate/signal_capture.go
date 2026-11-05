@@ -190,10 +190,12 @@ func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Nod
 		return read
 	}
 	defer func() {
-		if read.kind != signalReadUnsupported && readIsMutated(read.node, parents) {
-			read.kind = signalReadUnsupported
-			read.node = call
-			read.indexes = nil
+		if read.kind == signalReadArgumentsAt || read.kind == signalReadNestedArgument {
+			if !readIsConsumedWithoutAlias(read.node, parents) {
+				read.kind = signalReadUnsupported
+				read.node = call
+				read.indexes = nil
+			}
 		}
 	}()
 	switch parent := parents[call].(type) {
@@ -229,17 +231,27 @@ func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Nod
 	return read
 }
 
-// readIsMutated reports a read whose result is assigned through or used as a
-// method receiver. The probe returns defensive copies, so such a write would no
-// longer change the recorded emission the way it changes Vest's stored array.
-func readIsMutated(node ast.Expression, parents map[ast.Node]ast.Node) bool {
+// readIsConsumedWithoutAlias accepts an indexed read only when its value is passed
+// to an expect_* assertion or combined by an operator. Those consumers never keep a
+// mutable reference, so the probe's defensive copy is indistinguishable from Vest's
+// stored array. Every other position, including locals and method receivers, could
+// mutate the stored emission and is preserved.
+func readIsConsumedWithoutAlias(node ast.Expression, parents map[ast.Node]ast.Node) bool {
 	switch parent := parents[node].(type) {
-	case *ast.Assignment:
-		return parent.Target == ast.Expression(node)
-	case *ast.MemberExpression:
-		return parent.Object == ast.Expression(node)
+	case *ast.CallExpression:
+		name, ok := parent.Callee.(*ast.Identifier)
+		if !ok || !strings.HasPrefix(name.Name, "expect") {
+			return false
+		}
+		for _, argument := range parent.Arguments {
+			if argument == ast.Expression(node) {
+				return true
+			}
+		}
+	case *ast.BinaryExpression, *ast.UnaryExpression:
+		return true
 	case *ast.SubscriptExpression:
-		return parent.Object == ast.Expression(node) && readIsMutated(parent, parents)
+		return parent.Object == ast.Expression(node) && readIsConsumedWithoutAlias(parent, parents)
 	}
 	return false
 }
@@ -366,6 +378,11 @@ func reassigns(function *ast.FunctionDeclaration, name string) bool {
 		case *ast.Assignment:
 			if identifier, ok := value.Target.(*ast.Identifier); ok && identifier.Name == name {
 				found = true
+			}
+			if member, ok := value.Target.(*ast.MemberExpression); ok && member.Property == name {
+				if receiver, ok := member.Object.(*ast.Identifier); ok && receiver.Name == "self" {
+					found = true
+				}
 			}
 		}
 		return !found

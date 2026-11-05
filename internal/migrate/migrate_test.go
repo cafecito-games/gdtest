@@ -627,3 +627,26 @@ func test_within_range() -> void:
 	assert.Contains(t, string(result.Output), "capture_signal(_source.wide, 9)")
 	assert.Contains(t, string(result.Output), "var narrow_probe := watch_signal(_source.narrow)")
 }
+
+func TestIndexedAliasesAndSelfQualifiedReassignmentArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_indexed_alias() -> void:
+	capture_signal(_source.first, 1)
+	var emission := get_signal_emissions(_source.first)[0]
+	expect_equal(emission, [1])
+
+func test_self_reassignment() -> void:
+	capture_signal(_source.second, 0)
+	self._source = Source.new()
+	expect_equal(get_signal_emissions(_source.second).size(), 0)
+`)
+	result, err := Transform("tests/aliases.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.first, 1)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.second, 0)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}
