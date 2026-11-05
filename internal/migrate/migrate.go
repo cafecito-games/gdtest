@@ -144,6 +144,7 @@ func Transform(path string, source []byte) (FileResult, error) {
 	state.hookTypes(tree)
 	state.parameterProviders(tree)
 	state.fluentAssertions(tree)
+	state.signalCaptures(tree)
 	state.utilitiesAndUnsupported(tree)
 	if len(state.wrappers) > 0 {
 		sort.Strings(state.wrappers)
@@ -188,6 +189,7 @@ type transformer struct {
 	wrappers      []string
 	unsupported   map[string]struct{}
 	migratingVest bool
+	signalHandled map[int]struct{}
 }
 
 func (t *transformer) directives(tree *ast.File) {
@@ -580,7 +582,9 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 			case "benchmark":
 				t.manualOnce(value.Span(), "unsupported.benchmark", "benchmarks have no gdtest v1 equivalent")
 			case "capture_signal", "get_signal_emissions":
-				t.manualOnce(value.Span(), "unsupported.signal-capture", "signal capture has no gdtest v1 equivalent")
+				if !t.isSignalHandled(value.Span()) {
+					t.manualOnce(value.Span(), signalCaptureCode, signalCaptureUse)
+				}
 			}
 		case *ast.Identifier:
 			switch value.Name {

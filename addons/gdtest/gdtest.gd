@@ -42,6 +42,8 @@ var _gdtest_suite_ordinals: Dictionary[String, int] = {}
 var _gdtest_case_ordinals: Dictionary[int, int] = {}
 var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
+var _gdtest_signal_probes: Array[GDTestSignalProbe] = []
+var _gdtest_sequence: int = 0
 
 
 ## Registers a nested dynamic suite and immediately invokes its callback.
@@ -451,6 +453,31 @@ func time() -> float:
 	return Time.get_ticks_usec() / 1000000.0
 
 
+## Records every emission of `what` for the executing case and returns its probe.
+##
+## The probe is disconnected automatically when the case finishes, so connections
+## never survive into another case that reuses this worker.
+func watch_signal(what: Signal) -> GDTestSignalProbe:
+	var location: Dictionary[String, Variant] = _user_location()
+	if not _require_case("watch_signal"):
+		return GDTestSignalProbe.detached(
+				_gdtest_tree,
+				Callable(self, &"_gdtest_allocate_sequence"),
+				Callable(self, &"_report_probe_error"),
+				Callable(self, &"_user_location")
+		)
+	var probe: GDTestSignalProbe = GDTestSignalProbe.create(
+			what,
+			_gdtest_tree,
+			Callable(self, &"_gdtest_allocate_sequence"),
+			Callable(self, &"_report_probe_error"),
+			Callable(self, &"_user_location"),
+			location
+	)
+	_gdtest_signal_probes.append(probe)
+	return probe
+
+
 func _gdtest_configure(tree: SceneTree, file: String, failure_sink: Callable) -> void:
 	_gdtest_tree = tree
 	_gdtest_file = file
@@ -506,12 +533,15 @@ func _gdtest_begin_case() -> void:
 	_gdtest_case_active = true
 	_gdtest_status = "void"
 	_gdtest_assertions = 0
+	_gdtest_sequence = 0
 	_gdtest_failures.clear()
 	_gdtest_messages.clear()
 	_gdtest_outcome_data.clear()
+	_gdtest_signal_probes.clear()
 
 
 func _gdtest_end_case() -> Dictionary[String, Variant]:
+	_gdtest_release_signal_probes()
 	_gdtest_case_active = false
 	return {
 		"status": _gdtest_status,
@@ -760,12 +790,34 @@ func _framework_message(custom_message: String, framework_message: String) -> St
 	return custom_message + ": " + framework_message
 
 
+func _gdtest_allocate_sequence() -> int:
+	_gdtest_sequence += 1
+	return _gdtest_sequence
+
+
+func _gdtest_release_signal_probes() -> void:
+	for probe: GDTestSignalProbe in _gdtest_signal_probes:
+		probe.stop_recording()
+	_gdtest_signal_probes.clear()
+
+
+func _report_probe_error(text: String, location: Dictionary[String, Variant]) -> void:
+	if _gdtest_case_active:
+		_gdtest_record_error_at(
+				text,
+				str(location.get("file", _gdtest_file)),
+				int(location.get("line", -1))
+		)
+	else:
+		_gdtest_discovery_errors.append({ "message": text, "location": location })
+
+
 func _user_location() -> Dictionary[String, Variant]:
 	var stack: Array[Variant] = get_stack()
 	for frame_value: Variant in stack:
 		var frame: Dictionary[String, Variant] = _string_dictionary(frame_value)
 		var source: String = str(frame.get("source", ""))
-		if not source.ends_with("/addons/gdtest/gdtest.gd"):
+		if not source.contains("/addons/gdtest/"):
 			return { "file": source, "line": int(frame.get("line", -1)) }
 	return { "file": _gdtest_file, "line": -1 }
 

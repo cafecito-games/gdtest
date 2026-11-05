@@ -216,3 +216,30 @@ The first-customer audit used `/Users/christian/CafecitoGames/uzir-gdtest-dogfoo
 The converted customer worktree remains an isolated, uncommitted experiment. The only
 non-mechanical source is its documented project-local bridge for the five signal-capture files;
 the Uzir main worktree remains clean and nothing was pushed.
+
+## Case-scoped signal probes
+
+Implements `watch_signal` and `GDTestSignalProbe` / `GDTestInvocation` from issue #3, the Vest
+signal-capture migration subset, and the ADR for the renamed probe disconnect method (ADR 0008).
+
+- Real-Godot conformance (`fixtures/godot/api/signal_probes.test.gd`): 12 passing cases cover
+  zero- through eight-argument user signals, built-in signal arity, ordered and defensive records,
+  sequence numbers, independent probes beside pre-existing connections, manual stop, awaited success
+  and timeout, freed owners, and cross-case cleanup on one persistent worker
+  (`internal/worker/signal_probe_godot_test.go`).
+- Invalid inputs (`fixtures/godot/api/signal_probe_failures.test.gd`): null signal, freed owner,
+  arity above eight, negative count, negative timeout, and out-of-range index each end `error` with a
+  source-located framework diagnostic.
+- Migration goldens (`fixtures/migration/signal_capture.*`) prove conversion of counts, indexes,
+  emptiness checks, bare captures, and collision-free names, and preservation with precise findings
+  for every blocked form. The migration is idempotent and passes gdtest's static discovery contract.
+- Uzir dry run (`migrate vest --check` over the five signal-capture files) finds all 45 captures and
+  46 reads. It converts 19 captures and 20 reads. Of the 26 preserved captures, 11 are helper-function
+  captures and 15 read through unsupported forms (local aliases and whole-list comparisons). Their
+  findings are source-located. The five files still contain other unsupported Vest constructs and
+  retain the project-local bridge for the preserved captures, so they are not yet run as converted.
+- `scripts/check` passes (gofmt, tidy, golangci-lint, `go test -race ./...`, vet, build, strict
+  gdkit lint/format/arch/uid, and quality gates).
+- Not verified here: `scripts/package-addon` and `scripts/test-package-addon` require gpm 0.6.0 or
+  newer. The installed `gpm` reports `dev`, and the released module is not reachable from this
+  machine, so the packaging gate remains to be run in an environment with gpm 0.6.0.

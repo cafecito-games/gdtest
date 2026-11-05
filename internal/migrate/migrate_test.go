@@ -418,3 +418,38 @@ func mustRead(t *testing.T, filename string) []byte {
 	require.NoError(t, err)
 	return data
 }
+
+func TestSignalCapturesConvertOnlyProvenBindingsAndPreserveAmbiguousUses(t *testing.T) {
+	t.Parallel()
+	input := fixture(t, "signal_capture.input.gd")
+	want := fixture(t, "signal_capture.expected.gd")
+	result, err := Transform("tests/signal_capture.test.gd", input)
+	require.NoError(t, err)
+	assert.True(t, result.Changed)
+	assert.Equal(t, string(want), string(result.Output))
+	assert.Equal(t, []string{
+		"rewrite.base-class",
+		"rewrite.signal-capture",
+		"rewrite.signal-read", "rewrite.signal-read", "rewrite.signal-read",
+		"rewrite.signal-capture",
+		"rewrite.signal-capture",
+		"rewrite.signal-read",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"rewrite.signal-capture", "rewrite.signal-read",
+		"rewrite.signal-capture", "rewrite.signal-read",
+		"rewrite.signal-capture", "rewrite.signal-read", "rewrite.signal-read",
+		"unsupported.signal-capture", "unsupported.signal-capture",
+		"unsupported.signal-capture",
+	}, findingCodes(result.Findings))
+	plan, err := discovery.Parse("tests/signal_capture.test.gd", result.Output)
+	require.NoError(t, err, "migrated output must satisfy gdtest's static discovery contract")
+	assert.Len(t, plan.Cases, 11)
+
+	again, err := Transform("tests/signal_capture.test.gd", result.Output)
+	require.NoError(t, err)
+	assert.False(t, again.Changed)
+	assert.Equal(t, result.Output, again.Output)
+}
