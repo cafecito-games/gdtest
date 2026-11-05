@@ -95,10 +95,14 @@ func (t *transformer) signalCaptures(tree *ast.File) {
 			continue
 		}
 		for otherKey, group := range groups {
-			if otherKey.text == read.text {
-				group.foreign = "the signal is read outside the test that captures it"
-			} else if otherKey.scope == key.scope && read.property != "" && group.captures[0].member.Property == read.property {
+			sameProperty := read.property != "" && group.captures[0].member.Property == read.property
+			if otherKey.text != read.text && !sameProperty {
+				continue
+			}
+			if otherKey.scope == key.scope {
 				group.foreign = "the signal is also read through another expression in this test"
+			} else {
+				group.foreign = "the signal is read outside the test that captures it"
 			}
 		}
 	}
@@ -238,9 +242,6 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 		return group.foreign
 	}
 	capture := group.captures[0]
-	if t.overlapsRewrite(capture.statement.Span()) {
-		return "the signal capture overlaps another migration rewrite"
-	}
 	if len(capture.call.Arguments) != 2 {
 		return "capture_signal requires a literal argument count to migrate"
 	}
@@ -249,6 +250,9 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 	}
 	if capture.statement == nil || capture.function == nil || !strings.HasPrefix(capture.function.Name, "test_") {
 		return "capture_signal must be a top-level statement of a test_ function"
+	}
+	if t.overlapsRewrite(capture.statement.Span()) {
+		return "the signal capture overlaps another migration rewrite"
 	}
 	owner := capture.member.Object.(*ast.Identifier).Name
 	if reassigns(capture.function, owner) {

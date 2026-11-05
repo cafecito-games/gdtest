@@ -466,6 +466,15 @@ func test_helper_read() -> void:
 	capture_signal(_source.changed, 1)
 	_check()
 
+func test_alias_helper_read() -> void:
+	var source := _source
+	capture_signal(source.changed, 1)
+	_check()
+
+func test_initializer_capture() -> void:
+	var result = capture_signal(_source.other, 1)
+	expect_equal(get_signal_emissions(_source.other).size(), 0)
+
 func _check() -> void:
 	expect_equal(get_signal_emissions(_source.changed).size(), 0)
 `)
@@ -473,6 +482,7 @@ func _check() -> void:
 	require.NoError(t, err)
 	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
 	assert.Contains(t, string(result.Output), "capture_signal(_source.changed, 1)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.other, 1)")
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 	for _, finding := range result.Findings {
 		assert.NotEqual(t, "rewrite.signal-capture", finding.Code)
