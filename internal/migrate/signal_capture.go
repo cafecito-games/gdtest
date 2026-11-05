@@ -323,6 +323,14 @@ func declaredNames(tree *ast.File, function *ast.FunctionDeclaration) map[string
 				for _, parameter := range value.Parameters {
 					names[parameter.Name] = struct{}{}
 				}
+			case *ast.LambdaExpression:
+				for _, parameter := range value.Parameters {
+					names[parameter.Name] = struct{}{}
+				}
+			case *ast.ForStatement:
+				names[value.Variable] = struct{}{}
+			case *ast.SignalDeclaration:
+				names[value.Name] = struct{}{}
 			}
 			return true
 		})

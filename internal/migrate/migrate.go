@@ -288,6 +288,8 @@ func (t *transformer) inheritedAPINameConflicts(tree *ast.File) {
 			for _, parameter := range value.Parameters {
 				report(parameter.Name, value, parameter.NameSpan, true)
 			}
+		case *ast.SignalDeclaration:
+			report(value.Name, value, value.NameSpan, false)
 		case *ast.VariableDeclaration:
 			report(value.Name, value, value.NameSpan, true)
 		case *ast.ForStatement:

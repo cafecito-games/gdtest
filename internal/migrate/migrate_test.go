@@ -522,3 +522,22 @@ func test_local_alias() -> void:
 	assert.Contains(t, string(result.Output), "get_signal_emissions(changed_signal)")
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 }
+
+func TestSignalProbeNamesAvoidLambdaParametersAndRootSignalsReportConflicts(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+signal watch_signal
+
+func test_lambda_parameter() -> void:
+	capture_signal(source.changed, 1)
+	var check := func(changed_probe: Variant) -> void:
+		expect_equal(get_signal_emissions(source.changed).size(), 1)
+	check.call(null)
+`)
+	result, err := Transform("tests/lambda.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.NotContains(t, string(result.Output), "var changed_probe :=")
+	assert.Contains(t, findingCodes(result.Findings), "unsupported.inherited-name-conflict")
+}
