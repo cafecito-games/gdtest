@@ -453,3 +453,28 @@ func TestSignalCapturesConvertOnlyProvenBindingsAndPreserveAmbiguousUses(t *test
 	assert.False(t, again.Changed)
 	assert.Equal(t, result.Output, again.Output)
 }
+
+func TestSignalCapturesPreserveSourceWhenReadsCannotBeAppliedWhole(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func test_fluent() -> void:
+	capture_signal(source.changed, 1)
+	assert_that(get_signal_emissions(source.changed).size()).is_equal_to(0)
+
+func test_helper_read() -> void:
+	capture_signal(_source.changed, 1)
+	_check()
+
+func _check() -> void:
+	expect_equal(get_signal_emissions(_source.changed).size(), 0)
+`)
+	result, err := Transform("tests/blocked.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.changed, 1)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+	for _, finding := range result.Findings {
+		assert.NotEqual(t, "rewrite.signal-capture", finding.Code)
+	}
+}

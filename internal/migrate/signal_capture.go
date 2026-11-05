@@ -44,7 +44,7 @@ type signalRead struct {
 type signalGroup struct {
 	captures []*signalCapture
 	reads    []*signalRead
-	aliased  bool
+	foreign  string
 }
 
 // signalGroupKey scopes a signal expression to the function that names it, so
@@ -95,8 +95,10 @@ func (t *transformer) signalCaptures(tree *ast.File) {
 			continue
 		}
 		for otherKey, group := range groups {
-			if otherKey.scope == key.scope && read.property != "" && group.captures[0].member.Property == read.property {
-				group.aliased = true
+			if otherKey.text == read.text {
+				group.foreign = "the signal is read outside the test that captures it"
+			} else if otherKey.scope == key.scope && read.property != "" && group.captures[0].member.Property == read.property {
+				group.foreign = "the signal is also read through another expression in this test"
 			}
 		}
 	}
@@ -232,10 +234,13 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 	if len(group.captures) != 1 {
 		return "the same signal is captured more than once in this test"
 	}
-	if group.aliased {
-		return "the signal is also read through another expression in this test"
+	if group.foreign != "" {
+		return group.foreign
 	}
 	capture := group.captures[0]
+	if t.overlapsRewrite(capture.statement.Span()) {
+		return "the signal capture overlaps another migration rewrite"
+	}
 	if len(capture.call.Arguments) != 2 {
 		return "capture_signal requires a literal argument count to migrate"
 	}
@@ -250,6 +255,9 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 		return "the signal owner is reassigned inside the test function"
 	}
 	for _, read := range group.reads {
+		if t.overlapsRewrite(read.node.Span()) {
+			return "the signal read overlaps another migration rewrite"
+		}
 		if read.kind == signalReadUnsupported {
 			return "get_signal_emissions is used in an unsupported expression"
 		}
@@ -261,6 +269,17 @@ func (t *transformer) signalGroupBlocker(group *signalGroup) string {
 		}
 	}
 	return signalCaptureUnset
+}
+
+// overlapsRewrite reports whether a span intersects an edit already planned by an
+// earlier pass, which would make the paired conversion impossible to apply whole.
+func (t *transformer) overlapsRewrite(span token.Span) bool {
+	for _, existing := range t.edits {
+		if span.Start.Offset < existing.end && existing.start < span.End.Offset {
+			return true
+		}
+	}
+	return false
 }
 
 func reassigns(function *ast.FunctionDeclaration, name string) bool {
