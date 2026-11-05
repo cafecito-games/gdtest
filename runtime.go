@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cafecito-games/gdtest/internal/version"
 )
 
 // runtimeFiles is the same committed addon tree used by packages.
@@ -39,6 +41,10 @@ func InstallRuntime(project string) error {
 		if err != nil {
 			return fmt.Errorf("read embedded %s: %w", name, err)
 		}
+		data, err = runtimeFileContents(name, data, version.Product)
+		if err != nil {
+			return err
+		}
 		current, err := os.ReadFile(target)
 		if err == nil {
 			if bytes.Equal(current, data) {
@@ -55,6 +61,42 @@ func InstallRuntime(project string) error {
 		}
 		return atomicWrite(target, data, mode)
 	})
+}
+
+const runtimeVersionPrefix = `const PRODUCT_VERSION: String = "`
+
+func runtimeFileContents(name string, data []byte, product string) ([]byte, error) {
+	if filepath.ToSlash(name) != "addons/gdtest/version.gd" {
+		return data, nil
+	}
+	if !validProductVersion(product) {
+		return nil, fmt.Errorf("invalid embedded gdtest product version %q", product)
+	}
+	content := string(data)
+	if strings.Count(content, runtimeVersionPrefix) != 1 {
+		return nil, errors.New("embedded addons/gdtest/version.gd must declare PRODUCT_VERSION exactly once")
+	}
+	valueStart := strings.Index(content, runtimeVersionPrefix) + len(runtimeVersionPrefix)
+	valueEnd := strings.IndexByte(content[valueStart:], '"')
+	if valueEnd < 0 {
+		return nil, errors.New("embedded addons/gdtest/version.gd has an unterminated PRODUCT_VERSION")
+	}
+	valueEnd += valueStart
+	return []byte(content[:valueStart] + product + content[valueEnd:]), nil
+}
+
+func validProductVersion(product string) bool {
+	if product == "" {
+		return false
+	}
+	for _, character := range product {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune(".+-", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func gpmOwnsRuntime(project string) (bool, error) {

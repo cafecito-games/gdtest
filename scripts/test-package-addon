@@ -142,6 +142,22 @@ grep -qF "const PRODUCT_VERSION: String = \"${version}\"" "$host_project/addons/
 binary_version=$("$host_project/addons/gdtest/$host_binary" version)
 grep -qF "$version" <<< "$binary_version" || fail "installed executable does not carry version $version"
 
+# A release binary used as a standalone global tool must install an embedded
+# runtime carrying that same release version, not the repository's development
+# version. This path is separate from the gpm-owned runtime above.
+standalone_project="$work/standalone-project"
+mkdir -p "$standalone_project"
+cat > "$standalone_project/project.godot" <<'EOF'
+config_version=5
+
+[application]
+config/name="gdtest standalone init"
+EOF
+"$host_project/addons/gdtest/$host_binary" init --project "$standalone_project" >/dev/null
+grep -qF "const PRODUCT_VERSION: String = \"${version}\"" \
+    "$standalone_project/addons/gdtest/version.gd" \
+    || fail "standalone init did not install runtime version $version"
+
 # The project-local launcher must be sufficient to authenticate a same-version
 # runtime worker; no globally installed gdtest executable participates.
 if command -v godot >/dev/null 2>&1; then
@@ -163,6 +179,14 @@ EOF
         --project "$host_project" tests/package.test.gd 2>&1) \
         || fail "gpm-installed executable/runtime handshake failed:$'\n'$package_output"
     grep -qF "1 passed" <<< "$package_output" || fail "packaged handshake did not execute the passing test"
+
+	mkdir -p "$standalone_project/tests"
+	cp "$host_project/tests/package.test.gd" "$standalone_project/tests/package.test.gd"
+	standalone_output=$("$host_project/addons/gdtest/$host_binary" run --no-daemon \
+		--project "$standalone_project" tests/package.test.gd 2>&1) \
+		|| fail "standalone initialized runtime handshake failed:$'\n'$standalone_output"
+	grep -qF "1 passed" <<< "$standalone_output" \
+		|| fail "standalone initialized runtime did not execute the passing test"
 
 	cat > "$host_project/tests/package_failure.test.gd" <<'EOF'
 extends GDTest

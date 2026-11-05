@@ -54,6 +54,10 @@ Completed on 2026-11-04 for the current hardening batch:
 - `scripts/package-addon 0.0.0-hardening` and `scripts/test-package-addon 0.0.0-hardening` passed
   with reproducible core/macOS/Linux slices, exact selected-tree reassembly, version handshakes,
   clean first Godot import, and host-only/default/all-platform scratch installs.
+- `scripts/package-addon 0.0.0-audit` and `scripts/test-package-addon 0.0.0-audit` additionally
+  prove that a cross-compiled release binary's standalone `gdtest init` installs its exact embedded
+  runtime version and completes a real worker handshake; the development version cannot leak into
+  a release installation.
 - `GDTEST_PERFORMANCE_SAMPLES=5 scripts/benchmark` passed the size sweeps, 64-session scheduler,
   and real-Godot 10,000-assertion/10,000-dynamic-case corpora.
 - The current migration regression fixture executes three real-Godot cases after rewriting nested
