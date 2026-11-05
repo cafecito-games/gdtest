@@ -466,3 +466,22 @@ func TestAnalyzeAcceptsAbstractPrivateMethodImplementedNearer(t *testing.T) {
 	require.Len(t, model.Methods, 1)
 	assert.Equal(t, "count", model.Methods[0].Name)
 }
+
+func TestAnalyzeRefusesGeneratedInnerClassHidingGlobalClass(t *testing.T) {
+	t.Parallel()
+
+	for name, globalClass := range map[string]string{"controller": "AddMethod", "controls": "GDTestControls"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, diagnostics := analyzeEntry(t, map[string]string{
+				"src/inventory.gd": "extends RefCounted\n\nfunc add() -> int:\n\treturn 0\n",
+				"src/global.gd":    "class_name " + globalClass + "\nextends RefCounted\n",
+			}, entryFor("inventory.gd"))
+
+			require.Len(t, diagnostics, 1)
+			assert.Equal(t, "src/global.gd", diagnostics[0].Path)
+			assert.Equal(t, "class_name "+globalClass+" collides with a class generated inside the double", diagnostics[0].Message)
+		})
+	}
+}

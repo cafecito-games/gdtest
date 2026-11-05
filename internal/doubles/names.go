@@ -2,7 +2,11 @@ package doubles
 
 // reservedMemberNames are declared by every generated double, so a source member
 // with one of these names would collide with the generated declaration.
-var reservedMemberNames = []string{"gdtest", "GDTestControls", "_GDTEST_DOUBLE_PATH"}
+var reservedMemberNames = []string{"gdtest", controlsClassName, "_GDTEST_DOUBLE_PATH"}
+
+// controlsClassName is the inner class every generated double declares to hold
+// its typed method controllers.
+const controlsClassName = "GDTestControls"
 
 // reservedParameterName and reservedParameterPrefix protect the generated
 // members and locals that a doubled method or constructor body refers to.

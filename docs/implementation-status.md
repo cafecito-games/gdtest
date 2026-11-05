@@ -315,3 +315,6 @@ ADR 0009.
   - Caller locations skip only `res://addons/gdtest/`, so a user test under a nested
     `addons/gdtest` directory keeps its line:
     `TestGodotDoubleCallerUnderNestedAddonsDirectoryKeepsItsLocation`.
+  - A project `class_name` equal to a generated inner class (`GDTestControls` or a
+    `<Method>Method` controller) is refused, because Godot 4.7 rejects an inner class that hides a
+    global script class: `TestAnalyzeRefusesGeneratedInnerClassHidingGlobalClass`.

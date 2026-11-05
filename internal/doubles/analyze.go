@@ -317,6 +317,16 @@ func (state *analysis) parameters(owner *script, parameters []ast.Parameter) []P
 }
 
 func (state *analysis) checkMemberNames(controllers map[string]string) {
+	// Godot rejects an inner class that hides a global script class, so every
+	// generated inner class name must be absent from the project's class_names.
+	innerClasses := slices.Sorted(maps.Keys(controllers))
+	innerClasses = append(innerClasses, controlsClassName)
+	for _, name := range innerClasses {
+		if global, exists := state.index.classes[name]; exists {
+			state.diagnostics = append(state.diagnostics, Diagnostic{Path: global.path, Message: fmt.Sprintf(
+				"class_name %s collides with a class generated inside the double", name)})
+		}
+	}
 	for _, owner := range state.chain {
 		for _, declared := range owner.members {
 			_, collides := controllers[declared.name]
