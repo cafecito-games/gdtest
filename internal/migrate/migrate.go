@@ -584,7 +584,7 @@ func (t *transformer) utilitiesAndUnsupported(tree *ast.File) {
 			case "benchmark":
 				t.manualOnce(value.Span(), "unsupported.benchmark", "benchmarks have no gdtest v1 equivalent")
 			case "capture_signal", "get_signal_emissions":
-				if !t.isSignalHandled(value.Span()) {
+				if t.migratingVest && !t.isSignalHandled(value.Span()) {
 					t.manualOnce(value.Span(), signalCaptureCode, signalCaptureUse)
 				}
 			}

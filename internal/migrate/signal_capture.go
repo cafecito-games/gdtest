@@ -59,6 +59,9 @@ type signalGroupKey struct {
 // to case-scoped probes. A signal's capture and every read of it convert together
 // or not at all, so a file never ends up with a probe and a dangling Vest read.
 func (t *transformer) signalCaptures(tree *ast.File) {
+	if !t.migratingVest {
+		return
+	}
 	parents := parentNodes(tree)
 	var captures []*signalCapture
 	var reads []*signalRead
@@ -185,6 +188,13 @@ func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Nod
 		read.kind = signalReadEmissions
 		return read
 	}
+	defer func() {
+		if read.kind != signalReadUnsupported && readIsMutated(read.node, parents) {
+			read.kind = signalReadUnsupported
+			read.node = call
+			read.indexes = nil
+		}
+	}()
 	switch parent := parents[call].(type) {
 	case *ast.MemberExpression:
 		if parent.Object != ast.Expression(call) || parent.Property != "size" {
@@ -216,6 +226,21 @@ func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Nod
 		}
 	}
 	return read
+}
+
+// readIsMutated reports a read whose result is assigned through or used as a
+// method receiver. The probe returns defensive copies, so such a write would no
+// longer change the recorded emission the way it changes Vest's stored array.
+func readIsMutated(node ast.Expression, parents map[ast.Node]ast.Node) bool {
+	switch parent := parents[node].(type) {
+	case *ast.Assignment:
+		return parent.Target == ast.Expression(node)
+	case *ast.MemberExpression:
+		return parent.Object == ast.Expression(node)
+	case *ast.SubscriptExpression:
+		return parent.Object == ast.Expression(node) && readIsMutated(parent, parents)
+	}
+	return false
 }
 
 // nonNegativeIntegerLiteral accepts only indexes whose meaning is identical in GDScript
@@ -321,6 +346,8 @@ func redeclares(function *ast.FunctionDeclaration, name string) bool {
 			}
 		case *ast.ForStatement:
 			shadowed = shadowed || value.Variable == name
+		case *ast.BindingPattern:
+			shadowed = shadowed || value.Name == name
 		}
 		return true
 	})

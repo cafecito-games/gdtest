@@ -563,3 +563,47 @@ func test_negative_index() -> void:
 	assert.Contains(t, string(result.Output), "get_signal_emissions(source.changed)[-1][0]")
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 }
+
+func TestSignalMigrationIsScopedToVestFilesAndRejectsMutatingReads(t *testing.T) {
+	t.Parallel()
+	plain := []byte(`extends Node
+
+func capture_signal(_value: Variant, _count: int) -> void:
+	pass
+
+func test_local_helper() -> void:
+	capture_signal(source.changed, 1)
+`)
+	result, err := Transform("app/helper.gd", plain)
+	require.NoError(t, err)
+	assert.False(t, result.Changed)
+	assert.Empty(t, result.Findings)
+
+	mutated := []byte(`extends VestTest
+
+func test_indexed_write() -> void:
+	var source := Source.new()
+	capture_signal(source.changed, 1)
+	get_signal_emissions(source.changed)[0][1] = 5
+	get_signal_emissions(source.changed)[0].append(6)
+`)
+	mutatedResult, err := Transform("tests/mutated.test.gd", mutated)
+	require.NoError(t, err)
+	assert.Contains(t, string(mutatedResult.Output), "capture_signal(source.changed, 1)")
+	assert.NotContains(t, string(mutatedResult.Output), "watch_signal(")
+
+	matchShadow := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_match_binding() -> void:
+	capture_signal(_source.changed, 1)
+	match Source.new():
+		var _source:
+			expect_equal(get_signal_emissions(_source.changed).size(), 1)
+`)
+	matchResult, err := Transform("tests/match.test.gd", matchShadow)
+	require.NoError(t, err)
+	assert.Contains(t, string(matchResult.Output), "capture_signal(_source.changed, 1)")
+	assert.NotContains(t, string(matchResult.Output), "watch_signal(")
+}
