@@ -222,7 +222,7 @@ the Uzir main worktree remains clean and nothing was pushed.
 Implements `watch_signal` and `GDTestSignalProbe` / `GDTestInvocation` from issue #3, the Vest
 signal-capture migration subset, and the ADR for the renamed probe disconnect method (ADR 0008).
 
-- Real-Godot conformance (`fixtures/godot/api/signal_probes.test.gd`): 13 passing cases cover
+- Real-Godot conformance (`fixtures/godot/api/signal_probes.test.gd`): 14 passing cases cover
   zero- through eight-argument user signals, built-in signal arity, ordered and defensive records,
   sequence numbers, independent probes beside pre-existing connections, manual stop, awaited success
   and timeout, freed owners, and cross-case cleanup on one persistent worker

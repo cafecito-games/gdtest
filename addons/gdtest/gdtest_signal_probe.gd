@@ -131,7 +131,12 @@ func wait_until_count(count: int, timeout_seconds: float = 0.0) -> bool:
 				timeout_seconds
 		).timeout.connect(_on_deadline_expired.bind(deadline_state), CONNECT_ONE_SHOT)
 	while _connected and _emissions.size() < count and not deadline_state["expired"]:
-		await state_changed
+		if not is_instance_valid(_owner):
+			break
+		if timeout_seconds > 0.0 or _tree == null:
+			await state_changed
+		else:
+			await _tree.process_frame
 	return _emissions.size() >= count
 
 

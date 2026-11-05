@@ -262,3 +262,16 @@ func test_nested_arguments_are_snapshotted() -> void:
 	nested[0] = 3
 	expect_equal(probe.arguments_at(0), [[1]])
 	probe.stop_recording()
+
+
+## Returns false instead of waiting forever when the owner is freed during an unbounded wait.
+func test_owner_freed_during_unbounded_wait_returns_false() -> void:
+	var source: SignalSource = SignalSource.new()
+	var probe: GDTestSignalProbe = watch_signal(source.one)
+	var release_later: Callable = func() -> void:
+		await sleep(0.0)
+		source.free()
+	release_later.call()
+	var reached: bool = await probe.wait_until_count(1)
+	expect_false(reached)
+	probe.stop_recording()

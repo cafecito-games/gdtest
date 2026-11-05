@@ -22,8 +22,9 @@ owned by the executing case:
 - Each emission is recorded as an immutable `GDTestInvocation` with a case-local sequence number
   and a defensive argument copy. Every returned collection is a copy.
 - `wait_until_count` wakes on a private probe notification. A deadline timer is created only when
-  the timeout is positive, and a timeout of zero defers to the case timeout, matching the other
-  gdtest waiting helpers.
+  the timeout is positive. A timeout of zero defers to the case timeout, matching the other gdtest
+  waiting helpers; in that unbounded case the wait also checks each frame whether the owner has been
+  freed, because Godot gives plain objects no notification for that.
 - `GDTest._gdtest_end_case` disconnects every probe before the case result is finalized. That path
   runs for passing, failing, timed-out, and canceled cases, so no connection outlives its case.
 - Migration converts a capture only when every read of that signal in the same `test_` function

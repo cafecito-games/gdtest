@@ -96,13 +96,12 @@ func (t *transformer) signalCaptures(tree *ast.File) {
 			continue
 		}
 		for otherKey, group := range groups {
-			sameProperty := read.property != "" && group.captures[0].member.Property == read.property
-			if otherKey.text != read.text && !sameProperty {
+			if otherKey.scope == key.scope {
+				group.foreign = "the test also reads a signal expression without a matching capture, which may be an alias"
 				continue
 			}
-			if otherKey.scope == key.scope {
-				group.foreign = "the signal is also read through another expression in this test"
-			} else {
+			sameProperty := read.property != "" && group.captures[0].member.Property == read.property
+			if otherKey.text == read.text || sameProperty {
 				group.foreign = "the signal is read outside the test that captures it"
 			}
 		}

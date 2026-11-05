@@ -506,3 +506,19 @@ func test_user_helper() -> void:
 	assert.NotContains(t, string(result.Output), "var changed_probe")
 	assert.Contains(t, findingCodes(result.Findings), "unsupported.signal-capture")
 }
+
+func TestSignalCapturesPreserveWhenAnUnmatchedLocalAliasIsRead(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+func test_local_alias() -> void:
+	var changed_signal := source.changed
+	capture_signal(source.changed, 1)
+	expect_equal(get_signal_emissions(changed_signal).size(), 1)
+`)
+	result, err := Transform("tests/alias.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(source.changed, 1)")
+	assert.Contains(t, string(result.Output), "get_signal_emissions(changed_signal)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}

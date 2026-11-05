@@ -100,7 +100,7 @@ func TestGodotSignalProbesLeaveNoConnectionsForLaterCasesOnPersistentWorker(t *t
 	}))
 	require.NoError(t, err)
 	assert.Zero(t, failures)
-	require.Len(t, statuses, 13)
+	require.Len(t, statuses, 14)
 	for id, status := range statuses {
 		assert.Equal(t, "pass", status, "status for %s", id)
 	}
