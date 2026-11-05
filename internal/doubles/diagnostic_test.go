@@ -13,6 +13,13 @@ func TestDiagnosticStringFormatsLocation(t *testing.T) {
 	assert.Equal(t, "src/a.gd:3:7: untyped", diagnostic.String())
 }
 
+func TestDiagnosticStringOmitsMissingLocation(t *testing.T) {
+	t.Parallel()
+
+	diagnostic := Diagnostic{Path: "doubles/a.gd", Message: "refusing to overwrite"}
+	assert.Equal(t, "doubles/a.gd: refusing to overwrite", diagnostic.String())
+}
+
 func TestSortDiagnosticsIsDeterministic(t *testing.T) {
 	t.Parallel()
 

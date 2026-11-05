@@ -17,8 +17,12 @@ type Diagnostic struct {
 	Message string
 }
 
-// String formats the diagnostic as path:line:column: message.
+// String formats the diagnostic as path:line:column: message, or as
+// path: message when it has no source location.
 func (diagnostic Diagnostic) String() string {
+	if diagnostic.Line == 0 {
+		return fmt.Sprintf("%s: %s", diagnostic.Path, diagnostic.Message)
+	}
 	return fmt.Sprintf("%s:%d:%d: %s", diagnostic.Path, diagnostic.Line, diagnostic.Column, diagnostic.Message)
 }
 
