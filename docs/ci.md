@@ -30,6 +30,10 @@ The tag and manual release workflow makes the canonical `scripts/check` job a pr
 packaging. Only the packaging job receives release-write permission, and it cannot upload or
 publish artifacts after a failed source, race, real-engine, or gdkit gate.
 
+The manual Release workflow accepts only a `patch`, `minor`, or `major` choice. It derives strict
+semantic versioning from the latest tag, refuses non-semver history or a moved `main`, performs the
+same package/install verification, and creates the tag and release from the exact verified commit.
+
 The Linux CI jobs install the exact stock Godot 4.7.2 release asset through
 `scripts/install-godot-linux-ci`. The script pins separate SHA-256 identities for x86-64 and
 arm64 and rejects an unexpected engine version. Consequently, the canonical race suite executes

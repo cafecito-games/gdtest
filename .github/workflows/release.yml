@@ -1,14 +1,17 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version without a v prefix"
+      bump:
+        description: "Which semantic version part to bump"
         required: true
-        type: string
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: read
@@ -16,8 +19,47 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release-version.outputs.tag }}
+      version: ${{ steps.release-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require the main branch
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+            echo "::error::Releases must run from main, not $GITHUB_REF_NAME"
+            exit 1
+          fi
+      - name: Compute release version
+        id: release-version
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [[ -z "$latest" ]]; then
+            latest="v0.0.0"
+          fi
+          if [[ ! "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Latest tag '$latest' is not strict vMAJOR.MINOR.PATCH semver"
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]}
+          minor=${BASH_REMATCH[2]}
+          patch=${BASH_REMATCH[3]}
+          case "${{ inputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          tag="v${major}.${minor}.${patch}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "::error::Tag $tag already exists"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
@@ -46,6 +88,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
@@ -59,29 +103,32 @@ jobs:
           sudo apt-get install -y -qq libfontconfig1
           scripts/install-godot-linux-ci "$RUNNER_TEMP/godot-bin/godot"
           echo "$RUNNER_TEMP/godot-bin" >> "$GITHUB_PATH"
-      - name: Resolve release version
-        id: version
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="$INPUT_VERSION"
-          fi
-          [[ -n "$version" && "$version" != *[!0-9A-Za-z.+-]* ]]
-          echo "value=$version" >> "$GITHUB_OUTPUT"
       - name: Build and verify sliced addon
         run: |
-          scripts/package-addon "${{ steps.version.outputs.value }}"
-          scripts/test-package-addon "${{ steps.version.outputs.value }}"
+          set -euo pipefail
+          scripts/package-addon "${{ needs.quality.outputs.version }}"
+          scripts/test-package-addon "${{ needs.quality.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: gdtest-${{ steps.version.outputs.value }}-gpm
+          name: gdtest-${{ needs.quality.outputs.version }}-gpm
           path: dist/*
           if-no-files-found: error
       - name: Publish one atomic release asset set
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          RELEASE_TAG: ${{ needs.quality.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "::error::main advanced after this release started; rerun from the new head"
+            exit 1
+          fi
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $RELEASE_TAG already exists"
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
+            --generate-notes
