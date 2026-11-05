@@ -650,3 +650,26 @@ func test_self_reassignment() -> void:
 	assert.Contains(t, string(result.Output), "capture_signal(_source.second, 0)")
 	assert.NotContains(t, string(result.Output), "watch_signal(")
 }
+
+func TestLambdaReadsAndNonAssertionHelpersArePreserved(t *testing.T) {
+	t.Parallel()
+	source := []byte(`extends VestTest
+
+var _source := Source.new()
+
+func test_escaping_lambda() -> void:
+	capture_signal(_source.escaping, 0)
+	var later := func() -> void:
+		expect_equal(get_signal_emissions(_source.escaping).size(), 0)
+	later.call()
+
+func test_helper_mutation() -> void:
+	capture_signal(_source.helper, 1)
+	mutate_emission(get_signal_emissions(_source.helper)[0])
+`)
+	result, err := Transform("tests/escaping.test.gd", source)
+	require.NoError(t, err)
+	assert.Contains(t, string(result.Output), "capture_signal(_source.escaping, 0)")
+	assert.Contains(t, string(result.Output), "capture_signal(_source.helper, 1)")
+	assert.NotContains(t, string(result.Output), "watch_signal(")
+}

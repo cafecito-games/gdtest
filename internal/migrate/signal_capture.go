@@ -178,7 +178,7 @@ func (t *transformer) classifyCapture(call *ast.CallExpression, parents map[ast.
 
 func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Node]ast.Node) *signalRead {
 	read := &signalRead{call: call, node: call}
-	if len(call.Arguments) != 1 {
+	if len(call.Arguments) != 1 || insideLambda(call, parents) {
 		return read
 	}
 	read.text = t.text(call.Arguments[0].Span())
@@ -231,6 +231,24 @@ func (t *transformer) classifyRead(call *ast.CallExpression, parents map[ast.Nod
 	return read
 }
 
+// gdtestAssertionNames are the GDTest assertions that compare a value and never keep a reference to it.
+var gdtestAssertionNames = map[string]bool{
+	"expect": true, "expect_not": true, "expect_true": true, "expect_false": true,
+	"expect_equal": true, "expect_not_equal": true, "expect_same": true, "expect_not_same": true,
+	"expect_approx": true, "expect_not_approx": true, "expect_null": true, "expect_not_null": true,
+	"expect_empty": true, "expect_not_empty": true, "expect_contains": true, "expect_does_not_contain": true,
+}
+
+// insideLambda reports whether a read is evaluated by a lambda, which may outlive the case.
+func insideLambda(node ast.Node, parents map[ast.Node]ast.Node) bool {
+	for current := parents[node]; current != nil; current = parents[current] {
+		if _, ok := current.(*ast.LambdaExpression); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // readIsConsumedWithoutAlias accepts an indexed read only when its value is passed
 // to an expect_* assertion or combined by an operator. Those consumers never keep a
 // mutable reference, so the probe's defensive copy is indistinguishable from Vest's
@@ -240,7 +258,7 @@ func readIsConsumedWithoutAlias(node ast.Expression, parents map[ast.Node]ast.No
 	switch parent := parents[node].(type) {
 	case *ast.CallExpression:
 		name, ok := parent.Callee.(*ast.Identifier)
-		if !ok || !strings.HasPrefix(name.Name, "expect") {
+		if !ok || !gdtestAssertionNames[name.Name] {
 			return false
 		}
 		for _, argument := range parent.Arguments {
