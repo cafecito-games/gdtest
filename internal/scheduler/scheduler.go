@@ -275,6 +275,39 @@ func (s *Scheduler) AdvanceGeneration(session string, generation uint64) {
 	}
 }
 
+// Retire permanently rejects queued and future work for session and forgets
+// its queue. Active work is allowed to finish. Callers must use a fresh session
+// key for any later incarnation of the same project session: a retired key
+// never accepts work again.
+func (s *Scheduler) Retire(session string) {
+	if session == "" {
+		return
+	}
+	s.AdvanceGeneration(session, ^uint64(0))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	queue := s.sessions[session]
+	if queue == nil || len(queue.interactive) != 0 || len(queue.background) != 0 {
+		return
+	}
+	delete(s.sessions, session)
+	for index, candidate := range s.order {
+		if candidate == session {
+			s.order = append(s.order[:index], s.order[index+1:]...)
+			break
+		}
+	}
+	if s.lastSession == session {
+		s.lastSession = ""
+	}
+	if len(s.order) == 0 {
+		s.cursor = 0
+	} else {
+		s.cursor %= len(s.order)
+	}
+	s.rebaseCursorLocked()
+}
+
 // Stats returns resource use and queue depth.
 func (s *Scheduler) Stats() Stats {
 	s.mu.Lock()

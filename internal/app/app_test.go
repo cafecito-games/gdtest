@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -480,4 +481,21 @@ func newTestProject(t *testing.T) string {
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "project.godot"), []byte("[application]\n"), 0o600))
 	return root
+}
+
+func TestStaleGenerationErrorsAreRetryableAsDaemonText(t *testing.T) {
+	t.Parallel()
+	// Daemon errors reach the client as text, and multi-file runs join one
+	// error per rejected file, so recognition must survive both.
+	retryable := []string{
+		"source generation changed from 1 to 2; rediscover and retry",
+		"project session was retired before its work ran; rediscover and retry",
+		"source generation changed from 3 to 4; rediscover and retry\ncontext canceled",
+	}
+	for _, message := range retryable {
+		assert.True(t, isStaleGenerationError(errors.New(message)), message)
+	}
+	assert.False(t, isStaleGenerationError(errors.New("work belongs to an obsolete generation")))
+	assert.False(t, isStaleGenerationError(errors.New("worker exited")))
+	assert.False(t, isStaleGenerationError(nil))
 }

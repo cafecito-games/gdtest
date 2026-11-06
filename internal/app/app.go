@@ -570,7 +570,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		ctx, root, projectConfig, discoveryManifest, sessionID, options.noDaemon, streams, timings,
 	)
 	if err != nil {
-		if isStaleGenerationError(err) && options.staleRetry == 0 {
+		if isStaleGenerationError(err) && options.staleRetry < maxStaleRetries {
 			options.staleRetry++
 			return runTests(ctx, options, streams)
 		}
@@ -643,7 +643,10 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		if errors.Is(err, context.Canceled) {
 			return ExitCanceled
 		}
-		if isStaleGenerationError(err) && options.staleRetry == 0 {
+		if isStaleGenerationError(err) && options.staleRetry < maxStaleRetries {
+			// Results already streamed belong to the abandoned plan; say so
+			// before the re-planned run reports again.
+			_, _ = fmt.Fprintln(streams.Err, "gdtest: project sources changed during the run; re-planning against the current generation")
 			options.staleRetry++
 			return runTests(ctx, options, streams)
 		}
@@ -819,7 +822,7 @@ func runBenchmarks(ctx context.Context, options benchmarkOptions, streams IO) in
 		if errors.Is(err, context.Canceled) {
 			return ExitCanceled
 		}
-		if isStaleGenerationError(err) && options.staleRetry == 0 {
+		if isStaleGenerationError(err) && options.staleRetry < maxStaleRetries {
 			options.staleRetry++
 			return runBenchmarks(ctx, options, streams)
 		}
@@ -827,7 +830,7 @@ func runBenchmarks(ctx context.Context, options benchmarkOptions, streams IO) in
 		return ExitError
 	}
 	if stale {
-		if options.staleRetry == 0 {
+		if options.staleRetry < maxStaleRetries {
 			options.staleRetry++
 			return runBenchmarks(ctx, options, streams)
 		}
@@ -1141,9 +1144,18 @@ func writeTimings(streams IO, timings map[string]time.Duration, machine bool) er
 	return nil
 }
 
+// maxStaleRetries bounds how many times one invocation re-plans after the
+// project's sources change under it. Godot can write sidecar files (such as
+// .uid files for new scripts) while discovering or running, so a single edit
+// can legitimately advance the generation more than once.
+const maxStaleRetries = 3
+
+// isStaleGenerationError reports a daemon rejection of work planned against an
+// older source generation, including work fenced by the scheduler. Errors cross
+// the daemon protocol as text, and runs over several files may join several
+// such errors, so this matches the shared suffix anywhere in the message.
 func isStaleGenerationError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "source generation changed from ") &&
-		strings.Contains(err.Error(), "; rediscover and retry")
+	return err != nil && strings.Contains(err.Error(), service.StaleGenerationSuffix)
 }
 
 func listTests(ctx context.Context, options listOptions, streams IO) error {
