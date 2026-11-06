@@ -2,6 +2,7 @@ package dynamic
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,6 +65,57 @@ func TestLoadOrComputeRefusesAndRecomputesCorruptPayload(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, hit)
 	assert.Equal(t, testManifest(), manifest)
+}
+
+func TestLoadOrComputeDoesNotCacheDiscoveryErrors(t *testing.T) {
+	t.Parallel()
+	store, err := cache.Open(t.TempDir(), 1<<20)
+	require.NoError(t, err)
+	identity := testIdentity()
+
+	manifest, hit, err := LoadOrCompute(context.Background(), store, identity, func(context.Context) (model.DiscoveryManifest, error) {
+		return testErrorManifest(), nil
+	})
+	require.NoError(t, err)
+	assert.False(t, hit)
+	assert.Equal(t, testErrorManifest(), manifest)
+
+	computed := 0
+	manifest, hit, err = LoadOrCompute(context.Background(), store, identity, func(context.Context) (model.DiscoveryManifest, error) {
+		computed++
+		return testManifest(), nil
+	})
+	require.NoError(t, err)
+	assert.False(t, hit)
+	assert.Equal(t, testManifest(), manifest)
+	assert.Equal(t, 1, computed)
+
+	manifest, hit, err = LoadOrCompute(context.Background(), store, identity, nil)
+	require.NoError(t, err)
+	assert.True(t, hit)
+	assert.Equal(t, testManifest(), manifest)
+}
+
+func TestLoadOrComputeReplacesCachedDiscoveryErrors(t *testing.T) {
+	t.Parallel()
+	store, err := cache.Open(t.TempDir(), 1<<20)
+	require.NoError(t, err)
+	identity := testIdentity()
+	key, err := Key(identity)
+	require.NoError(t, err)
+	data, err := json.Marshal(testErrorManifest())
+	require.NoError(t, err)
+	require.NoError(t, store.Put(context.Background(), key, data))
+
+	computed := 0
+	manifest, hit, err := LoadOrCompute(context.Background(), store, identity, func(context.Context) (model.DiscoveryManifest, error) {
+		computed++
+		return testManifest(), nil
+	})
+	require.NoError(t, err)
+	assert.False(t, hit)
+	assert.Equal(t, testManifest(), manifest)
+	assert.Equal(t, 1, computed)
 }
 
 func TestKeyIncludesEveryCompatibilityInput(t *testing.T) {
@@ -135,6 +187,17 @@ func testManifest() model.DiscoveryManifest {
 				ID: "tests/example.test.gd::test_value", Name: "value",
 				File: "tests/example.test.gd",
 			}},
+		}},
+	}
+}
+
+func testErrorManifest() model.DiscoveryManifest {
+	return model.DiscoveryManifest{
+		ProtocolVersion: model.ProtocolVersion, Generation: 1, ContentFingerprint: "content-a",
+		Files: []model.DiscoveryFile{{Path: "tests/example.test.gd", Name: "tests/example.test.gd", Line: 1}},
+		Errors: []model.DiscoveryError{{
+			Code: "worker.script_load", Message: "unable to load test script",
+			Location: &model.Location{File: "tests/example.test.gd", Line: -1},
 		}},
 	}
 }

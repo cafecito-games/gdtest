@@ -20,6 +20,20 @@ const schemaVersion = "dynamic-manifest-v1"
 
 var ErrInvalidManifest = errors.New("invalid dynamic discovery manifest")
 
+var errManifestHasDiscoveryErrors = errors.New("dynamic discovery manifest contains errors")
+
+type uncacheableManifestError struct {
+	manifest model.DiscoveryManifest
+}
+
+func (err *uncacheableManifestError) Error() string {
+	return errManifestHasDiscoveryErrors.Error()
+}
+
+func (err *uncacheableManifestError) Unwrap() error {
+	return errManifestHasDiscoveryErrors
+}
+
 // Identity contains every semantic input to engine-dependent discovery.
 type Identity struct {
 	ToolVersion        string
@@ -68,13 +82,17 @@ func LoadOrCompute(
 		return model.DiscoveryManifest{}, false, getErr
 	} else if hit {
 		manifest, decodeErr := decode(data, identity.ContentFingerprint)
-		if decodeErr == nil {
+		if decodeErr == nil && len(manifest.Errors) == 0 {
 			// Generation is live session metadata, not semantic cache identity.
 			manifest.Generation = identity.Generation
 			return manifest, true, nil
 		}
+		if decodeErr == nil {
+			decodeErr = errManifestHasDiscoveryErrors
+		}
 		// The generic cache envelope is intact, but its application payload is
-		// unusable. Refuse the value and remove it before the coalesced rebuild.
+		// unusable or records a failed discovery attempt. Refuse the value and
+		// remove it before the coalesced rebuild.
 		if deleteErr := store.Delete(ctx, key); deleteErr != nil {
 			return model.DiscoveryManifest{}, false, errors.Join(decodeErr, deleteErr)
 		}
@@ -98,9 +116,19 @@ func LoadOrCompute(
 				identity.Generation,
 			)
 		}
+		// Discovery diagnostics describe this attempt, not the semantic input.
+		// Return them to the caller without publishing a failure that would hide
+		// later recovery under the same cache identity.
+		if len(manifest.Errors) > 0 {
+			return nil, &uncacheableManifestError{manifest: manifest}
+		}
 		return json.Marshal(manifest)
 	})
 	if err != nil {
+		var uncacheable *uncacheableManifestError
+		if errors.As(err, &uncacheable) {
+			return uncacheable.manifest, false, nil
+		}
 		return model.DiscoveryManifest{}, false, err
 	}
 	manifest, err := decode(data, identity.ContentFingerprint)
