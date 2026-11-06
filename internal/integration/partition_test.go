@@ -1,13 +1,21 @@
 package integration_test
 
 import (
+	"context"
+	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cafecito-games/gdtest/internal/app"
+	"github.com/cafecito-games/gdtest/internal/daemon"
+	"github.com/cafecito-games/gdtest/internal/discovery"
+	"github.com/cafecito-games/gdtest/internal/model"
+	"github.com/cafecito-games/gdtest/internal/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -162,4 +170,96 @@ func TestCLIPartitionSuiteEmptySelectionSucceedsAndJUnitMergesShards(t *testing.
 	assert.Equal(t, "tests/big.test.gd", document.Suites[0].Name)
 	assert.Len(t, document.Suites[0].TestCases, 36)
 	assert.True(t, strings.Contains(string(reportData), "tests/big.test.gd"))
+}
+
+func TestRealGodotShardsOneFileAcrossPersistentDaemonLanes(t *testing.T) {
+	const source = `extends GDTest
+
+func test_alpha() -> void:
+	await sleep(0.05)
+	expect_true(true)
+
+func test_beta() -> void:
+	await sleep(0.05)
+	expect_true(true)
+`
+	root := setupTempGodotProject(
+		t, "", "", map[string]string{"tests/sharded.test.gd": source},
+	)
+	file, err := discovery.Parse("tests/sharded.test.gd", []byte(source))
+	require.NoError(t, err)
+	require.Len(t, file.Cases, 2)
+	shards := make([]model.FilePlan, 0, len(file.Cases))
+	for _, testCase := range file.Cases {
+		entry := file
+		entry.CaseIDs = []string{testCase.ID}
+		shards = append(shards, entry)
+	}
+
+	sessions := service.NewSessionServiceWithOptions(service.ServiceOptions{MaxWorkers: 2})
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		assert.NoError(t, sessions.Close(closeCtx))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	generation := uint64(1)
+	for attempt := range 2 {
+		warmPayload, marshalErr := json.Marshal(service.WarmRequest{
+			SessionID: "real-sharded-lanes", Project: root, Godot: "godot", Generation: generation,
+		})
+		require.NoError(t, marshalErr)
+		warmResponse, warmErr := sessions.Handle(ctx, daemon.Request{
+			ID: fmt.Sprintf("real-sharded-warm-%d", attempt), Method: "session.warm", Payload: warmPayload,
+		}, nil)
+		require.NoError(t, warmErr)
+		warmValues, ok := warmResponse.(map[string]any)
+		require.True(t, ok)
+		generation, ok = warmValues["generation"].(uint64)
+		require.True(t, ok)
+	}
+
+	run := func(runID string) []int {
+		payload, marshalErr := json.Marshal(service.RunRequest{
+			SessionID: "real-sharded-lanes", Project: root, Godot: "godot",
+			Jobs: 2, WorkerMaxRuns: 100,
+			Plan: model.TestPlan{
+				ProtocolVersion: model.ProtocolVersion, RunID: runID, Generation: generation,
+				Files: shards,
+			},
+		})
+		require.NoError(t, marshalErr)
+		statuses := make(map[string]string)
+		response, handleErr := sessions.Handle(ctx, daemon.Request{
+			ID: runID, Method: "session.run", Payload: payload,
+		}, func(value any) error {
+			event, ok := value.(model.Event)
+			if !ok {
+				return fmt.Errorf("unexpected event %T", value)
+			}
+			if event.Type == model.EventCaseFinished {
+				statuses[event.TestID] = event.Status
+			}
+			return nil
+		})
+		require.NoError(t, handleErr)
+		assert.Equal(t, map[string]string{
+			file.Cases[0].ID: "pass",
+			file.Cases[1].ID: "pass",
+		}, statuses)
+		values, ok := response.(map[string]any)
+		require.True(t, ok)
+		pids, ok := values["worker_pids"].([]int)
+		require.True(t, ok)
+		require.Len(t, pids, 2)
+		assert.NotEqual(t, pids[0], pids[1], "each same-path shard uses a distinct real process")
+		return pids
+	}
+
+	firstPIDs := run("real-sharded-first")
+	assert.Equal(t, 2, sessions.WorkerCount())
+	secondPIDs := run("real-sharded-second")
+	assert.ElementsMatch(t, firstPIDs, secondPIDs, "the second run reuses both real worker lanes")
+	assert.Equal(t, 2, sessions.WorkerCount())
 }

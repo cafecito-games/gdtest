@@ -1,6 +1,8 @@
 package app
 
 import (
+	"strings"
+
 	"github.com/cafecito-games/gdtest/internal/executor"
 	"github.com/cafecito-games/gdtest/internal/model"
 	"github.com/cafecito-games/gdtest/internal/shard"
@@ -179,16 +181,39 @@ func newShardedFileEventSink(inner executor.EventSink, sharded map[string]struct
 }
 
 func (s *shardedFileEventSink) Emit(event model.Event) error {
-	if event.Type != model.EventWorkerError || event.Location == nil {
+	if event.Type != model.EventWorkerError {
 		return s.inner.Emit(event)
 	}
-	if _, isSharded := s.sharded[event.Location.File]; !isSharded {
+	file := workerErrorFile(event)
+	if _, isSharded := s.sharded[file]; !isSharded {
 		return s.inner.Emit(event)
 	}
-	key := event.Location.File + "\x00" + event.Name + "\x00" + event.Message
+	key := file + "\x00" + event.Name + "\x00" + event.Message
 	if _, duplicate := s.seen[key]; duplicate {
 		return nil
 	}
 	s.seen[key] = struct{}{}
 	return s.inner.Emit(event)
+}
+
+// workerErrorFile returns the project-relative file carried by a diagnostic.
+// Script-load and invalid-test errors predate structured locations on the
+// worker_error payload, so retain their stable message forms as a narrow
+// compatibility fallback until the next worker-protocol revision.
+func workerErrorFile(event model.Event) string {
+	if event.Location != nil {
+		return event.Location.File
+	}
+	var file string
+	var matched bool
+	switch event.Name {
+	case "worker.script_load":
+		file, matched = strings.CutPrefix(event.Message, "unable to load test script ")
+	case "worker.invalid_test":
+		file, matched = strings.CutSuffix(event.Message, " does not extend GDTest")
+	}
+	if !matched {
+		return ""
+	}
+	return strings.TrimPrefix(file, "res://")
 }

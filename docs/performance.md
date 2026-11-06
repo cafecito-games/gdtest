@@ -80,7 +80,6 @@ file fan-out already supplies enough work, the corrected planner emits no extra 
 `MinCasesPerShard = 16` remains a local floor; the run-wide target is the important guard against
 oversharding. These figures are observational, not asserted thresholds.
 
-
 A prior complete verification run on the same machine passed every corpus but became heavily
 contended while unrelated Swift builds were active. It observed a full-CLI median/p95 of
 110.5/168.0 ms and a direct daemon/worker median/p95 of 55.5/132.0 ms; even the 10,000-case

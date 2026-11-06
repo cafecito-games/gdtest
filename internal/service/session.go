@@ -137,7 +137,7 @@ type SessionInfo struct {
 	LastUsed   time.Time `json:"last_used"`
 }
 
-// SessionService implements daemon operations with one persistent worker per live project.
+// SessionService implements daemon operations with a globally bounded persistent worker pool.
 type SessionService struct {
 	mu               sync.Mutex
 	sessions         map[string]*session

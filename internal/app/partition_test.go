@@ -247,6 +247,10 @@ func TestShardedFileEventSinkDeduplicatesWorkerErrorsPerShardedFile(t *testing.T
 		{Type: model.EventWorkerError, Name: "worker.script_load",
 			Message:  "unable to load test script big.test.gd",
 			Location: &model.Location{File: "big.test.gd"}},
+		{Type: model.EventWorkerError, Name: "worker.script_load",
+			Message: "unable to load test script res://big.test.gd"},
+		{Type: model.EventWorkerError, Name: "worker.script_load",
+			Message: "unable to load test script res://big.test.gd"},
 		{Type: model.EventCaseFinished, TestID: "big.test.gd::test_one", Status: "pass",
 			Location: &model.Location{File: "big.test.gd"}},
 	}
@@ -254,10 +258,11 @@ func TestShardedFileEventSinkDeduplicatesWorkerErrorsPerShardedFile(t *testing.T
 		require.NoError(t, sink.Emit(event))
 	}
 
-	require.Len(t, forwarded, 4)
+	require.Len(t, forwarded, 5)
 	assert.Equal(t, "big.test.gd", forwarded[0].Location.File)
 	assert.Equal(t, "other.test.gd", forwarded[1].Location.File)
 	assert.Equal(t, "another diagnostic", forwarded[2].Message)
-	assert.Equal(t, model.EventCaseFinished, forwarded[3].Type,
+	assert.Equal(t, "unable to load test script res://big.test.gd", forwarded[3].Message)
+	assert.Equal(t, model.EventCaseFinished, forwarded[4].Type,
 		"non-worker_error events pass through untouched")
 }
