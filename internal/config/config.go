@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cafecito-games/gdtest/internal/model"
+	"github.com/cafecito-games/gdtest/internal/shard"
 )
 
 // Filename is the optional project configuration file.
@@ -54,6 +55,7 @@ type Project struct {
 	WorkerIdleTimeout Duration     `json:"worker_idle_timeout"`
 	WorkerMaxRuns     int          `json:"worker_max_runs"`
 	OnlyMode          string       `json:"only_mode"`
+	Partition         string       `json:"partition"`
 	LeakCheck         LeakCheck    `json:"leak_check"`
 	TestDoubles       []TestDouble `json:"test_doubles"`
 }
@@ -149,6 +151,7 @@ func Defaults() Project {
 		WorkerIdleTimeout: Duration(2 * time.Minute),
 		WorkerMaxRuns:     100,
 		OnlyMode:          "auto",
+		Partition:         "file",
 		LeakCheck:         LeakCheck{Policy: "fail"},
 	}
 }
@@ -217,6 +220,11 @@ func (c Project) Validate() error {
 	case "auto", "ignore", "require", "forbid":
 	default:
 		return fmt.Errorf("only_mode %q must be auto, ignore, require, or forbid", c.OnlyMode)
+	}
+	switch c.Partition {
+	case shard.ModeFile, shard.ModeSuite, shard.ModeCase:
+	default:
+		return fmt.Errorf("partition %q must be %s, %s, or %s", c.Partition, shard.ModeFile, shard.ModeSuite, shard.ModeCase)
 	}
 	if err := validateLeakCheck(c.LeakCheck); err != nil {
 		return err

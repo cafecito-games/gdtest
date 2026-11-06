@@ -25,22 +25,26 @@ import (
 )
 
 type fakeWorker struct {
-	pid          int
-	generation   uint64
-	runs         int
-	benches      int
-	discovers    int
-	resets       int
-	closed       atomic.Bool
-	runHook      func(model.TestPlan, executor.EventSink) error
-	benchHook    func(model.BenchmarkPlan, executor.BenchmarkEventSink) error
-	discoverHook func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
-	resetErr     error
-	startupTime  map[string]int64
+	pid            int
+	generation     uint64
+	runs           int
+	benches        int
+	discovers      int
+	resets         int
+	closed         atomic.Bool
+	runHook        func(model.TestPlan, executor.EventSink) error
+	runContextHook func(context.Context, model.TestPlan, executor.EventSink) error
+	benchHook      func(model.BenchmarkPlan, executor.BenchmarkEventSink) error
+	discoverHook   func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
+	resetErr       error
+	startupTime    map[string]int64
 }
 
-func (f *fakeWorker) Run(_ context.Context, plan model.TestPlan, sink executor.EventSink) error {
+func (f *fakeWorker) Run(ctx context.Context, plan model.TestPlan, sink executor.EventSink) error {
 	f.runs++
+	if f.runContextHook != nil {
+		return f.runContextHook(ctx, plan, sink)
+	}
 	if f.runHook != nil {
 		return f.runHook(plan, sink)
 	}

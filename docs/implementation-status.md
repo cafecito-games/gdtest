@@ -571,3 +571,68 @@ serialize byte-identically to version 3.
     `has_focus` overrides per-worker computation in both directions (`only_mode: "require"` with
     `has_focus: false` fires the policy error exactly once), and an explicit empty `case_ids`
     selects nothing and runs no hooks.
+
+## Suite- and case-level partitioning (issue #24)
+
+Milestone 2 of the test-file sharding design (epic #26). Large selected files — and
+single-file projects — now fan out across workers as same-path shards when
+`partition` is enabled, with hook semantics preserved per mode and default behavior
+byte-identical. See ADR 0011.
+
+- Partitioner (`internal/shard`): pure and deterministic; the suite cut rule forbids a
+  boundary any non-root suite spans, `case` mode cuts anywhere, greedy packing targets
+  `ceil(total/shard_count)` with `shard_count = min(jobs, legal cuts + 1)`,
+  `MinCasesPerShard = 16`, and the output is proven pairwise disjoint and
+  order-covering with a fallback to the unsplit file.
+- Configuration (`internal/config`): `gdtest.json` gains `"partition"` (`"file"` default,
+  `"suite"`, `"case"`), strictly decoded and validated; unknown values are configuration
+  errors (exit 2).
+- CLI (`internal/app`): `gdtest run --partition <mode>` (and `watch`) overrides the
+  configured value, validated before project access following the `--jobs` pattern;
+  `--jobs` help now covers files and shards.
+- App wiring (`internal/app/partition.go`): focus is resolved app-side (non-only cases
+  dropped per file mirroring the worker filter), `plan.HasFocus` is stamped so every
+  shard applies one decision, `only_mode` `require`/`forbid` violations are pre-flighted
+  exactly once before partitioning, plan files are built from shards with per-entry
+  `case_ids` while `selected_ids` stays the selection union driving report order, and the
+  event sink dedupes repeated `worker_error` diagnostics across shards of one file by
+  (file, name, message).
+- Service (`internal/service`): no scheduler changes; `run_finished` metadata now carries
+  `"files"` (distinct paths) and `"shards"` (dispatched entries). A latent data race on
+  the multi-file failure path — a canceled `future.Wait` could return while the submitted
+  operation still mutated worker-lane state — is fixed by draining the future in
+  `schedule` before returning.
+- Documentation: ADR 0011, spec.md sections 9 and 13, and api-spec.md section 8.2 (mode
+  table, config and flag, hook guarantees, and a runnable example).
+- Verification:
+  - `internal/shard`: table tests for the cut rule (adjacent, nested, root-only static
+    cases, parameterized rows), packing thresholds, the jobs bound, and the
+    fallback-to-unsplit path on duplicate IDs; a deterministic property test covers
+    determinism, disjointness, union coverage, order preservation, and no suite spanning
+    a shard boundary in suite mode.
+  - `internal/config`: valid modes accepted, `file` default when absent, unknown values
+    rejected.
+  - `internal/service`: shards of one file occupy separate lanes, exactly one
+    `run_started`/`run_finished` pair, `files`/`shards` metadata, and a failing shard
+    fails the run while its sibling observes cancellation.
+  - `internal/app`: plan construction (per-entry `case_ids`, union `selected_ids`,
+    stamped `has_focus`, unselected entries preserved), app-side focus resolution under
+    `auto`/`ignore`, policy pre-flight messages shared with the worker contract, and the
+    deduplicating sink.
+  - Real Godot (`internal/worker/partition_godot_test.go` on
+    `fixtures/godot/api/partitioning.test.gd`): a suite-partitioned run's per-case
+    statuses equal the unsharded run with `before_all` once per shard, and case mode
+    splits a two-suite file with every case still observing its suite hooks.
+  - CLI integration (`internal/integration/partition_test.go`, `--no-daemon` serial
+    parity): sharded totals, statuses, and report ordering match the unpartitioned run;
+    config and flag precedence including exit 2 for invalid values; an empty selection
+    still succeeds; JUnit merges a file's shards under one suite.
+  - Consumer verification (2026-11-06): the branch was packaged with
+    `scripts/package-addon 0.0.0-issue-24` and installed into a disposable copy of the
+    Uzir client project through the real consumer path (`gpm install`, host-only, as
+    Uzir's CI does). Its full suite — 676 files, 8161 cases, `--only forbid
+    --fail-on-skip --fail-on-todo --fail-on-void` — passed with exit 0 in file mode,
+    `--partition suite`, `--partition case`, and suite with `--jobs 8`; per-case
+    statuses were byte-identical across all four runs, and `run_finished` metadata
+    confirmed real shard dispatch (676 files → 1048 shards at the four-worker default,
+    1463 at the eight-shard bound).

@@ -313,6 +313,7 @@ The initial schema should cover:
   "worker_idle_timeout": "2m",
   "worker_max_runs": 100,
   "only_mode": "auto",
+  "partition": "file",
   "leak_check": {
     "policy": "fail",
     "ignore": []
@@ -323,6 +324,16 @@ The initial schema should cover:
 `jobs: 0` means automatic, subject to the daemon's global limit. Project
 configuration may request less concurrency but may not bypass the global
 limit.
+
+`partition` selects how large test files are scheduled across workers:
+`"file"` (default) never splits a file; `"suite"` splits only between cases
+that share no nested suite, so suite hooks keep their serial semantics;
+`"case"` splits anywhere, relaxing suite hooks to once per shard containing
+that suite's cases. Files with at most 16 selected cases are never split, and
+`before_all`/`after_all` run once per shard in every partitioned mode. The
+`--partition` flag overrides the configured value. Section 8.2 of
+`api-spec.md` defines the author-facing guarantees; ADR 0011 records the
+decision.
 
 `test_doubles` lists the generated typed test doubles that `gdtest generate
 doubles` owns. It is an array of strict entries:
@@ -702,8 +713,10 @@ Scheduling requirements:
 - Prefer interactive `run` requests over background warming and watching.
 - Cap background warmups.
 - Cancel queued warmups when their generation becomes obsolete.
-- Use file-level work units initially; cases from one file stay in the same
-  worker unless a future manifest proves splitting is safe.
+- Use file-level work units by default; a project may enable intra-file
+  partitioning (`partition: "suite"` or `"case"`), which splits one file's
+  selected cases into same-path units proven safe by the completed discovery
+  manifest's stable IDs and suite chains. See ADR 0011.
 - Preserve deterministic report ordering independently of execution order.
 
 A weighted fair queue or similarly simple policy is sufficient. The behavior

@@ -524,10 +524,15 @@ func (s *SessionService) runFiles(
 	eventTimings := make(map[string]int64, len(aggregateTimings)+1)
 	mergeMaximumTimings(eventTimings, aggregateTimings)
 	eventTimings["daemon_total"] = time.Since(submitted).Nanoseconds()
+	distinctPaths := make(map[string]struct{}, len(request.Plan.Files))
+	for _, file := range request.Plan.Files {
+		distinctPaths[file.Path] = struct{}{}
+	}
 	metadata := map[string]any{
 		"requested_generation": request.Plan.Generation,
 		"current_generation":   currentGeneration,
-		"files":                len(request.Plan.Files),
+		"files":                len(distinctPaths),
+		"shards":               len(request.Plan.Files),
 		"jobs":                 jobs,
 		"timings_ns":           eventTimings,
 	}
@@ -814,6 +819,10 @@ func (s *SessionService) schedule(
 	})
 	result, err := future.Wait(ctx)
 	if err != nil {
+		// A canceled wait does not stop the submitted operation, which may
+		// still be mutating session or worker-lane state. Drain the future so
+		// no operation outlives this call and races its caller.
+		_, _ = future.Wait(context.Background())
 		return nil, err
 	}
 	if errors.Is(result.Err, scheduler.ErrObsoleteGeneration) {

@@ -18,7 +18,30 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "godot", config.Godot)
 	assert.Len(t, config.Tests, 1)
 	assert.Equal(t, []string{"**/*.bench.gd"}, config.Benchmarks)
+	assert.Equal(t, "file", config.Partition, "partition defaults to whole files")
 	assert.Equal(t, LeakCheck{Policy: "fail"}, config.LeakCheck)
+}
+
+func TestLoadPartitionModes(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []string{"suite", "case"} {
+		root := t.TempDir()
+		require.NoError(t, os.WriteFile(
+			filepath.Join(root, Filename), []byte(`{"partition":"`+mode+`"}`), 0o600,
+		))
+		loaded, err := Load(root)
+		require.NoError(t, err)
+		assert.Equal(t, mode, loaded.Partition)
+	}
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, Filename), []byte(`{"partition":"shard"}`), 0o600,
+	))
+	_, err := Load(root)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `partition "shard" must be file, suite, or case`)
 }
 
 func TestLoadRejectsUnknownKey(t *testing.T) {
