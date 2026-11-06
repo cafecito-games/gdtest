@@ -623,10 +623,12 @@ byte-identical. See ADR 0011.
     `fixtures/godot/api/partitioning.test.gd`): a suite-partitioned run's per-case
     statuses equal the unsharded run with `before_all` once per shard, and case mode
     splits a two-suite file with every case still observing its suite hooks.
-  - CLI integration (`internal/integration/partition_test.go`, `--no-daemon` serial
-    parity): sharded totals, statuses, and report ordering match the unpartitioned run;
-    config and flag precedence including exit 2 for invalid values; an empty selection
-    still succeeds; JUnit merges a file's shards under one suite.
+  - Integration (`internal/integration/partition_test.go`): `--no-daemon` serial parity
+    proves sharded totals, statuses, and report ordering match the unpartitioned run;
+    config and flag precedence include exit 2 for invalid values; an empty selection
+    succeeds; and JUnit merges a file's shards under one suite. A real session service
+    with two Godot child processes proves same-path shards occupy distinct lanes and
+    both exact processes are retained and reused on the next run.
   - Consumer verification (2026-11-06): the branch was packaged with
     `scripts/package-addon 0.0.0-issue-24` and installed into a disposable copy of the Uzir
     client project through the real consumer path (`gpm install`, host-only, as

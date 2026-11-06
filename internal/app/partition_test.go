@@ -251,6 +251,8 @@ func TestShardedFileEventSinkDeduplicatesWorkerErrorsPerShardedFile(t *testing.T
 			Message: "unable to load test script res://big.test.gd"},
 		{Type: model.EventWorkerError, Name: "worker.script_load",
 			Message: "unable to load test script res://big.test.gd"},
+		{Type: model.EventWorkerError, Name: "worker.script_load",
+			Message: "malformed load error without a file"},
 		{Type: model.EventCaseFinished, TestID: "big.test.gd::test_one", Status: "pass",
 			Location: &model.Location{File: "big.test.gd"}},
 	}
@@ -258,11 +260,13 @@ func TestShardedFileEventSinkDeduplicatesWorkerErrorsPerShardedFile(t *testing.T
 		require.NoError(t, sink.Emit(event))
 	}
 
-	require.Len(t, forwarded, 5)
+	require.Len(t, forwarded, 6)
 	assert.Equal(t, "big.test.gd", forwarded[0].Location.File)
 	assert.Equal(t, "other.test.gd", forwarded[1].Location.File)
 	assert.Equal(t, "another diagnostic", forwarded[2].Message)
 	assert.Equal(t, "unable to load test script res://big.test.gd", forwarded[3].Message)
-	assert.Equal(t, model.EventCaseFinished, forwarded[4].Type,
+	assert.Equal(t, "malformed load error without a file", forwarded[4].Message,
+		"unrecognized locationless errors pass through fail-safe")
+	assert.Equal(t, model.EventCaseFinished, forwarded[5].Type,
 		"non-worker_error events pass through untouched")
 }
