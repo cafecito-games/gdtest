@@ -6,10 +6,13 @@ Minimal Unix job:
 
 ```sh
 gpm install --host-only
-./addons/gdtest/gdtest run --json | tee gdtest-results.jsonl
+./addons/gdtest/gdtest run --only forbid \
+  --report-format junit --report-file gdtest-junit.xml
 ./addons/gdtest/gdtest bench --json --write-baseline gdtest-benchmarks.json \
   | tee gdtest-benchmark-events.jsonl
 ```
+
+`--report-format` accepts `terminal`, `jsonl`, or `junit` (`--json` is shorthand for `--report-format jsonl`). Passing `--report-file` publishes the formatted report atomically while keeping normal human-readable terminal output on stdout; omitting `--report-file` writes the selected format directly to stdout.
 
 Windows release/CI support is deferred until gdtest has a validated native
 user-level daemon transport and a Windows CI runner. The package index does not

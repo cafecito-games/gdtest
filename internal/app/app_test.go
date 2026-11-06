@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"os"
 	"os/exec"
@@ -195,6 +196,10 @@ func TestRunHelpDocumentsIsolationPolicies(t *testing.T) {
 	assert.Contains(t, stdout.String(), "--fail-on-skip")
 	assert.Contains(t, stdout.String(), "--fail-on-todo")
 	assert.Contains(t, stdout.String(), "--fail-on-void")
+	assert.Contains(t, stdout.String(), "--report-format")
+	assert.Contains(t, stdout.String(), "terminal, jsonl, or junit")
+	assert.Contains(t, stdout.String(), "--report-file")
+	assert.Contains(t, stdout.String(), "--json")
 }
 
 func TestListHelpDocumentsForegroundDiscovery(t *testing.T) {
@@ -498,4 +503,315 @@ func TestStaleGenerationErrorsAreRetryableAsDaemonText(t *testing.T) {
 	assert.False(t, isStaleGenerationError(errors.New("work belongs to an obsolete generation")))
 	assert.False(t, isStaleGenerationError(errors.New("worker exited")))
 	assert.False(t, isStaleGenerationError(nil))
+}
+
+func TestRunAndWatchRejectInvalidReportOptionsBeforeProjectAccess(t *testing.T) {
+	t.Parallel()
+
+	existingDirectory := t.TempDir()
+	missingProject := filepath.Join(t.TempDir(), "does-not-exist")
+
+	cases := []struct {
+		name      string
+		arguments []string
+		wantError string
+	}{
+		{
+			name:      "run unknown format",
+			arguments: []string{"run", "--project", missingProject, "--report-format", "tap"},
+			wantError: `report format "tap" must be terminal, jsonl, or junit`,
+		},
+		{
+			name:      "watch unknown format",
+			arguments: []string{"watch", "--project", missingProject, "--report-format", "tap"},
+			wantError: `report format "tap" must be terminal, jsonl, or junit`,
+		},
+		{
+			name:      "json and report-format mutually exclusive",
+			arguments: []string{"run", "--project", missingProject, "--json", "--report-format", "junit"},
+			wantError: "if any flags in the group [json report-format] are set none of the others can be",
+		},
+		{
+			name:      "report-file without report-format",
+			arguments: []string{"run", "--project", missingProject, "--report-file", filepath.Join(t.TempDir(), "junit.xml")},
+			wantError: "--report-file requires --report-format",
+		},
+		{
+			name:      "report-file points to directory",
+			arguments: []string{"run", "--project", missingProject, "--report-format", "junit", "--report-file", existingDirectory},
+			wantError: "is a directory",
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := Run(context.Background(), testCase.arguments, IO{Out: &stdout, Err: &stderr})
+
+			require.Equal(t, ExitError, exitCode)
+			assert.Empty(t, stdout.String())
+			assert.Contains(t, stderr.String(), testCase.wantError)
+		})
+	}
+}
+
+func TestRunConfigurationFailurePreservesExistingReportFile(t *testing.T) {
+	t.Parallel()
+
+	root := newTestProject(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "gdtest.json"), []byte(`{"unknown_field": true}`), 0o600))
+	reportPath := filepath.Join(t.TempDir(), "existing-junit.xml")
+	require.NoError(t, os.WriteFile(reportPath, []byte("<preserved/>"), 0o600))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Run(context.Background(), []string{
+		"run", "--project", root, "--no-daemon", "--report-format", "junit", "--report-file", reportPath,
+	}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitError, exitCode)
+	data, err := os.ReadFile(reportPath)
+	require.NoError(t, err)
+	assert.Equal(t, "<preserved/>", string(data))
+}
+
+func TestRunEmptySelectionsRenderRequestedReportFormatAndReportFile(t *testing.T) {
+	t.Parallel()
+
+	type xmlSuites struct {
+		XMLName  xml.Name `xml:"testsuites"`
+		Tests    int      `xml:"tests,attr"`
+		Failures int      `xml:"failures,attr"`
+		Errors   int      `xml:"errors,attr"`
+		Skipped  int      `xml:"skipped,attr"`
+	}
+
+	t.Run("junit stdout on allow-empty", func(t *testing.T) {
+		t.Parallel()
+		root := newTestProject(t)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		exitCode := Run(context.Background(), []string{
+			"run", "--project", root, "--allow-empty", "--no-daemon", "--report-format", "junit",
+		}, IO{Out: &stdout, Err: &stderr})
+
+		require.Equal(t, ExitOK, exitCode, stderr.String())
+		assert.Empty(t, stderr.String())
+		var decoded xmlSuites
+		require.NoError(t, xml.Unmarshal(stdout.Bytes(), &decoded))
+		assert.Equal(t, 0, decoded.Tests)
+	})
+
+	t.Run("junit report-file on empty affected keeps terminal stdout", func(t *testing.T) {
+		t.Parallel()
+		root := newTestProject(t)
+		reportPath := filepath.Join(t.TempDir(), "nested", "reports", "junit.xml")
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		exitCode := Run(context.Background(), []string{
+			"run", "--project", root, "--affected", "README.md", "--no-daemon",
+			"--report-format", "junit", "--report-file", reportPath,
+		}, IO{Out: &stdout, Err: &stderr})
+
+		require.Equal(t, ExitOK, exitCode, stderr.String())
+		assert.Equal(t, "no tests were affected\n", stdout.String())
+		assert.Empty(t, stderr.String())
+
+		reportBytes, err := os.ReadFile(reportPath)
+		require.NoError(t, err)
+		var decoded xmlSuites
+		require.NoError(t, xml.Unmarshal(reportBytes, &decoded))
+		assert.Equal(t, 0, decoded.Tests)
+	})
+
+	t.Run("jsonl stdout and report-file on empty selections", func(t *testing.T) {
+		t.Parallel()
+		root := newTestProject(t)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		exitCode := Run(context.Background(), []string{
+			"run", "--project", root, "--affected", "README.md", "--no-daemon", "--report-format", "jsonl",
+		}, IO{Out: &stdout, Err: &stderr})
+
+		require.Equal(t, ExitOK, exitCode, stderr.String())
+		assert.JSONEq(t, `{"type":"summary","passed":0,"message":"no tests were affected"}`, stdout.String())
+
+		reportPath := filepath.Join(t.TempDir(), "results.jsonl")
+		stdout.Reset()
+		stderr.Reset()
+		exitCode = Run(context.Background(), []string{
+			"run", "--project", root, "--allow-empty", "--no-daemon",
+			"--report-format", "jsonl", "--report-file", reportPath,
+		}, IO{Out: &stdout, Err: &stderr})
+
+		require.Equal(t, ExitOK, exitCode, stderr.String())
+		assert.Equal(t, "No tests selected.\n", stdout.String())
+		reportBytes, err := os.ReadFile(reportPath)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"type":"summary","passed":0,"message":"No tests selected."}`, string(reportBytes))
+	})
+}
+
+func TestReportSessionRoutesStdoutAndAtomicReportFileIndependently(t *testing.T) {
+	t.Parallel()
+
+	t.Run("junit report-file keeps terminal stdout and verbose stderr", func(t *testing.T) {
+		t.Parallel()
+		reportPath := filepath.Join(t.TempDir(), "artifacts", "junit.xml")
+		configuration, err := resolveReportConfig(runOptions{
+			reportFormat: "junit",
+			reportFile:   reportPath,
+			verbose:      true,
+		})
+		require.NoError(t, err)
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		session := configuration.newSession(&stdout)
+		collector := results.NewCollector()
+
+		failureEvent := model.Event{
+			Type:      model.EventAssertionFail,
+			TestID:    "tests/math.test.gd::test_sum",
+			Assertion: "equal",
+			Message:   "sum mismatch",
+			Location:  &model.Location{File: "tests/math.test.gd", Line: 11},
+			Expected:  &model.WireValue{Type: "int", Value: "4"},
+			Actual:    &model.WireValue{Type: "int", Value: "5"},
+		}
+		finishedEvent := model.Event{
+			Type:     model.EventCaseFinished,
+			TestID:   "tests/math.test.gd::test_sum",
+			Name:     "sum",
+			Status:   "fail",
+			Location: &model.Location{File: "tests/math.test.gd", Line: 9},
+			Duration: 2 * time.Millisecond,
+		}
+		for _, event := range []model.Event{failureEvent, finishedEvent} {
+			require.NoError(t, collector.Emit(event))
+			require.NoError(t, session.Emit(event))
+		}
+
+		summary := collector.Summary()
+		require.NoError(t, session.Summary(summary))
+		require.NoError(t, session.CompleteTimingsAndPublish(
+			IO{Out: &stdout, Err: &stderr},
+			map[string]time.Duration{"reporting": time.Millisecond},
+		))
+
+		assert.Contains(t, stdout.String(), "FAIL tests/math.test.gd::test_sum")
+		assert.Contains(t, stdout.String(), "0 passed, 1 failed")
+		assert.Contains(t, stderr.String(), "gdtest: timing reporting=1ms")
+
+		reportBytes, err := os.ReadFile(reportPath)
+		require.NoError(t, err)
+		var decoded struct {
+			XMLName  xml.Name `xml:"testsuites"`
+			Tests    int      `xml:"tests,attr"`
+			Failures int      `xml:"failures,attr"`
+		}
+		require.NoError(t, xml.Unmarshal(reportBytes, &decoded))
+		assert.Equal(t, 1, decoded.Tests)
+		assert.Equal(t, 1, decoded.Failures)
+	})
+
+	t.Run("junit stdout with verbose keeps timings off stdout", func(t *testing.T) {
+		t.Parallel()
+		configuration, err := resolveReportConfig(runOptions{
+			reportFormat: "junit",
+			verbose:      true,
+		})
+		require.NoError(t, err)
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		session := configuration.newSession(&stdout)
+		require.NoError(t, session.Summary(results.Summary{Passed: 1, Cases: []results.CaseResult{
+			{ID: "tests/ok.test.gd::test_ok", Name: "ok", Status: "pass", File: "tests/ok.test.gd", Line: 3},
+		}}))
+		require.NoError(t, session.CompleteTimingsAndPublish(
+			IO{Out: &stdout, Err: &stderr},
+			map[string]time.Duration{"client_total": 3 * time.Millisecond},
+		))
+
+		var decoded struct {
+			XMLName xml.Name `xml:"testsuites"`
+			Tests   int      `xml:"tests,attr"`
+		}
+		require.NoError(t, xml.Unmarshal(stdout.Bytes(), &decoded))
+		assert.Equal(t, 1, decoded.Tests)
+		assert.Contains(t, stderr.String(), "gdtest: timing client_total=3ms")
+	})
+
+	t.Run("jsonl report-file appends timings record to file", func(t *testing.T) {
+		t.Parallel()
+		reportPath := filepath.Join(t.TempDir(), "results.jsonl")
+		configuration, err := resolveReportConfig(runOptions{
+			json:       true,
+			reportFile: reportPath,
+		})
+		require.NoError(t, err)
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		session := configuration.newSession(&stdout)
+		require.NoError(t, session.Emit(model.Event{
+			ProtocolVersion: model.ProtocolVersion,
+			Type:            model.EventCaseFinished,
+			TestID:          "tests/ok.test.gd::test_ok",
+			Status:          "pass",
+		}))
+		require.NoError(t, session.Summary(results.Summary{Passed: 1}))
+		require.NoError(t, session.CompleteTimingsAndPublish(
+			IO{Out: &stdout, Err: &stderr},
+			map[string]time.Duration{"reporting": time.Millisecond},
+		))
+
+		assert.Contains(t, stdout.String(), "1 passed, 0 failed")
+		reportBytes, err := os.ReadFile(reportPath)
+		require.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(string(reportBytes)), "\n")
+		require.Len(t, lines, 3)
+		assert.Contains(t, lines[0], `"type":"case_finished"`)
+		assert.Contains(t, lines[1], `"type":"summary"`)
+		assert.Contains(t, lines[2], `"type":"timings"`)
+	})
+
+	t.Run("manifest errors render valid junit on stdout and report-file", func(t *testing.T) {
+		t.Parallel()
+		reportPath := filepath.Join(t.TempDir(), "discovery-junit.xml")
+		configuration, err := resolveReportConfig(runOptions{
+			reportFormat: "junit",
+			reportFile:   reportPath,
+		})
+		require.NoError(t, err)
+
+		var stdout bytes.Buffer
+		findings := &manifestErrors{
+			errors: []model.DiscoveryError{{
+				Code:     "discovery.only_forbidden",
+				Message:  "focused test is forbidden by --only forbid",
+				Location: &model.Location{File: "tests/focus.test.gd", Line: 6, Column: 2},
+			}},
+		}
+		require.NoError(t, configuration.writeManifestErrors(&stdout, findings))
+		assert.Contains(t, stdout.String(), "tests/focus.test.gd:6:2: discovery.only_forbidden")
+
+		reportBytes, err := os.ReadFile(reportPath)
+		require.NoError(t, err)
+		var decoded struct {
+			XMLName xml.Name `xml:"testsuites"`
+			Tests   int      `xml:"tests,attr"`
+			Errors  int      `xml:"errors,attr"`
+		}
+		require.NoError(t, xml.Unmarshal(reportBytes, &decoded))
+		assert.Equal(t, 1, decoded.Tests)
+		assert.Equal(t, 1, decoded.Errors)
+	})
 }

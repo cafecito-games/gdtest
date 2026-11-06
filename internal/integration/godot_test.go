@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -69,6 +70,153 @@ func TestForegroundGodotPassingAndFailingFixtures(t *testing.T) {
 		assert.Contains(t, output.String(), "only valid while a case is executing")
 		assert.Contains(t, output.String(), "get_suite_name")
 		assert.Contains(t, output.String(), "3 errors")
+	})
+}
+
+func TestForegroundGodotJUnitAndJSONLReportFormats(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot end-to-end test skipped: godot is not on PATH")
+	}
+	_, filename, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+
+	type junitSkipped struct {
+		Type    string `xml:"type,attr"`
+		Message string `xml:"message,attr"`
+	}
+	type junitFailure struct {
+		Type    string `xml:"type,attr"`
+		Message string `xml:"message,attr"`
+		Body    string `xml:",chardata"`
+	}
+	type junitError struct {
+		Type    string `xml:"type,attr"`
+		Message string `xml:"message,attr"`
+	}
+	type junitTestCase struct {
+		Name      string        `xml:"name,attr"`
+		Classname string        `xml:"classname,attr"`
+		File      string        `xml:"file,attr"`
+		Line      int           `xml:"line,attr"`
+		Skipped   *junitSkipped `xml:"skipped"`
+		Failure   *junitFailure `xml:"failure"`
+		Error     *junitError   `xml:"error"`
+		SystemOut string        `xml:"system-out"`
+	}
+	type junitTestSuite struct {
+		Name      string          `xml:"name,attr"`
+		File      string          `xml:"file,attr"`
+		Tests     int             `xml:"tests,attr"`
+		Failures  int             `xml:"failures,attr"`
+		Errors    int             `xml:"errors,attr"`
+		Skipped   int             `xml:"skipped,attr"`
+		TestCases []junitTestCase `xml:"testcase"`
+		SystemOut string          `xml:"system-out"`
+	}
+	type junitDocument struct {
+		XMLName  xml.Name         `xml:"testsuites"`
+		Name     string           `xml:"name,attr"`
+		Tests    int              `xml:"tests,attr"`
+		Failures int              `xml:"failures,attr"`
+		Errors   int              `xml:"errors,attr"`
+		Skipped  int              `xml:"skipped,attr"`
+		Suites   []junitTestSuite `xml:"testsuite"`
+	}
+
+	t.Run("junit report-file with outcomes failure and strict policy", func(t *testing.T) {
+		var output, diagnostics bytes.Buffer
+		reportPath := filepath.Join(t.TempDir(), "ci", "junit.xml")
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+
+		code := app.Run(ctx, []string{
+			"run", "--no-daemon", "--fail-on-todo",
+			"--report-format", "junit", "--report-file", reportPath,
+			"--project", root,
+			"fixtures/godot/api/outcomes.test.gd",
+			"fixtures/godot/basic/failing.test.gd",
+		}, app.IO{Out: &output, Err: &diagnostics})
+
+		assert.Equal(t, app.ExitFailures, code, "output:\n%s\n%s", output.String(), diagnostics.String())
+		assert.Contains(t, output.String(), "failing.test.gd:7")
+		assert.Contains(t, output.String(), "strict policy failed: 1 todo")
+
+		reportData, err := os.ReadFile(reportPath)
+		require.NoError(t, err)
+		assert.NotContains(t, string(reportData), root, "JUnit XML must remain worktree-neutral")
+
+		var document junitDocument
+		require.NoError(t, xml.Unmarshal(reportData, &document))
+		assert.Equal(t, "gdtest", document.Name)
+		assert.Equal(t, 6, document.Tests)
+		assert.Equal(t, 2, document.Failures)
+		assert.Equal(t, 0, document.Errors)
+		assert.Equal(t, 2, document.Skipped)
+		require.Len(t, document.Suites, 3)
+
+		outcomesSuite := document.Suites[0]
+		assert.Equal(t, "fixtures/godot/api/outcomes.test.gd", outcomesSuite.Name)
+		assert.Equal(t, 4, outcomesSuite.Tests)
+		assert.Equal(t, 2, outcomesSuite.Skipped)
+		require.NotNil(t, outcomesSuite.TestCases[0].Skipped)
+		assert.Equal(t, "skip", outcomesSuite.TestCases[0].Skipped.Type)
+		assert.Equal(t, "not available", outcomesSuite.TestCases[0].Skipped.Message)
+		assert.Greater(t, outcomesSuite.TestCases[0].Line, 0)
+		require.NotNil(t, outcomesSuite.TestCases[1].Skipped)
+		assert.Equal(t, "todo", outcomesSuite.TestCases[1].Skipped.Type)
+		assert.Equal(t, "future behavior", outcomesSuite.TestCases[1].Skipped.Message)
+		assert.Contains(t, outcomesSuite.TestCases[2].SystemOut, "MESSAGE: void remains observable")
+
+		failingSuite := document.Suites[1]
+		assert.Equal(t, "fixtures/godot/basic/failing.test.gd", failingSuite.Name)
+		assert.Equal(t, 1, failingSuite.Failures)
+		require.NotNil(t, failingSuite.TestCases[0].Failure)
+		assert.Contains(t, failingSuite.TestCases[0].Failure.Body, "fixtures/godot/basic/failing.test.gd:7")
+
+		policySuite := document.Suites[2]
+		assert.Equal(t, "gdtest", policySuite.Name)
+		assert.Contains(t, policySuite.SystemOut, "gdtest-output-marker")
+		require.Len(t, policySuite.TestCases, 1)
+		require.NotNil(t, policySuite.TestCases[0].Failure)
+		assert.Equal(t, "strict policy failed: 1 todo", policySuite.TestCases[0].Failure.Message)
+	})
+
+	t.Run("junit stdout on invalid discovery", func(t *testing.T) {
+		var output, diagnostics bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		code := app.Run(ctx, []string{
+			"run", "--no-daemon", "--report-format", "junit",
+			"--project", root, "fixtures/godot/api/discovery_invalid.test.gd",
+		}, app.IO{Out: &output, Err: &diagnostics})
+
+		assert.Equal(t, app.ExitError, code, "output:\n%s\n%s", output.String(), diagnostics.String())
+		var document junitDocument
+		require.NoError(t, xml.Unmarshal(output.Bytes(), &document), "output:\n%s", output.String())
+		assert.Equal(t, 3, document.Tests)
+		assert.Equal(t, 3, document.Errors)
+		require.Len(t, document.Suites, 1)
+		assert.Equal(t, "fixtures/godot/api/discovery_invalid.test.gd", document.Suites[0].Name)
+	})
+
+	t.Run("report-format jsonl matches json stream", func(t *testing.T) {
+		var output, diagnostics bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		code := app.Run(ctx, []string{
+			"run", "--no-daemon", "--report-format", "jsonl",
+			"--project", root, "fixtures/godot/basic/passing.test.gd",
+		}, app.IO{Out: &output, Err: &diagnostics})
+
+		assert.Equal(t, app.ExitOK, code, "output:\n%s\n%s", output.String(), diagnostics.String())
+		assert.Empty(t, diagnostics.String())
+		lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+		require.GreaterOrEqual(t, len(lines), 4)
+		assert.Contains(t, lines[len(lines)-2], `"type":"summary"`)
+		assert.Contains(t, lines[len(lines)-1], `"type":"timings"`)
 	})
 }
 

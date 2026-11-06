@@ -76,6 +76,9 @@ func (c Client) Call(ctx context.Context, method string, payload any, onEvent fu
 	encoder := protocol.NewEncoder(connection)
 	decoder := protocol.NewDecoder(connection, c.MaxSize)
 	if err := encoder.Encode(request); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("send daemon request: %w", err)
 	}
 	for {

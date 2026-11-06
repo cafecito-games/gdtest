@@ -49,8 +49,9 @@ $ ./addons/gdtest/gdtest run
   more tests, never fewer.
 - **🔒 Typed.** Tests, providers, hooks, probes, and generated doubles are all statically typed
   GDScript.
-- **🤖 CI-ready.** Exit codes are stable, `--json` emits JSON Lines events, and `--no-daemon` runs
-  everything in the foreground for hermetic builds.
+- **🤖 CI-ready.** Exit codes are stable, `--report-format junit` and `--report-format jsonl`
+  (`--json`) emit standard CI and machine reports (to stdout or `--report-file`), and `--no-daemon`
+  runs everything in the foreground for hermetic builds.
 - **🔁 Easy to adopt.** `gdtest migrate vest` converts an existing Vest suite mechanically and
   reports anything it could not convert, with the exact location.
 
@@ -225,8 +226,9 @@ The daemon keys each session by canonical repository and worktree identity. Simu
 worktrees therefore never share a Godot worker. Incompatible gdtest builds never share a daemon
 socket.
 
-In CI, use `--json` and keep its JSON Lines output. Use `--no-daemon` to debug a run hermetically
-in the foreground. See [worktree usage](docs/worktrees.md) and [CI setup](docs/ci.md).
+In CI, use `--report-format junit --report-file gdtest-junit.xml` (or `--report-format jsonl` /
+`--json` for JSON Lines events). Use `--no-daemon` to debug a run hermetically in the foreground.
+See [worktree usage](docs/worktrees.md) and [CI setup](docs/ci.md).
 
 ## Migrating from Vest
 

@@ -81,10 +81,12 @@ func TestCallCancellationClosesConnection(t *testing.T) {
 
 	namespace, err := daemon.NewNamespace(shortTempDir(t), daemon.ProtocolVersion, "cancel-build")
 	require.NoError(t, err)
+	handlerStarted := make(chan struct{})
 	handlerCanceled := make(chan struct{})
 	server := &daemon.Server{
 		Namespace: namespace,
 		Handler: daemon.HandlerFunc(func(ctx context.Context, _ daemon.Request, _ daemon.EmitFunc) (any, error) {
+			close(handlerStarted)
 			<-ctx.Done()
 			close(handlerCanceled)
 			return nil, ctx.Err()
@@ -99,22 +101,29 @@ func TestCallCancellationClosesConnection(t *testing.T) {
 			go func() { serverErrors <- server.Serve(serveCtx) }()
 			return nil
 		},
-		StartTimeout: 2 * time.Second,
+		StartTimeout: 5 * time.Second,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	go func() {
+		select {
+		case <-handlerStarted:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	_, err = client.Call(ctx, "test.wait", struct{}{}, nil)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, context.Canceled)
 	select {
 	case <-handlerCanceled:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		require.FailNow(t, "client disconnect did not cancel daemon handler")
 	}
 	stopServer()
 	select {
 	case err := <-serverErrors:
 		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		require.FailNow(t, "server did not stop")
 	}
 }
