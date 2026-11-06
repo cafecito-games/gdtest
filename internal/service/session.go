@@ -1597,6 +1597,9 @@ func validatePlan(planValue model.TestPlan) error {
 		if err := validateProjectPath(file.Path); err != nil {
 			return fmt.Errorf("file %q: %w", file.Path, err)
 		}
+		if err := file.ValidateCaseIDs(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

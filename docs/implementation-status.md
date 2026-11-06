@@ -523,3 +523,51 @@ sections 9 and 11, and ADR 0010).
     discovery/case misuse diagnostics, timeout skip, and persistent-worker PID isolation.
   - `scripts/check`, `scripts/package-addon 0.0.0-issue-15`, `scripts/test-package-addon
     0.0.0-issue-15`, and `scripts/benchmark` pass (with overhead recorded in `docs/performance.md`).
+
+## Per-file case subsets and stamped focus (issue #23)
+
+Milestone 1 of the test-file sharding design (epic #26). The worker protocol can now express
+"run exactly these case IDs of this file entry" — including dynamically registered and
+parameterized cases — and carry an authoritative plan-level focus decision, without any
+user-visible behavior change: the app does not set the new fields yet and unsharded plans
+serialize byte-identically to version 3.
+
+- Plan schema (`internal/model/model.go`):
+  - `FilePlan.CaseIDs` (`case_ids,omitempty`) is an explicit ordered per-file case subset. Absent
+    (nil) keeps whole-file behavior; an explicit empty array is a legal empty shard that selects
+    nothing and runs no hooks. `FilePlan.MarshalJSON` preserves the nil-versus-empty distinction
+    so unsharded plans stay byte-identical.
+  - `TestPlan.HasFocus` (`has_focus,omitempty`) is a tri-state plan-level focus stamp: `nil` keeps
+    worker-side computation, `true`/`false` overrides it for both the only-mode policy check and
+    the `focus_only` filter.
+  - `FilePlan.ValidateCaseIDs` rejects empty and duplicated entries within one file entry, and
+    both `validateWorkerPlan` and `validatePlan` apply it before dispatch.
+- Version fence: `model.ProtocolVersion`, `protocol.Version`, `daemon.ProtocolVersion`, and
+  `WORKER_PROTOCOL_VERSION` advance 3 → 4 together. Daemon namespaces isolate by protocol
+  version, the worker hello handshake rejects mismatches, and `validateWorkerPlan`/`validatePlan`
+  reject plan versions other than 4 before dispatch.
+- Worker (`addons/gdtest/worker.gd`):
+  - `_prepare_file` carries a file entry's `case_ids` into its prepared file.
+  - `_apply_case_filters` (successor of `_apply_selected_ids`) filters each prepared file by its
+    `case_ids` when present, intersected with plan `selected_ids` when `selection_applied` is
+    true — a case must pass each filter. Filtering preserves case order and `suite_infos`, so
+    nested-suite traversal is untouched.
+  - `_plan_has_focus` returns the stamped `has_focus` when present and otherwise computes focus
+    from the prepared cases as before; the only-mode policy check and `focus_only` consume it.
+- Fixtures (`fixtures/protocol/`): all envelope versions advance to 4 and the new
+  `run-request.jsonl` carries a file entry with `case_ids` (including a parameterized row ID)
+  and a stamped `has_focus`, decoded by `TestLanguageNeutralFixturesDecode`,
+  `TestRunRequestFixtureCarriesShardFields`, and the GDScript fixture runner.
+- Verification:
+  - `internal/model` pins nil/empty `case_ids`, tri-state `has_focus`, byte-identical unsharded
+    serialization, and case-ID validation.
+  - `internal/worker/plan_validation_test.go` and `internal/service/plan_validation_test.go` pin
+    protocol fencing and per-entry subset rejection; `decodeStrict` accepts the shard fields and
+    still rejects unknown ones; the service folds duplicate-path file entries into one
+    `run_started`/`run_finished` pair while dispatching each entry separately.
+  - `internal/worker/per_file_subset_godot_test.go` runs real Godot workers: two same-path
+    entries with disjoint `case_ids` run exactly their cases once each in discovery order
+    (dynamic, parameterized, and static cases), `case_ids` intersects `selected_ids`, a stamped
+    `has_focus` overrides per-worker computation in both directions (`only_mode: "require"` with
+    `has_focus: false` fires the policy error exactly once), and an explicit empty `case_ids`
+    selects nothing and runs no hooks.

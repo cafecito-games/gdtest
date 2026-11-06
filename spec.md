@@ -582,7 +582,7 @@ The daemon opens a loopback listener on an ephemeral port. Each worker gets a
 cryptographically random one-time authentication token. The first worker
 message must authenticate and complete a versioned handshake containing:
 
-- Worker protocol version (version 3, synchronized across `model.ProtocolVersion`,
+- Worker protocol version (version 4, synchronized across `model.ProtocolVersion`,
   `protocol.Version`, `daemon.ProtocolVersion`, and `addons/gdtest/version.gd`).
 - gdtest runtime version.
 - Godot version and build information.
