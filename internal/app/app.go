@@ -32,6 +32,7 @@ import (
 	"github.com/cafecito-games/gdtest/internal/results"
 	"github.com/cafecito-games/gdtest/internal/scheduler"
 	"github.com/cafecito-games/gdtest/internal/service"
+	"github.com/cafecito-games/gdtest/internal/shard"
 	"github.com/cafecito-games/gdtest/internal/version"
 	sourcewatch "github.com/cafecito-games/gdtest/internal/watch"
 	"github.com/cafecito-games/gdtest/internal/worker"
@@ -101,6 +102,8 @@ type runOptions struct {
 	isolation    string
 	jobs         int
 	jobsSet      bool
+	partition    string
+	partitionSet bool
 	staleRetry   int
 	failOnSkip   bool
 	failOnTodo   bool
@@ -201,6 +204,7 @@ func newRunCommand(streams IO, exitCode *int) *cobra.Command {
 			options.selectors = selectors
 			options.affectedSet = command.Flags().Changed("affected")
 			options.jobsSet = command.Flags().Changed("jobs")
+			options.partitionSet = command.Flags().Changed("partition")
 			*exitCode = runTests(command.Context(), options, streams)
 		},
 	}
@@ -245,6 +249,7 @@ func newWatchCommand(streams IO, exitCode *int) *cobra.Command {
 			options.selectors = selectors
 			options.affectedSet = command.Flags().Changed("affected")
 			options.jobsSet = command.Flags().Changed("jobs")
+			options.partitionSet = command.Flags().Changed("partition")
 			*exitCode = watchTests(command.Context(), options, streams)
 		},
 	}
@@ -367,7 +372,11 @@ func addRunFlags(command *cobra.Command, options *runOptions) {
 		&options.isolation, "isolation", "reuse",
 		"worker isolation: reuse, recycle, fresh, or exclusive",
 	)
-	command.Flags().IntVar(&options.jobs, "jobs", 0, "maximum concurrent test files (0 uses automatic concurrency)")
+	command.Flags().IntVar(&options.jobs, "jobs", 0, "maximum concurrent test files and shards (0 uses automatic concurrency)")
+	command.Flags().StringVar(
+		&options.partition, "partition", "",
+		"partition large test files across workers: file, suite, or case (overrides gdtest.json)",
+	)
 	command.Flags().BoolVar(&options.failOnSkip, "fail-on-skip", false, "fail the run when any case is skipped")
 	command.Flags().BoolVar(&options.failOnTodo, "fail-on-todo", false, "fail the run when any case is marked todo")
 	command.Flags().BoolVar(&options.failOnVoid, "fail-on-void", false, "fail the run when any case has no assertion or explicit outcome")
@@ -516,6 +525,12 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		writeDiagnostic(streams.Err, "gdtest:", errors.New("jobs must be non-negative"))
 		return ExitError
 	}
+	if options.partitionSet {
+		if err := shard.ValidateMode(options.partition); err != nil {
+			writeDiagnostic(streams.Err, "gdtest:", err)
+			return ExitError
+		}
+	}
 	root, err := projectRoot(options.project)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
@@ -532,10 +547,17 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 	if options.onlyMode != "" {
 		projectConfig.OnlyMode = options.onlyMode
 	}
+	if options.partitionSet {
+		projectConfig.Partition = options.partition
+	}
 	if options.jobsSet {
 		projectConfig.Jobs = options.jobs
 	}
 	if err := validateOnlyMode(projectConfig.OnlyMode); err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
+	if err := shard.ValidateMode(projectConfig.Partition); err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
 	}
@@ -627,19 +649,52 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		SelectionApplied: true, SelectedIDs: append([]string(nil), selected.ids...),
 		Files: discoveryManifest.Files,
 	}
-	collector := results.NewCollectorWithOrder(selected.ids)
+	var partitioned *partitionedPlan
+	if projectConfig.Partition != shard.ModeFile {
+		resolved := resolvePartition(
+			discoveryManifest.Files, selected.manifest.Files, plan.SelectedIDs,
+			projectConfig.OnlyMode, projectConfig.Partition, projectConfig.Jobs,
+		)
+		plan.Files = resolved.files
+		plan.SelectedIDs = resolved.selectedIDs
+		plan.HasFocus = resolved.hasFocus
+		partitioned = &resolved
+	}
+	collector := results.NewCollectorWithOrder(plan.SelectedIDs)
 	session := reporting.newSession(streams.Out)
-	sink := executor.EventSinkFunc(func(event model.Event) error {
+	var sink executor.EventSink = executor.EventSinkFunc(func(event model.Event) error {
 		if err := collector.Emit(event); err != nil {
 			return err
 		}
 		return session.Emit(event)
 	})
-	executionTimings, err := executePlan(
-		ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
-		time.Duration(projectConfig.WorkerIdleTimeout), projectConfig.Jobs, options.isolation,
-		projectConfig.WarmWorkers, plan, sink, options.noDaemon, streams,
-	)
+	if partitioned != nil && len(partitioned.sharded) > 0 {
+		sink = newShardedFileEventSink(sink, partitioned.sharded)
+	}
+	var executionTimings map[string]time.Duration
+	if partitioned != nil && partitioned.policyError != "" {
+		// Report only-mode violations once, app-side, instead of once per
+		// shard, and dispatch nothing: the worker skips execution on the same
+		// violation.
+		policyEvent := model.Event{
+			ProtocolVersion: model.ProtocolVersion,
+			Type:            model.EventWorkerError,
+			RunID:           plan.RunID,
+			Name:            "worker.discovery",
+			Message:         partitioned.policyError,
+			Metadata:        map[string]any{"code": "worker.discovery"},
+		}
+		if emitErr := sink.Emit(policyEvent); emitErr != nil {
+			writeDiagnostic(streams.Err, "gdtest: report policy error:", emitErr)
+			return ExitError
+		}
+	} else {
+		executionTimings, err = executePlan(
+			ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
+			time.Duration(projectConfig.WorkerIdleTimeout), projectConfig.Jobs, options.isolation,
+			projectConfig.WarmWorkers, plan, sink, options.noDaemon, streams,
+		)
+	}
 	executionErr := err
 	if err != nil {
 		if errors.Is(err, context.Canceled) {

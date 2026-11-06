@@ -403,6 +403,75 @@ for the same phase is a discovery error; the runner never calls both.
 Vest lifecycle signals such as `on_begin` and `on_case_finish` are not public
 gdtest APIs. Hooks are the supported lifecycle extension point.
 
+### 8.2 Sharded file execution
+
+Test files are unaware of sharding. Projects opt in through the `partition`
+key in `gdtest.json` or the `gdtest run --partition` flag (the flag wins):
+
+| Mode | Cut rule | `before_suite`/`after_suite` | `before_all`/`after_all` |
+| --- | --- | --- | --- |
+| `file` (default; absent) | never split | once per suite | once per file |
+| `suite` | only between cases where no nested suite spans the boundary | root suite once per shard; every nested suite once, wrapping exactly its selected cases | once per shard |
+| `case` | anywhere | root suite once per shard; every nested suite once per shard containing its cases | once per shard |
+
+`before_all`/`after_all` running once per shard is inherent to intra-file
+parallelism: each shard is a fresh test-file instance in its own worker
+process, exactly as a file runs today under a selection. The root suite is the
+file's suite scope, so its `before_suite`/`after_suite` hooks also run once per
+shard. In `suite` mode, every nested suite's hooks run exactly once per run —
+the same guarantee as serial execution, on a different wall-clock
+interleaving. `case` mode is the documented relaxation: a nested suite's hooks
+run once per shard that contains any of its cases.
+
+Files with at most 16 selected cases are never split, a file with no legal cut
+stays a single shard without error, and sharding never changes case identity,
+per-case statuses, or report ordering. Shard sizing considers the whole
+selection: existing file-level work fills lanes first, and only a file whose
+case count exceeds the run-wide per-lane target is split. This prevents a
+many-file run from duplicating registration and file hooks merely because
+individual files also exceed the minimum.
+
+```gdscript
+# suites.test.gd — 30 cases in "Alpha", 6 in "Beta"
+extends GDTest
+
+var _configured: int = 0
+
+func before_all() -> void:
+	# Runs once per shard: twice under `gdtest run --partition suite --jobs 2`
+	# for this file, because Alpha's cases and Beta's cases form two shards.
+	_configured += 1
+
+func suite() -> void:
+	define(
+			"Alpha",
+			func() -> void:
+				for index: int in range(30):
+					test(
+							"alpha case %02d" % index,
+							func() -> void:
+								expect_equal(1, _configured)
+					)
+	)
+	define(
+			"Beta",
+			func() -> void:
+				for index: int in range(6):
+					test(
+							"beta case %02d" % index,
+							func() -> void:
+								expect_equal(1, _configured)
+					)
+	)
+```
+
+Running `gdtest run --partition suite` on the file above with two available
+workers executes Alpha's cases and Beta's cases concurrently in separate
+worker processes; every case observes `before_all` once, each suite's
+`before_suite`/`after_suite` wraps exactly its own cases, the root suite hooks
+run once in each worker, and the report lists all 36 cases in the same order as
+an unpartitioned run.
+
 ## 9. Public metadata
 
 Hook metadata is immutable from the test author's perspective. The concrete

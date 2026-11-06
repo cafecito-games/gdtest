@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 
 	"github.com/cafecito-games/gdtest/internal/daemon"
@@ -157,4 +159,111 @@ func TestSessionServiceMultiFileRunFoldsDuplicatePathEntriesIntoOneRunPair(t *te
 	)
 	assert.Equal(t, 1, runStarted, "worker run_started events must fold into one daemon run_started")
 	assert.Equal(t, 1, runFinished, "worker run_finished events must fold into one daemon run_finished")
+}
+
+func TestSessionServiceRunsShardsOfOneFileOnSeparateLanes(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var factoryMu sync.Mutex
+	var processes []*fakeWorker
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 950 + len(processes), generation: options.Generation}
+		process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
+			started <- struct{}{}
+			<-release
+			return sink.Emit(model.Event{
+				ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished,
+				RunID: plan.RunID, Status: "pass",
+			})
+		}
+		factoryMu.Lock()
+		processes = append(processes, process)
+		factoryMu.Unlock()
+		return process, nil
+	}, 4)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	var finishMetadata map[string]any
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "sharded-single-file", Project: "/project", Godot: "godot", Jobs: 2,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "sharded-single-file", Generation: 1,
+			Files: []model.FilePlan{
+				{Path: "tests/big.test.gd", CaseIDs: []string{"tests/big.test.gd::test_a"}},
+				{Path: "tests/big.test.gd", CaseIDs: []string{"tests/big.test.gd::test_b"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	handleDone := make(chan error, 1)
+	go func() {
+		_, handleErr := service.Handle(context.Background(), daemon.Request{
+			ID: "sharded-single-file-request", Method: "session.run", Payload: payload,
+		}, func(value any) error {
+			event, ok := value.(model.Event)
+			if ok && event.Type == model.EventRunFinished {
+				finishMetadata = event.Metadata
+			}
+			return nil
+		})
+		handleDone <- handleErr
+	}()
+	waitServiceSignal(t, started)
+	waitServiceSignal(t, started)
+	close(release)
+	require.NoError(t, <-handleDone)
+
+	factoryMu.Lock()
+	defer factoryMu.Unlock()
+	assert.Len(t, processes, 2, "two shards of one file occupy one lane each")
+	require.NotNil(t, finishMetadata)
+	assert.Equal(t, 1, finishMetadata["files"], "files counts distinct paths")
+	assert.Equal(t, 2, finishMetadata["shards"], "shards counts dispatched plan entries")
+}
+
+func TestSessionServiceFailingShardCancelsSiblingShards(t *testing.T) {
+	t.Parallel()
+
+	slowStarted := make(chan struct{})
+	boomError := errors.New("shard worker died")
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 970, generation: options.Generation}
+		process.runContextHook = func(ctx context.Context, plan model.TestPlan, _ executor.EventSink) error {
+			if plan.Files[0].CaseIDs[0] == "tests/big.test.gd::test_boom" {
+				// Wait until the sibling shard is executing so cancellation
+				// provably reaches live sibling work rather than a queued one.
+				<-slowStarted
+				return boomError
+			}
+			close(slowStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return process, nil
+	}, 4)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "shard-cancellation", Project: "/project", Godot: "godot", Jobs: 2,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "shard-cancellation", Generation: 1,
+			Files: []model.FilePlan{
+				{Path: "tests/big.test.gd", CaseIDs: []string{"tests/big.test.gd::test_slow"}},
+				{Path: "tests/big.test.gd", CaseIDs: []string{"tests/big.test.gd::test_boom"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "shard-cancellation-request", Method: "session.run", Payload: payload,
+	}, func(any) error { return nil })
+	require.Error(t, err, "a failing shard must fail the whole run")
+	assert.ErrorIs(t, err, boomError)
+	assert.ErrorIs(t, err, context.Canceled, "the sibling shard must observe cancellation")
 }

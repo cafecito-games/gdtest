@@ -193,6 +193,8 @@ func TestRunHelpDocumentsIsolationPolicies(t *testing.T) {
 	assert.Contains(t, stdout.String(), "reuse, recycle, fresh, or exclusive")
 	assert.Contains(t, stdout.String(), "--jobs")
 	assert.Contains(t, stdout.String(), "0 uses automatic concurrency")
+	assert.Contains(t, stdout.String(), "--partition")
+	assert.Contains(t, stdout.String(), "file, suite, or case")
 	assert.Contains(t, stdout.String(), "--fail-on-skip")
 	assert.Contains(t, stdout.String(), "--fail-on-todo")
 	assert.Contains(t, stdout.String(), "--fail-on-void")
@@ -240,6 +242,20 @@ func TestRunRejectsUnknownIsolationBeforeProjectAccess(t *testing.T) {
 	require.Equal(t, ExitError, exitCode)
 	assert.Empty(t, stdout.String())
 	assert.Contains(t, stderr.String(), `isolation "shared" must be reuse, recycle, fresh, or exclusive`)
+}
+
+func TestRunRejectsUnknownPartitionModeBeforeProjectAccess(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{
+		"run", "--project", t.TempDir(), "--partition", "shard",
+	}, IO{Out: &stdout, Err: &stderr})
+
+	require.Equal(t, ExitError, exitCode)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), `partition "shard" must be file, suite, or case`)
 }
 
 func TestSummaryExitCodeDistinguishesStrictPolicyFromInfrastructure(t *testing.T) {

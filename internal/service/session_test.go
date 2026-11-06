@@ -25,22 +25,26 @@ import (
 )
 
 type fakeWorker struct {
-	pid          int
-	generation   uint64
-	runs         int
-	benches      int
-	discovers    int
-	resets       int
-	closed       atomic.Bool
-	runHook      func(model.TestPlan, executor.EventSink) error
-	benchHook    func(model.BenchmarkPlan, executor.BenchmarkEventSink) error
-	discoverHook func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
-	resetErr     error
-	startupTime  map[string]int64
+	pid            int
+	generation     uint64
+	runs           int
+	benches        int
+	discovers      int
+	resets         int
+	closed         atomic.Bool
+	runHook        func(model.TestPlan, executor.EventSink) error
+	runContextHook func(context.Context, model.TestPlan, executor.EventSink) error
+	benchHook      func(model.BenchmarkPlan, executor.BenchmarkEventSink) error
+	discoverHook   func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
+	resetErr       error
+	startupTime    map[string]int64
 }
 
-func (f *fakeWorker) Run(_ context.Context, plan model.TestPlan, sink executor.EventSink) error {
+func (f *fakeWorker) Run(ctx context.Context, plan model.TestPlan, sink executor.EventSink) error {
 	f.runs++
+	if f.runContextHook != nil {
+		return f.runContextHook(ctx, plan, sink)
+	}
 	if f.runHook != nil {
 		return f.runHook(plan, sink)
 	}
@@ -949,7 +953,7 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 	assert.Equal(t, 1, counts[model.EventRunFinished])
 	require.Len(t, processes, 2)
 	assert.False(t, processes[0].closed.Load(), "the primary worker remains warm")
-	assert.True(t, processes[1].closed.Load(), "the additional pooled worker is released")
+	assert.False(t, processes[1].closed.Load(), "the additional lane remains warm for the next run")
 	assert.Equal(t, 3, processes[0].runs+processes[1].runs)
 	assert.Equal(t, 3, processes[0].resets+processes[1].resets)
 
@@ -972,10 +976,10 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 	} {
 		assert.Contains(t, timings, phase)
 	}
-	require.Len(t, processes, 3, "the second command reuses the primary and creates only one extra lane")
+	require.Len(t, processes, 2, "the second command reuses every warm lane")
 	assert.False(t, processes[0].closed.Load())
-	assert.True(t, processes[2].closed.Load())
-	assert.Equal(t, 6, processes[0].runs+processes[1].runs+processes[2].runs)
+	assert.False(t, processes[1].closed.Load())
+	assert.Equal(t, 6, processes[0].runs+processes[1].runs)
 	require.Len(t, service.List(), 1)
 	assert.Equal(t, uint64(6), service.List()[0].Runs)
 }
@@ -1117,6 +1121,34 @@ func TestSessionServiceMultiFileRunLimitCountsPerWorkerLane(t *testing.T) {
 	values, ok := response.(map[string]any)
 	require.True(t, ok)
 	assert.ElementsMatch(t, []int{980, 980, 981, 981, 982}, values["worker_pids"])
+}
+
+func TestSessionServiceDoesNotReusePooledLanePastCurrentRunLimit(t *testing.T) {
+	t.Parallel()
+
+	old := &fakeWorker{pid: 990, generation: 1}
+	created := 0
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		created++
+		return &fakeWorker{pid: 990 + created, generation: options.Generation}, nil
+	}, 1)
+	service.sourceFactory = nil
+	entry := &session{id: "run-limit-change", project: "/project", godot: "godot"}
+	lane := &fileWorkerLane{process: old, born: time.Now().UTC(), workerRuns: 5}
+	service.sessions[entry.id] = entry
+	service.liveWorkers = 1
+
+	process, err := service.ensureFileWorker(context.Background(), entry, lane, 1, 5)
+	require.NoError(t, err)
+	assert.NotSame(t, old, process)
+	assert.True(t, old.closed.Load(), "a lane already at the current limit is retired before reuse")
+	assert.Equal(t, uint64(0), lane.workerRuns)
+	assert.Equal(t, 1, created)
+	assert.Equal(t, 1, service.WorkerCount())
+
+	entry.fileWorkers = append(entry.fileWorkers, lane)
+	require.NoError(t, service.Close(context.Background()))
+	assert.Zero(t, service.WorkerCount())
 }
 
 func waitServiceSignal(t *testing.T, values <-chan struct{}) {
