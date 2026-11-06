@@ -37,5 +37,6 @@ audio-state restoration in real Godot, opaque data paths, failed-start cleanup, 
 worker bound.
 
 The primary worker occupies one session slot between requests until normal idle or lifecycle
-recycling. Additional request lanes remain intentionally ephemeral, avoiding an unbounded
-per-session pool while retaining the dominant warm-worker benefit.
+recycling. ADR 0012 supersedes the original decision to make additional request lanes ephemeral:
+successful reuse-mode runs now retain those lanes under the same global worker bound so sharded
+runs do not repay Godot startup and shutdown on every invocation.

@@ -331,7 +331,9 @@ that share no nested suite, so suite hooks keep their serial semantics;
 `"case"` splits anywhere, relaxing suite hooks to once per shard containing
 that suite's cases. Files with at most 16 selected cases are never split, and
 `before_all`/`after_all` run once per shard in every partitioned mode. The
-`--partition` flag overrides the configured value. Section 8.2 of
+packing target is `ceil(total selected cases / jobs)` across the whole run;
+file-level fan-out therefore consumes available lanes before a dominant file
+is split. The `--partition` flag overrides the configured value. Section 8.2 of
 `api-spec.md` defines the author-facing guarantees; ADR 0011 records the
 decision.
 
@@ -695,6 +697,12 @@ when any of these occur:
 The daemon should maintain a warm replacement when allowed by the global
 budget. Replacement startup happens off the requesting client's critical path
 whenever possible.
+
+Successful multi-file and sharded runs retain their auxiliary lanes for the
+same project session and generation. The global worker budget remains the hard
+bound, and LRU session eviction, age, memory, taint, reset failure, generation,
+isolation, and `worker_max_runs` policies retire pooled lanes exactly as they
+retire the primary. See ADR 0012.
 
 Do not claim perfect in-process isolation. Tests needing guaranteed clean
 process state must be schedulable with `fresh` or `exclusive` policy.

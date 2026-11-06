@@ -634,9 +634,12 @@ byte-identical. See ADR 0011.
     --fail-on-skip --fail-on-todo --fail-on-void` — passed with exit 0 in file mode,
     `--partition suite`, `--partition case`, and suite with `--jobs 8`; per-case
     statuses were byte-identical across all four runs, and `run_finished` metadata
-    confirmed real shard dispatch (676 files → 1048 shards at the four-worker default,
-    1463 at the eight-shard bound). Wall-clock measurements on this many-small-files
-    suite are recorded in `docs/performance.md`: partitioning is a net slowdown here
-    (per-shard lane startup, registration re-execution, and per-shard file hooks), which
-    is the documented milestone-2 tradeoff that milestone 3 calibrates; `file` remains
-    the default.
+    confirmed real shard dispatch in the initial per-file sizing implementation (676 files →
+    1048 shards at the four-worker default, 1463 at the eight-shard bound). Follow-up consumer
+    profiling found that this oversharded an already-parallel suite and that auxiliary lanes were
+    discarded after every command. The corrected run-wide sizing emits 676 shards for the same
+    676-file selection and completes warm in 85.04 seconds with all 8161 cases passing; retained
+    lanes reduce a repeated four-way 137-case command from 19.6 to 2.2 seconds. Its case phase is
+    3.87x faster than serial; the complete 8161-case suite is 3.20x faster at four jobs (85.04
+    seconds) than one job (271.78 seconds). Measurements and fixed-overhead limits are recorded in
+    `docs/performance.md`; ADR 0012 records bounded auxiliary-lane reuse.

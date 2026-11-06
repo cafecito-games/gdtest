@@ -52,16 +52,33 @@ four-worker default budget, run under the project's strict CI flags. Back-to-bac
 | One 137-case file (warm) | `file` | 3.0 s |
 | One 137-case file | `suite` (4 shards, 4 jobs) | ~10.9 s |
 
-Per-case results were identical in every mode. The sharded single-file run's own metadata shows
-why: `worker_acquisition_startup` 8.34 s against 1.09 s of worker execution and 0.83 s of script
-load and dynamic definition. Intra-file sharding pays one cold worker lane per extra concurrent
-shard, re-executes the file's `suite()` registration once per shard, and runs `before_all`/
-`after_all` once per shard. A many-small-files suite already saturates the global worker budget
-through file-level fan-out, so on this project every partitioned mode is a net slowdown; the
-feature pays off only when one file's execution dominates the run. This is the expected
-milestone-2 tradeoff (ADR 0011); milestone 3 of the sharding epic calibrates `MinCasesPerShard`,
-the shard-count cap, and duration weighting against these measurements. Default projects keep
-`file` mode and are unaffected.
+Per-case results were identical in every mode. The first implementation split each eligible file
+independently up to the jobs bound and discarded every auxiliary worker after the request. The
+sharded single-file run consequently reported `worker_acquisition_startup` 8.34 s against 1.09 s
+of worker execution and 0.83 s of script load/dynamic definition, then waited for three worker
+shutdowns. The full suite already saturated all four lanes through file-level fan-out, so its 372
+extra shards only repeated registration and file hooks.
+
+The corrected implementation sizes against `ceil(total selected cases / jobs)` across the whole
+selection and retains successful auxiliary lanes under the global worker bound (ADRs 0011 and
+0012). Measured in the same disposable Uzir copy with the same strict flags:
+
+| Selection | Mode | Wall time | Execution evidence |
+| --- | --- | ---: | --- |
+| Full suite, warm | `case`, 1 job | 271.78 s | 676 files → 676 shards; 8,161 pass |
+| Full suite, warm | `case`, 4 jobs | 85.04 s | 676 files → 676 shards; 8,161 pass |
+| One 137-case file, warm | `file`, 1 job | 3.20 s | case hooks/body 949.6 ms; worker execution 1.670 s |
+| One 137-case file, warm | `case`, 4 jobs | 2.22 s | case hooks/body 245.3 ms; worker execution 0.631 s |
+| One 137-case file, first cold auxiliary lanes | `case`, 4 jobs | 17.32 s | acquisition/startup 7.89 s |
+
+The complete full suite scales by 3.20× from one to four workers. The selected large file's
+case-execution phase scales by 3.87×. Its worker execution including repeated per-shard script
+preparation scales by 2.65×, while complete CLI latency scales by 1.44× because static discovery,
+engine discovery, reporting, and registration are fixed or repeated costs. The warm full-suite
+result returns partition mode to the 85.2 s file-mode reference instead of the prior 121.6 s: when
+file fan-out already supplies enough work, the corrected planner emits no extra shards.
+`MinCasesPerShard = 16` remains a local floor; the run-wide target is the important guard against
+oversharding. These figures are observational, not asserted thresholds.
 
 
 A prior complete verification run on the same machine passed every corpus but became heavily

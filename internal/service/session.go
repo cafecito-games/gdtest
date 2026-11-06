@@ -112,14 +112,18 @@ type session struct {
 	project      string
 	godot        string
 	worker       managedWorker
-	workerBorn   time.Time
-	workerBytes  uint64
-	source       *sourcewatch.Reconciler
-	lastUsed     time.Time
-	runs         uint64
-	workerRuns   uint64
-	idleTTL      time.Duration
-	lifecycle    projectidentity.Lifecycle
+	// fileWorkers are idle auxiliary lanes retained after a multi-file run.
+	// They belong to this exact project/session just like worker; keeping them
+	// warm is what lets repeated sharded runs amortize Godot startup.
+	fileWorkers []*fileWorkerLane
+	workerBorn  time.Time
+	workerBytes uint64
+	source      *sourcewatch.Reconciler
+	lastUsed    time.Time
+	runs        uint64
+	workerRuns  uint64
+	idleTTL     time.Duration
+	lifecycle   projectidentity.Lifecycle
 }
 
 // SessionInfo is the stable daemon-sessions response.
@@ -440,13 +444,14 @@ func (s *SessionService) runFiles(
 		workerRuns: entry.workerRuns, workerBytes: entry.workerBytes,
 	}
 	for index := 1; index < jobs; index++ {
-		lanes[index] = &fileWorkerLane{}
-	}
-	defer func() {
-		for _, lane := range lanes[1:] {
-			s.retireFileWorker(entry, lane)
+		if len(entry.fileWorkers) == 0 {
+			lanes[index] = &fileWorkerLane{}
+			continue
 		}
-	}()
+		last := len(entry.fileWorkers) - 1
+		lanes[index] = entry.fileWorkers[last]
+		entry.fileWorkers = entry.fileWorkers[:last]
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type fileResult struct {
@@ -545,6 +550,15 @@ func (s *SessionService) runFiles(
 	}
 	if joined != nil || isolation == scheduler.Recycle || isolation == scheduler.Fresh {
 		s.discardWorker(entry)
+		for _, lane := range lanes[1:] {
+			s.recycleFileWorker(entry, lane)
+		}
+	} else {
+		for _, lane := range lanes[1:] {
+			if lane.process != nil {
+				entry.fileWorkers = append(entry.fileWorkers, lane)
+			}
+		}
 	}
 	if joined == nil && request.WarmWorkers > 0 {
 		s.warmReplacement(entry, request.Plan.Generation)
@@ -559,6 +573,7 @@ func (s *SessionService) runFiles(
 
 type fileWorkerLane struct {
 	process     managedWorker
+	born        time.Time
 	primary     bool
 	workerRuns  uint64
 	workerBytes uint64
@@ -656,7 +671,12 @@ func (s *SessionService) ensureFileWorker(
 	generation uint64,
 ) (managedWorker, error) {
 	if lane.process != nil {
-		return lane.process, nil
+		if lane.process.Generation() == generation &&
+			(s.maxWorkerAge <= 0 || lane.born.IsZero() || time.Since(lane.born) < s.maxWorkerAge) {
+			s.logLifecycle("worker_reused", entry, lane.process, "", map[string]any{"pooled": true})
+			return lane.process, nil
+		}
+		s.retireFileWorker(entry, lane)
 	}
 	if lane.primary {
 		process, err := s.ensureWorker(ctx, entry, generation)
@@ -685,6 +705,7 @@ func (s *SessionService) ensureFileWorker(
 		return nil, err
 	}
 	lane.process = process
+	lane.born = time.Now().UTC()
 	lane.workerRuns = 0
 	lane.workerBytes = 0
 	s.logLifecycle("worker_started", entry, process, "", map[string]any{"pooled": true})
@@ -714,8 +735,44 @@ func (s *SessionService) retireFileWorker(entry *session, lane *fileWorkerLane) 
 		s.releaseWorkerSlot()
 	}
 	lane.process = nil
+	lane.born = time.Time{}
 	lane.workerRuns = 0
 	lane.workerBytes = 0
+}
+
+// recycleFileWorker detaches an auxiliary lane immediately and releases its
+// global slot only after the exact child exits. Teardown therefore never adds
+// one shutdown timeout per lane to client-visible latency.
+func (s *SessionService) recycleFileWorker(entry *session, lane *fileWorkerLane) {
+	if lane == nil || lane.process == nil {
+		return
+	}
+	if lane.primary {
+		s.recycleWorker(entry)
+		return
+	}
+	process := lane.process
+	workerBytes := lane.workerBytes
+	s.logLifecycle("worker_recycled", entry, process, "", map[string]any{"pooled": true})
+	lane.process = nil
+	lane.born = time.Time{}
+	lane.workerRuns = 0
+	lane.workerBytes = 0
+	s.mu.Lock()
+	if s.totalWorkerBytes >= workerBytes {
+		s.totalWorkerBytes -= workerBytes
+	} else {
+		s.totalWorkerBytes = 0
+	}
+	s.mu.Unlock()
+	s.reapers.Add(1)
+	go func() {
+		defer s.reapers.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = process.Shutdown(shutdownCtx)
+		cancel()
+		s.releaseWorkerSlot()
+	}()
 }
 
 func (s *SessionService) recordFileWorkerMemory(entry *session, lane *fileWorkerLane) (bool, error) {
@@ -1257,7 +1314,7 @@ func (s *SessionService) reserveWorkerSlot(ctx context.Context, current *session
 			if !candidate.mu.TryLock() {
 				continue
 			}
-			if candidate.worker == nil {
+			if candidate.worker == nil && len(candidate.fileWorkers) == 0 {
 				candidate.mu.Unlock()
 				continue
 			}
@@ -1285,18 +1342,21 @@ func (s *SessionService) reserveWorkerSlot(ctx context.Context, current *session
 }
 
 func (s *SessionService) discardWorker(entry *session) {
-	if entry.worker == nil {
-		return
+	if entry.worker != nil {
+		s.logLifecycle("worker_discarded", entry, entry.worker, "", nil)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = entry.worker.Shutdown(shutdownCtx)
+		cancel()
+		entry.worker = nil
+		entry.workerBorn = time.Time{}
+		s.forgetWorkerMemory(entry)
+		entry.workerRuns = 0
+		s.releaseWorkerSlot()
 	}
-	s.logLifecycle("worker_discarded", entry, entry.worker, "", nil)
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_ = entry.worker.Shutdown(shutdownCtx)
-	cancel()
-	entry.worker = nil
-	entry.workerBorn = time.Time{}
-	s.forgetWorkerMemory(entry)
-	entry.workerRuns = 0
-	s.releaseWorkerSlot()
+	for _, lane := range entry.fileWorkers {
+		s.retireFileWorker(entry, lane)
+	}
+	entry.fileWorkers = nil
 }
 
 // recycleWorker detaches a completed worker immediately, then shuts it down
@@ -1304,23 +1364,26 @@ func (s *SessionService) discardWorker(entry *session) {
 // exact child has exited, so replacement startup can never exceed maxWorkers.
 // The caller must hold entry.mu.
 func (s *SessionService) recycleWorker(entry *session) {
-	if entry.worker == nil {
-		return
+	if entry.worker != nil {
+		process := entry.worker
+		s.logLifecycle("worker_recycled", entry, process, "", nil)
+		entry.worker = nil
+		entry.workerBorn = time.Time{}
+		s.forgetWorkerMemory(entry)
+		entry.workerRuns = 0
+		s.reapers.Add(1)
+		go func() {
+			defer s.reapers.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = process.Shutdown(shutdownCtx)
+			cancel()
+			s.releaseWorkerSlot()
+		}()
 	}
-	process := entry.worker
-	s.logLifecycle("worker_recycled", entry, process, "", nil)
-	entry.worker = nil
-	entry.workerBorn = time.Time{}
-	s.forgetWorkerMemory(entry)
-	entry.workerRuns = 0
-	s.reapers.Add(1)
-	go func() {
-		defer s.reapers.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = process.Shutdown(shutdownCtx)
-		cancel()
-		s.releaseWorkerSlot()
-	}()
+	for _, lane := range entry.fileWorkers {
+		s.recycleFileWorker(entry, lane)
+	}
+	entry.fileWorkers = nil
 }
 
 func (s *SessionService) logLifecycle(
@@ -1552,9 +1615,20 @@ func (s *SessionService) Close(ctx context.Context) error {
 	s.mu.Unlock()
 	for _, entry := range entries {
 		entry.mu.Lock()
+		workers := make([]managedWorker, 0, len(entry.fileWorkers)+1)
 		if entry.worker != nil {
-			joined = errors.Join(joined, entry.worker.Shutdown(ctx))
+			workers = append(workers, entry.worker)
 			entry.worker = nil
+		}
+		for _, lane := range entry.fileWorkers {
+			if lane.process != nil {
+				workers = append(workers, lane.process)
+				lane.process = nil
+			}
+		}
+		entry.fileWorkers = nil
+		for _, process := range workers {
+			joined = errors.Join(joined, process.Shutdown(ctx))
 			s.releaseWorkerSlot()
 		}
 		entry.mu.Unlock()

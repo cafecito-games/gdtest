@@ -424,7 +424,11 @@ its cases.
 
 Files with at most 16 selected cases are never split, a file with no legal cut
 stays a single shard without error, and sharding never changes case identity,
-per-case statuses, or report ordering.
+per-case statuses, or report ordering. Shard sizing considers the whole
+selection: existing file-level work fills lanes first, and only a file whose
+case count exceeds the run-wide per-lane target is split. This prevents a
+many-file run from duplicating registration and file hooks merely because
+individual files also exceed the minimum.
 
 ```gdscript
 # suites.test.gd — 30 cases in "Alpha", 6 in "Beta"

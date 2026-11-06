@@ -40,8 +40,11 @@ that chain being an ordered nesting, and protocol v4 (issue #23) added per-file
 3. **`before_all`/`after_all` run once per shard.** This is inherent to any
    intra-file parallelism: each shard is a fresh `GDTest` instance in its own
    worker process, exactly as a file runs today under a selection. Shards are
-   packed greedily in manifest order to `ceil(total/shard_count)` cases, with
-   `shard_count = min(jobs, legal cuts + 1)` capped by the worker budget.
+   packed greedily in manifest order. The app first computes a run-wide target
+   of `ceil(total selected cases / jobs)` and bounds each file's shard count by
+   `ceil(file cases / target)`. The pure partitioner then balances that file's
+   shards subject to the legal-cut rule. Existing file-level work therefore
+   fills lanes before a dominant file is split.
 
 4. **The app resolves focus and pre-flights policy before partitioning.** When
    partitioning is enabled, the app mirrors the worker's focus filter
@@ -50,11 +53,12 @@ that chain being an ordered nesting, and protocol v4 (issue #23) added per-file
    `Protocol.only_policy_error` so `require`/`forbid` violations are reported
    exactly once instead of once per shard.
 
-5. **Shards are same-path `FilePlan` entries; scheduling is unchanged.**
+5. **Shards are same-path `FilePlan` entries.**
    Each shard entry carries its `case_ids` subset plus the file's static
    method cases. `runFiles` already tolerates duplicate paths, folds
    per-worker `run_started`/`run_finished` into one pair, and cancels siblings
-   on first error, so no scheduler or lane changes were needed.
+   on first error. Auxiliary lanes are retained after successful reuse-mode
+   runs under ADR 0012 so repeated sharded runs amortize Godot startup.
    `run_finished` metadata now distinguishes `"files"` (distinct paths) from
    `"shards"` (dispatched entries).
 
@@ -77,7 +81,8 @@ that chain being an ordered nesting, and protocol v4 (issue #23) added per-file
   preferred order, and JUnit accumulates by file path so a file's shards merge
   under one suite.
 - `suite()` registration re-executes once per shard (each worker builds the
-  full suite tree), bounded by the jobs cap and the minimum-cases threshold;
+  full suite tree), bounded by the global case target, jobs cap, and the
+  minimum-cases threshold;
   milestone 3 of the sharding epic (issue #26) measures whether duration
   weighting or adjusted constants are warranted.
 - `--no-daemon` executes shards serially in one foreground worker: correct,

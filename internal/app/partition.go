@@ -106,13 +106,15 @@ func resolvePartition(
 	if jobsBound <= 0 {
 		jobsBound = automaticJobsBound
 	}
-	resolved.files = make([]model.FilePlan, 0, len(staticFiles))
-	for _, staticEntry := range staticFiles {
-		fileCases, isSelected := selectedByPath[staticEntry.Path]
-		if !isSelected || len(fileCases) == 0 {
-			resolved.files = append(resolved.files, staticEntry)
-			continue
-		}
+	// Size shards against the whole selected run, not against every file in
+	// isolation. File-level fan-out already fills the worker lanes in a large
+	// suite; splitting every eligible file up to jobs multiplies registration
+	// and hook overhead without exposing more useful concurrency. The global
+	// target keeps approximately jobs case-count units across the run while a
+	// single dominant file can still consume every otherwise-idle lane.
+	inputs := make(map[string][]shard.Case, len(selectedFiles))
+	totalCases := 0
+	for path, fileCases := range selectedByPath {
 		input := make([]shard.Case, 0, len(fileCases))
 		for _, testCase := range fileCases {
 			if focusFilter && !testCase.IsOnly {
@@ -124,7 +126,25 @@ func resolvePartition(
 			}
 			input = append(input, shard.Case{ID: testCase.ID, Suites: suites})
 		}
-		shards := shard.Partition(input, mode, jobsBound)
+		inputs[path] = input
+		totalCases += len(input)
+	}
+	targetCases := totalCases
+	if jobsBound > 0 && totalCases > 0 {
+		targetCases = (totalCases + jobsBound - 1) / jobsBound
+	}
+	resolved.files = make([]model.FilePlan, 0, len(staticFiles))
+	for _, staticEntry := range staticFiles {
+		input, isSelected := inputs[staticEntry.Path]
+		if !isSelected || len(input) == 0 {
+			resolved.files = append(resolved.files, staticEntry)
+			continue
+		}
+		shardBound := 1
+		if targetCases > 0 {
+			shardBound = min(jobsBound, (len(input)+targetCases-1)/targetCases)
+		}
+		shards := shard.Partition(input, mode, shardBound)
 		if len(shards) <= 1 {
 			resolved.files = append(resolved.files, staticEntry)
 			continue

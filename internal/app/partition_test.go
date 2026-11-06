@@ -109,6 +109,34 @@ func TestResolvePartitionKeepsSingleSuiteFileWhole(t *testing.T) {
 	assert.Empty(t, resolved.sharded)
 }
 
+func TestResolvePartitionDoesNotOvershardAnAlreadyParallelRun(t *testing.T) {
+	t.Parallel()
+
+	var staticFiles []model.FilePlan
+	var selected []model.DiscoveryFile
+	var selectedIDs []string
+	for index := range 8 {
+		path := "file-" + strconv.Itoa(index) + ".test.gd"
+		staticFiles = append(staticFiles, staticFile(path, 1))
+		cases := discoveryCases(path, 40, "", 0)
+		selected = append(selected, model.DiscoveryFile{Path: path, Cases: cases})
+		for _, testCase := range cases {
+			selectedIDs = append(selectedIDs, testCase.ID)
+		}
+	}
+
+	resolved := resolvePartition(
+		staticFiles, selected, selectedIDs, "auto", shard.ModeCase, 4,
+	)
+
+	require.Len(t, resolved.files, len(staticFiles))
+	assert.Empty(t, resolved.sharded,
+		"file fan-out already supplies more work units than worker lanes")
+	for _, file := range resolved.files {
+		assert.Nil(t, file.CaseIDs, "unsplit entries keep their wire representation")
+	}
+}
+
 func TestResolvePartitionResolvesFocusAppSide(t *testing.T) {
 	t.Parallel()
 

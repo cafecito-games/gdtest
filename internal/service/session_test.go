@@ -953,7 +953,7 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 	assert.Equal(t, 1, counts[model.EventRunFinished])
 	require.Len(t, processes, 2)
 	assert.False(t, processes[0].closed.Load(), "the primary worker remains warm")
-	assert.True(t, processes[1].closed.Load(), "the additional pooled worker is released")
+	assert.False(t, processes[1].closed.Load(), "the additional lane remains warm for the next run")
 	assert.Equal(t, 3, processes[0].runs+processes[1].runs)
 	assert.Equal(t, 3, processes[0].resets+processes[1].resets)
 
@@ -976,10 +976,10 @@ func TestSessionServiceSchedulesFilesConcurrentlyWithinProjectJobs(t *testing.T)
 	} {
 		assert.Contains(t, timings, phase)
 	}
-	require.Len(t, processes, 3, "the second command reuses the primary and creates only one extra lane")
+	require.Len(t, processes, 2, "the second command reuses every warm lane")
 	assert.False(t, processes[0].closed.Load())
-	assert.True(t, processes[2].closed.Load())
-	assert.Equal(t, 6, processes[0].runs+processes[1].runs+processes[2].runs)
+	assert.False(t, processes[1].closed.Load())
+	assert.Equal(t, 6, processes[0].runs+processes[1].runs)
 	require.Len(t, service.List(), 1)
 	assert.Equal(t, uint64(6), service.List()[0].Runs)
 }
