@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/cafecito-games/gdtest/internal/model"
 )
@@ -16,6 +17,8 @@ type CaseResult struct {
 	Status     string          `json:"status"`
 	File       string          `json:"file,omitempty"`
 	Line       int             `json:"line,omitempty"`
+	Message    string          `json:"message,omitempty"`
+	Duration   time.Duration   `json:"duration_ns,omitempty"`
 	Failures   []model.Event   `json:"failures,omitempty"`
 	Warnings   []model.Event   `json:"warnings,omitempty"`
 	Output     []model.Event   `json:"output,omitempty"`
@@ -29,6 +32,7 @@ type Summary struct {
 	Cases          []CaseResult    `json:"cases"`
 	Failures       []model.Event   `json:"failures,omitempty"`
 	Warnings       []model.Event   `json:"warnings,omitempty"`
+	Output         []model.Event   `json:"output,omitempty"`
 	Errors         []model.Event   `json:"errors,omitempty"`
 	Infrastructure []model.Event   `json:"infrastructure,omitempty"`
 	Passed         int             `json:"passed"`
@@ -65,6 +69,7 @@ type Collector struct {
 	ended          bool
 	failures       []model.Event
 	warnings       []model.Event
+	output         []model.Event
 	errors         []model.Event
 	infrastructure []model.Event
 	runStatus      string
@@ -101,7 +106,9 @@ func (c *Collector) Emit(event model.Event) error {
 		if _, exists := c.cases[event.TestID]; exists {
 			return errors.New("duplicate case_started event for " + event.TestID)
 		}
-		c.cases[event.TestID] = &CaseResult{ID: event.TestID, Name: event.Name}
+		result := &CaseResult{ID: event.TestID, Name: event.Name}
+		applyCaseLocation(result, event.Location)
+		c.cases[event.TestID] = result
 		c.order = append(c.order, event.TestID)
 	case model.EventAssertionFail:
 		if event.TestID == "" {
@@ -118,12 +125,21 @@ func (c *Collector) Emit(event model.Event) error {
 			result.Warnings = append(result.Warnings, event)
 		}
 	case model.EventOutput:
-		result := c.ensureCase(event.TestID)
-		result.Output = append(result.Output, event)
+		if event.TestID == "" {
+			c.output = append(c.output, event)
+		} else {
+			result := c.ensureCase(event.TestID)
+			result.Output = append(result.Output, event)
+		}
 	case model.EventCaseFinished:
 		result := c.ensureCase(event.TestID)
 		result.Status = event.Status
 		result.Assertions = event.Assertions
+		result.Duration = event.Duration
+		if event.Message != "" {
+			result.Message = event.Message
+		}
+		applyCaseLocation(result, event.Location)
 		result.Messages = append([]string(nil), event.Messages...)
 		result.Outcomes = append([]model.Outcome(nil), event.Outcomes...)
 		if event.Name != "" {
@@ -158,6 +174,18 @@ func isFrameworkError(event model.Event) bool {
 	return false
 }
 
+func applyCaseLocation(result *CaseResult, location *model.Location) {
+	if location == nil {
+		return
+	}
+	if result.File == "" && location.File != "" {
+		result.File = location.File
+	}
+	if result.Line == 0 && location.Line > 0 {
+		result.Line = location.Line
+	}
+}
+
 func (c *Collector) ensureCase(id string) *CaseResult {
 	if result, exists := c.cases[id]; exists {
 		return result
@@ -190,6 +218,7 @@ func (c *Collector) Summary() Summary {
 		Cases:          make([]CaseResult, 0, len(ids)),
 		Failures:       append([]model.Event(nil), c.failures...),
 		Warnings:       append([]model.Event(nil), c.warnings...),
+		Output:         append([]model.Event(nil), c.output...),
 		Errors:         append([]model.Event(nil), c.errors...),
 		Failed:         len(c.failures),
 		Stale:          c.stale,

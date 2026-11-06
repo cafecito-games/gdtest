@@ -2,6 +2,7 @@ package results
 
 import (
 	"testing"
+	"time"
 
 	"github.com/cafecito-games/gdtest/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -321,4 +322,76 @@ func TestCollectorFoldsSuiteAndFileLeakFailuresWithoutCreatingEmptyCase(t *testi
 	assert.Equal(t, "suite.test.gd::test_ok", summary.Cases[0].ID)
 	require.Len(t, summary.Failures, 1)
 	assert.Equal(t, "leak", summary.Failures[0].Assertion)
+}
+
+func TestCollectorFoldsCaseLocationDurationAndErrorMessage(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollector()
+	events := []model.Event{
+		{
+			Type:     model.EventCaseStarted,
+			TestID:   "tests/timing.test.gd::test_timeout",
+			Name:     "timeout",
+			Location: &model.Location{File: "tests/timing.test.gd", Line: 14},
+		},
+		{
+			Type:     model.EventCaseFinished,
+			TestID:   "tests/timing.test.gd::test_timeout",
+			Name:     "timeout",
+			Status:   "error",
+			Message:  "case timed out after 5s",
+			Location: &model.Location{File: "tests/timing.test.gd", Line: -1},
+			Duration: 1500 * time.Microsecond,
+		},
+		{
+			Type:     model.EventCaseFinished,
+			TestID:   "tests/direct.test.gd::test_direct",
+			Name:     "direct",
+			Status:   "pass",
+			Location: &model.Location{File: "tests/direct.test.gd", Line: 7},
+			Duration: 250 * time.Microsecond,
+		},
+	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+
+	summary := collector.Summary()
+	require.Len(t, summary.Cases, 2)
+
+	assert.Equal(t, "tests/timing.test.gd", summary.Cases[0].File)
+	assert.Equal(t, 14, summary.Cases[0].Line)
+	assert.Equal(t, "case timed out after 5s", summary.Cases[0].Message)
+	assert.Equal(t, 1500*time.Microsecond, summary.Cases[0].Duration)
+
+	assert.Equal(t, "tests/direct.test.gd", summary.Cases[1].File)
+	assert.Equal(t, 7, summary.Cases[1].Line)
+	assert.Equal(t, 250*time.Microsecond, summary.Cases[1].Duration)
+}
+
+func TestCollectorFoldsUnattributedOutputWithoutCreatingEmptyCase(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollector()
+	require.NoError(t, collector.Emit(model.Event{
+		Type:    model.EventOutput,
+		Message: "gdtest-output-marker",
+	}))
+	require.NoError(t, collector.Emit(model.Event{
+		Type:   model.EventCaseStarted,
+		TestID: "suite.test.gd::test_ok",
+		Name:   "Ok",
+	}))
+	require.NoError(t, collector.Emit(model.Event{
+		Type:   model.EventCaseFinished,
+		TestID: "suite.test.gd::test_ok",
+		Status: "pass",
+	}))
+
+	summary := collector.Summary()
+	require.Len(t, summary.Cases, 1)
+	assert.Equal(t, "suite.test.gd::test_ok", summary.Cases[0].ID)
+	require.Len(t, summary.Output, 1)
+	assert.Equal(t, "gdtest-output-marker", summary.Output[0].Message)
 }

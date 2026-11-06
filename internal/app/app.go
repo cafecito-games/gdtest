@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -30,7 +29,6 @@ import (
 	"github.com/cafecito-games/gdtest/internal/model"
 	projectidentity "github.com/cafecito-games/gdtest/internal/project"
 	"github.com/cafecito-games/gdtest/internal/protocol"
-	"github.com/cafecito-games/gdtest/internal/reporter"
 	"github.com/cafecito-games/gdtest/internal/results"
 	"github.com/cafecito-games/gdtest/internal/scheduler"
 	"github.com/cafecito-games/gdtest/internal/service"
@@ -88,24 +86,26 @@ func Run(ctx context.Context, arguments []string, streams IO) int {
 }
 
 type runOptions struct {
-	project     string
-	godot       string
-	json        bool
-	allowEmpty  bool
-	noDaemon    bool
-	name        string
-	onlyMode    string
-	affected    []string
-	affectedSet bool
-	verbose     bool
-	isolation   string
-	jobs        int
-	jobsSet     bool
-	staleRetry  int
-	failOnSkip  bool
-	failOnTodo  bool
-	failOnVoid  bool
-	selectors   []string
+	project      string
+	godot        string
+	json         bool
+	reportFormat string
+	reportFile   string
+	allowEmpty   bool
+	noDaemon     bool
+	name         string
+	onlyMode     string
+	affected     []string
+	affectedSet  bool
+	verbose      bool
+	isolation    string
+	jobs         int
+	jobsSet      bool
+	staleRetry   int
+	failOnSkip   bool
+	failOnTodo   bool
+	failOnVoid   bool
+	selectors    []string
 }
 
 type benchmarkOptions struct {
@@ -350,7 +350,13 @@ func addProjectFlag(command *cobra.Command, project *string) {
 func addRunFlags(command *cobra.Command, options *runOptions) {
 	addProjectFlag(command, &options.project)
 	command.Flags().StringVar(&options.godot, "godot", "", "Godot executable (overrides project and user configuration)")
-	command.Flags().BoolVar(&options.json, "json", false, "write JSON Lines events")
+	command.Flags().BoolVar(&options.json, "json", false, "shorthand for --report-format jsonl")
+	command.Flags().StringVar(&options.reportFormat, "report-format", "", "report format: terminal, jsonl, or junit")
+	command.Flags().StringVar(
+		&options.reportFile, "report-file", "",
+		"atomically write the formatted report to this file while keeping terminal output on stdout",
+	)
+	command.MarkFlagsMutuallyExclusive("json", "report-format")
 	command.Flags().BoolVar(&options.allowEmpty, "allow-empty", false, "allow selectors that match no tests")
 	command.Flags().BoolVar(&options.noDaemon, "no-daemon", false, "run orchestration in the foreground")
 	command.Flags().StringVar(&options.name, "name", "", "select tests whose name contains this text")
@@ -437,6 +443,10 @@ func migrationPaths(ctx context.Context, root string) ([]string, error) {
 }
 
 func watchTests(ctx context.Context, options runOptions, streams IO) int {
+	if _, err := resolveReportConfig(options); err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
 	root, err := projectRoot(options.project)
 	if err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
@@ -493,6 +503,11 @@ func initialize(project string, streams IO) error {
 func runTests(ctx context.Context, options runOptions, streams IO) int {
 	commandStarted := time.Now()
 	timings := make(map[string]time.Duration)
+	reporting, err := resolveReportConfig(options)
+	if err != nil {
+		writeDiagnostic(streams.Err, "gdtest:", err)
+		return ExitError
+	}
 	if _, err := scheduler.ParseIsolation(options.isolation); err != nil {
 		writeDiagnostic(streams.Err, "gdtest:", err)
 		return ExitError
@@ -552,10 +567,9 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		}
 		discoveryManifest = affectedResult.Manifest
 		if len(discoveryManifest.Files) == 0 {
-			if options.json {
-				_, _ = fmt.Fprintln(streams.Out, `{"type":"summary","passed":0,"message":"no tests were affected"}`)
-			} else {
-				_, _ = fmt.Fprintln(streams.Out, "no tests were affected")
+			if err := reporting.writeEmptySelection(streams.Out, "no tests were affected"); err != nil {
+				writeDiagnostic(streams.Err, "gdtest: report:", err)
+				return ExitError
 			}
 			return ExitOK
 		}
@@ -576,7 +590,7 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		}
 		var findings *manifestErrors
 		if errors.As(err, &findings) {
-			if writeErr := findings.writeTo(streams.Out); writeErr != nil {
+			if writeErr := reporting.writeManifestErrors(streams.Out, findings); writeErr != nil {
 				writeDiagnostic(streams.Err, "gdtest: report:", writeErr)
 			}
 			return ExitError
@@ -600,11 +614,9 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		if message == "" {
 			message = "No tests selected."
 		}
-		if options.json {
-			encoded, _ := json.Marshal(map[string]any{"type": "summary", "passed": 0, "message": message})
-			_, _ = fmt.Fprintln(streams.Out, string(encoded))
-		} else {
-			_, _ = fmt.Fprintln(streams.Out, message)
+		if err := reporting.writeEmptySelection(streams.Out, message); err != nil {
+			writeDiagnostic(streams.Err, "gdtest: report:", err)
+			return ExitError
 		}
 		return ExitOK
 	}
@@ -616,22 +628,12 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		Files: discoveryManifest.Files,
 	}
 	collector := results.NewCollectorWithOrder(selected.ids)
-	var eventReporter executor.EventSink
-	var finish func(results.Summary) error
-	if options.json {
-		machine := reporter.NewJSONL(streams.Out)
-		eventReporter = machine
-		finish = machine.Summary
-	} else {
-		terminal := reporter.NewTerminalWithOptions(streams.Out, options.verbose)
-		eventReporter = terminal
-		finish = terminal.Summary
-	}
+	session := reporting.newSession(streams.Out)
 	sink := executor.EventSinkFunc(func(event model.Event) error {
 		if err := collector.Emit(event); err != nil {
 			return err
 		}
-		return eventReporter.Emit(event)
+		return session.Emit(event)
 	})
 	executionTimings, err := executePlan(
 		ctx, sessionID, root, projectConfig.Godot, projectConfig.WorkerMaxRuns,
@@ -673,17 +675,15 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		FailOnVoid: options.failOnVoid,
 	})
 	reportingStarted := time.Now()
-	if err := finish(summary); err != nil {
+	if err := session.Summary(summary); err != nil {
 		writeDiagnostic(streams.Err, "gdtest: report:", err)
 		return ExitError
 	}
 	timings["reporting"] = time.Since(reportingStarted)
 	timings["client_total"] = time.Since(commandStarted)
-	if options.verbose || options.json {
-		if err := writeTimings(streams, timings, options.json); err != nil {
-			writeDiagnostic(streams.Err, "gdtest: timings:", err)
-			return ExitError
-		}
+	if err := session.CompleteTimingsAndPublish(streams, timings); err != nil {
+		writeDiagnostic(streams.Err, "gdtest: report:", err)
+		return ExitError
 	}
 	if executionErr != nil {
 		writeDiagnostic(streams.Err, "gdtest:", executionErr)
@@ -1121,27 +1121,6 @@ func executePlan(
 		timings[name] = time.Duration(nanoseconds)
 	}
 	return timings, nil
-}
-
-func writeTimings(streams IO, timings map[string]time.Duration, machine bool) error {
-	names := make([]string, 0, len(timings))
-	for name := range timings {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	if machine {
-		values := make(map[string]int64, len(timings))
-		for _, name := range names {
-			values[name] = timings[name].Nanoseconds()
-		}
-		return json.NewEncoder(streams.Out).Encode(map[string]any{"type": "timings", "timings_ns": values})
-	}
-	for _, name := range names {
-		if _, err := fmt.Fprintf(streams.Err, "gdtest: timing %s=%s\n", name, timings[name]); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // maxStaleRetries bounds how many times one invocation re-plans after the

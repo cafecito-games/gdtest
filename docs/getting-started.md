@@ -83,6 +83,6 @@ Useful commands:
 ./addons/gdtest/gdtest daemon logs
 ```
 
-Exit codes are 0 for success, 1 for test failures, 2 for usage/discovery/infrastructure errors, and 130 for cancellation. `--json` emits immutable events followed by summary and timing records. `--verbose` prints phase timings, including a distinct `project_bootstrap_import` phase when a fresh checkout needs its initial Godot import. Human reports show source-located failures as they arrive.
+Exit codes are 0 for success, 1 for test failures, 2 for usage/discovery/infrastructure errors, and 130 for cancellation. `--report-format` selects `terminal`, `jsonl`, or `junit` (`--json` is shorthand for `--report-format jsonl`), and `--report-file` writes the formatted report atomically while preserving terminal output on stdout. `--verbose` prints phase timings, including a distinct `project_bootstrap_import` phase when a fresh checkout needs its initial Godot import. Human reports show source-located failures as they arrive.
 
 The full public API, actual-first assertion order, outcomes, hook behavior, stable-ID encoding, focus behavior, and deliberately absent Vest APIs are defined by [api-spec.md](../api-spec.md).

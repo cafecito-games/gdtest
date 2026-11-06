@@ -11,6 +11,23 @@ import (
 	"github.com/cafecito-games/gdtest/internal/results"
 )
 
+// Supported report formats for gdtest run and watch.
+const (
+	FormatTerminal = "terminal"
+	FormatJSONL    = "jsonl"
+	FormatJUnit    = "junit"
+)
+
+// ValidateFormat checks whether format is a supported report format name.
+func ValidateFormat(format string) error {
+	switch format {
+	case FormatTerminal, FormatJSONL, FormatJUnit:
+		return nil
+	default:
+		return fmt.Errorf("report format %q must be %s, %s, or %s", format, FormatTerminal, FormatJSONL, FormatJUnit)
+	}
+}
+
 // JSONL writes exactly one event per line with no decorative output.
 type JSONL struct{ encoder *json.Encoder }
 
@@ -145,14 +162,18 @@ func (r *Terminal) Summary(summary results.Summary) error {
 }
 
 func (r *Terminal) writeOutput(event model.Event) error {
+	_, err := fmt.Fprintf(r.writer, "OUTPUT %s: %s\n", event.TestID, outputText(event))
+	return err
+}
+
+func outputText(event model.Event) string {
 	text := event.Message
 	if text == "" && event.Metadata != nil {
 		if value, ok := event.Metadata["text"].(string); ok {
 			text = value
 		}
 	}
-	_, err := fmt.Fprintf(r.writer, "OUTPUT %s: %s\n", event.TestID, text)
-	return err
+	return text
 }
 
 func diagnosticValues(event model.Event) string {
