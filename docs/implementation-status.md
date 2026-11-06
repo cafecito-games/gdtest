@@ -628,11 +628,15 @@ byte-identical. See ADR 0011.
     config and flag precedence including exit 2 for invalid values; an empty selection
     still succeeds; JUnit merges a file's shards under one suite.
   - Consumer verification (2026-11-06): the branch was packaged with
-    `scripts/package-addon 0.0.0-issue-24` and installed into a disposable copy of the
-    Uzir client project through the real consumer path (`gpm install`, host-only, as
+    `scripts/package-addon 0.0.0-issue-24` and installed into a disposable copy of the Uzir
+    client project through the real consumer path (`gpm install`, host-only, as
     Uzir's CI does). Its full suite — 676 files, 8161 cases, `--only forbid
     --fail-on-skip --fail-on-todo --fail-on-void` — passed with exit 0 in file mode,
     `--partition suite`, `--partition case`, and suite with `--jobs 8`; per-case
     statuses were byte-identical across all four runs, and `run_finished` metadata
     confirmed real shard dispatch (676 files → 1048 shards at the four-worker default,
-    1463 at the eight-shard bound).
+    1463 at the eight-shard bound). Wall-clock measurements on this many-small-files
+    suite are recorded in `docs/performance.md`: partitioning is a net slowdown here
+    (per-shard lane startup, registration re-execution, and per-shard file hooks), which
+    is the documented milestone-2 tradeoff that milestone 3 calibrates; `file` remains
+    the default.

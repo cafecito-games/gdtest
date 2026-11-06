@@ -38,6 +38,32 @@ On 2026-11-05, `GDTEST_PERFORMANCE_SAMPLES=5 GDTEST_LATENCY_SAMPLES=30 scripts/b
 
 These are reference measurements, not portable thresholds. The corpus run also verifies every assertion count, every dynamic case start/finish pair, and every terminal status. It exposed and removed a quadratic dynamic-ID ordinal scan; ordinals are now tracked per source line in constant time.
 
+## Partitioning overhead on a real consumer suite
+
+On 2026-11-06 the issue #24 branch (pre-release build `0.0.0-issue-24`) was measured against a
+copy of the Uzir client project — 676 files, 8161 cases, average 12 cases per file, largest file
+137 cases — on `linux/amd64` (16 cores, Go 1.26.2, Godot 4.7.2 Cafecito), warm daemon and caches,
+four-worker default budget, run under the project's strict CI flags. Back-to-back pairs:
+
+| Selection | Mode | Wall time |
+| --- | --- | ---: |
+| Full suite | `file` | 85.2 s, then 99.0 s |
+| Full suite | `suite` | 122.3 s, then 121.6 s |
+| One 137-case file (warm) | `file` | 3.0 s |
+| One 137-case file | `suite` (4 shards, 4 jobs) | ~10.9 s |
+
+Per-case results were identical in every mode. The sharded single-file run's own metadata shows
+why: `worker_acquisition_startup` 8.34 s against 1.09 s of worker execution and 0.83 s of script
+load and dynamic definition. Intra-file sharding pays one cold worker lane per extra concurrent
+shard, re-executes the file's `suite()` registration once per shard, and runs `before_all`/
+`after_all` once per shard. A many-small-files suite already saturates the global worker budget
+through file-level fan-out, so on this project every partitioned mode is a net slowdown; the
+feature pays off only when one file's execution dominates the run. This is the expected
+milestone-2 tradeoff (ADR 0011); milestone 3 of the sharding epic calibrates `MinCasesPerShard`,
+the shard-count cap, and duration weighting against these measurements. Default projects keep
+`file` mode and are unaffected.
+
+
 A prior complete verification run on the same machine passed every corpus but became heavily
 contended while unrelated Swift builds were active. It observed a full-CLI median/p95 of
 110.5/168.0 ms and a direct daemon/worker median/p95 of 55.5/132.0 ms; even the 10,000-case
