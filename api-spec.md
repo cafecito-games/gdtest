@@ -411,16 +411,17 @@ key in `gdtest.json` or the `gdtest run --partition` flag (the flag wins):
 | Mode | Cut rule | `before_suite`/`after_suite` | `before_all`/`after_all` |
 | --- | --- | --- | --- |
 | `file` (default; absent) | never split | once per suite | once per file |
-| `suite` | only between cases where no nested suite spans the boundary | once per suite, wrapping exactly its selected cases — identical to serial execution | once per shard |
-| `case` | anywhere | once per shard containing cases of that suite | once per shard |
+| `suite` | only between cases where no nested suite spans the boundary | root suite once per shard; every nested suite once, wrapping exactly its selected cases | once per shard |
+| `case` | anywhere | root suite once per shard; every nested suite once per shard containing its cases | once per shard |
 
 `before_all`/`after_all` running once per shard is inherent to intra-file
 parallelism: each shard is a fresh test-file instance in its own worker
-process, exactly as a file runs today under a selection. In `suite` mode,
-suite hooks run exactly once per suite per run — the same guarantee as serial
-execution, on a different wall-clock interleaving. `case` mode is the
-documented relaxation: a suite's hooks run once per shard that contains any of
-its cases.
+process, exactly as a file runs today under a selection. The root suite is the
+file's suite scope, so its `before_suite`/`after_suite` hooks also run once per
+shard. In `suite` mode, every nested suite's hooks run exactly once per run —
+the same guarantee as serial execution, on a different wall-clock
+interleaving. `case` mode is the documented relaxation: a nested suite's hooks
+run once per shard that contains any of its cases.
 
 Files with at most 16 selected cases are never split, a file with no legal cut
 stays a single shard without error, and sharding never changes case identity,
@@ -467,8 +468,9 @@ func suite() -> void:
 Running `gdtest run --partition suite` on the file above with two available
 workers executes Alpha's cases and Beta's cases concurrently in separate
 worker processes; every case observes `before_all` once, each suite's
-`before_suite`/`after_suite` wraps exactly its own cases, and the report lists
-all 36 cases in the same order as an unpartitioned run.
+`before_suite`/`after_suite` wraps exactly its own cases, the root suite hooks
+run once in each worker, and the report lists all 36 cases in the same order as
+an unpartitioned run.
 
 ## 9. Public metadata
 

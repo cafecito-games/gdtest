@@ -1123,6 +1123,34 @@ func TestSessionServiceMultiFileRunLimitCountsPerWorkerLane(t *testing.T) {
 	assert.ElementsMatch(t, []int{980, 980, 981, 981, 982}, values["worker_pids"])
 }
 
+func TestSessionServiceDoesNotReusePooledLanePastCurrentRunLimit(t *testing.T) {
+	t.Parallel()
+
+	old := &fakeWorker{pid: 990, generation: 1}
+	created := 0
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		created++
+		return &fakeWorker{pid: 990 + created, generation: options.Generation}, nil
+	}, 1)
+	service.sourceFactory = nil
+	entry := &session{id: "run-limit-change", project: "/project", godot: "godot"}
+	lane := &fileWorkerLane{process: old, born: time.Now().UTC(), workerRuns: 5}
+	service.sessions[entry.id] = entry
+	service.liveWorkers = 1
+
+	process, err := service.ensureFileWorker(context.Background(), entry, lane, 1, 5)
+	require.NoError(t, err)
+	assert.NotSame(t, old, process)
+	assert.True(t, old.closed.Load(), "a lane already at the current limit is retired before reuse")
+	assert.Equal(t, uint64(0), lane.workerRuns)
+	assert.Equal(t, 1, created)
+	assert.Equal(t, 1, service.WorkerCount())
+
+	entry.fileWorkers = append(entry.fileWorkers, lane)
+	require.NoError(t, service.Close(context.Background()))
+	assert.Zero(t, service.WorkerCount())
+}
+
 func waitServiceSignal(t *testing.T, values <-chan struct{}) {
 	t.Helper()
 	select {

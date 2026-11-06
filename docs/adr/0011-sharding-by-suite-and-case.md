@@ -29,11 +29,13 @@ that chain being an ordered nesting, and protocol v4 (issue #23) added per-file
    carry no chain and belong to the root suite only.
 
 2. **`suite` is the safe default when partitioning is enabled; `file` remains
-   the project default.** In `suite` mode each suite's `before_suite` and
-   `after_suite` run exactly once per run, wrapping exactly its selected cases
-   — identical to serial execution on a different wall-clock interleaving,
-   because no suite spans a shard boundary. `case` mode is an explicit opt-in
-   that relaxes suite hooks to once per shard containing that suite's cases.
+   the project default.** In `suite` mode each nested suite's `before_suite`
+   and `after_suite` run exactly once per run, wrapping exactly its selected
+   cases — identical to serial execution on a different wall-clock
+   interleaving, because no nested suite spans a shard boundary. The root suite
+   is the file's suite scope and therefore runs once per shard. `case` mode is
+   an explicit opt-in that relaxes nested suite hooks to once per shard
+   containing that suite's cases.
    Files at or below `MinCasesPerShard` (16) selected cases are never split,
    and a file with no legal cut stays a single shard without error.
 

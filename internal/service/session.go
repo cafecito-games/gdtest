@@ -605,7 +605,9 @@ func (s *SessionService) runFileOnWorker(
 ) (any, error) {
 	timings := map[string]int64{"queue_wait": queueWait.Nanoseconds()}
 	workerStarted := time.Now()
-	process, err := s.ensureFileWorker(ctx, entry, lane, request.Plan.Generation)
+	process, err := s.ensureFileWorker(
+		ctx, entry, lane, request.Plan.Generation, request.WorkerMaxRuns,
+	)
 	timings["worker_acquisition_startup"] = time.Since(workerStarted).Nanoseconds()
 	if err != nil {
 		return nil, err
@@ -669,9 +671,11 @@ func (s *SessionService) ensureFileWorker(
 	entry *session,
 	lane *fileWorkerLane,
 	generation uint64,
+	workerMaxRuns int,
 ) (managedWorker, error) {
 	if lane.process != nil {
-		if lane.process.Generation() == generation &&
+		withinRunLimit := workerMaxRuns <= 0 || lane.workerRuns < uint64(workerMaxRuns)
+		if withinRunLimit && lane.process.Generation() == generation &&
 			(s.maxWorkerAge <= 0 || lane.born.IsZero() || time.Since(lane.born) < s.maxWorkerAge) {
 			s.logLifecycle("worker_reused", entry, lane.process, "", map[string]any{"pooled": true})
 			return lane.process, nil

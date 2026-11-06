@@ -327,10 +327,12 @@ limit.
 
 `partition` selects how large test files are scheduled across workers:
 `"file"` (default) never splits a file; `"suite"` splits only between cases
-that share no nested suite, so suite hooks keep their serial semantics;
-`"case"` splits anywhere, relaxing suite hooks to once per shard containing
-that suite's cases. Files with at most 16 selected cases are never split, and
-`before_all`/`after_all` run once per shard in every partitioned mode. The
+that share no nested suite, so nested suite hooks keep their serial semantics;
+`"case"` splits anywhere, relaxing nested suite hooks to once per shard
+containing that suite's cases. Root-suite hooks follow file scope and run once
+per shard in both partitioned modes. Files with at most 16 selected cases are
+never split, and `before_all`/`after_all` run once per shard in every
+partitioned mode. The
 packing target is `ceil(total selected cases / jobs)` across the whole run;
 file-level fan-out therefore consumes available lanes before a dominant file
 is split. The `--partition` flag overrides the configured value. Section 8.2 of
