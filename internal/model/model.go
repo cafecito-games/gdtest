@@ -12,7 +12,7 @@ import (
 )
 
 // ProtocolVersion is the serialized plan and event schema version.
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -90,26 +90,50 @@ type TestPlan struct {
 	LeakCheck          LeakCheck     `json:"leak_check,omitzero"`
 	SelectionApplied   bool          `json:"selection_applied,omitempty"`
 	SelectedIDs        []string      `json:"selected_ids,omitempty"`
+	HasFocus           *bool         `json:"has_focus,omitempty"`
 	Files              []FilePlan    `json:"files"`
 }
 
 // FilePlan is one serial file-level scheduling unit.
 type FilePlan struct {
-	Path  string     `json:"path"`
-	Cases []CasePlan `json:"cases"`
+	Path    string     `json:"path"`
+	CaseIDs []string   `json:"case_ids,omitempty"`
+	Cases   []CasePlan `json:"cases"`
 }
 
 // MarshalJSON preserves an explicit empty static-case list so a backend can
-// distinguish a dynamic-only file from a legacy plan that omitted discovery.
+// distinguish a dynamic-only file from a legacy plan that omitted discovery,
+// and preserves an explicit empty case_ids subset as a legal empty shard.
 func (f FilePlan) MarshalJSON() ([]byte, error) {
 	cases := f.Cases
 	if cases == nil {
 		cases = []CasePlan{}
 	}
+	var caseIDs *[]string
+	if f.CaseIDs != nil {
+		caseIDs = &f.CaseIDs
+	}
 	return json.Marshal(struct {
-		Path  string     `json:"path"`
-		Cases []CasePlan `json:"cases"`
-	}{Path: f.Path, Cases: cases})
+		Path    string     `json:"path"`
+		CaseIDs *[]string  `json:"case_ids,omitempty"`
+		Cases   []CasePlan `json:"cases"`
+	}{Path: f.Path, CaseIDs: caseIDs, Cases: cases})
+}
+
+// ValidateCaseIDs rejects empty entries and duplicates within one file
+// entry's explicit case subset; both would make shard execution ambiguous.
+func (f FilePlan) ValidateCaseIDs() error {
+	seen := make(map[string]int, len(f.CaseIDs))
+	for index, id := range f.CaseIDs {
+		if id == "" {
+			return fmt.Errorf("file %q case_ids[%d]: case ID must not be empty", f.Path, index)
+		}
+		if first, exists := seen[id]; exists {
+			return fmt.Errorf("file %q case_ids[%d]: %q duplicates case_ids[%d]", f.Path, index, id, first)
+		}
+		seen[id] = index
+	}
+	return nil
 }
 
 // CasePlan identifies a statically discovered method test.

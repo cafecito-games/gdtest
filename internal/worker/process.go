@@ -1357,6 +1357,9 @@ func validateWorkerPlan(plan model.TestPlan) error {
 		if !validManifestPath(file.Path) {
 			return fmt.Errorf("test plan has invalid project-relative path %q", file.Path)
 		}
+		if err := file.ValidateCaseIDs(); err != nil {
+			return fmt.Errorf("test plan has invalid case_ids: %w", err)
+		}
 	}
 	return nil
 }

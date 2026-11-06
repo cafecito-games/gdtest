@@ -251,14 +251,9 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 		var prepared: Dictionary[String, Variant] = await _prepare_file(_dict(file_value))
 		prepared_files.append(prepared)
 	var preparation_usec: int = Time.get_ticks_usec() - preparation_started_usec
-	_apply_selected_ids(prepared_files, plan)
-	var has_focus: bool = false
+	_apply_case_filters(prepared_files, plan)
+	var has_focus: bool = _plan_has_focus(prepared_files, plan)
 	var execution_started_usec: int = Time.get_ticks_usec()
-	for prepared_value: Variant in prepared_files:
-		var prepared: Dictionary[String, Variant] = _dict(prepared_value)
-		for case_value: Variant in prepared.get("cases", []):
-			if case_value is Dictionary and bool(case_value.get("is_only", false)):
-				has_focus = true
 	var only_mode: String = str(plan.get("only_mode", "auto"))
 	var policy_error: String = Protocol.only_policy_error(only_mode, has_focus)
 	if not policy_error.is_empty():
@@ -374,6 +369,9 @@ func _prepare_file(
 			_send_worker_error("worker.script_load", str(load_error["message"]))
 		prepared["discovery_error_count"] = 1
 		return prepared
+	var case_ids_value: Variant = file_plan.get("case_ids", null)
+	if case_ids_value is Array:
+		prepared["case_ids"] = case_ids_value
 	var instance_value: Variant = script.new()
 	if not instance_value is GDTest:
 		var type_error: Dictionary[String, Variant] = {
@@ -423,25 +421,51 @@ func _prepare_file(
 	return prepared
 
 
-func _apply_selected_ids(
+func _apply_case_filters(
 		prepared_files: Array[Dictionary],
 		plan: Dictionary[String, Variant]
 ) -> void:
-	if not bool(plan.get("selection_applied", false)):
-		return
+	var selection_applied: bool = bool(plan.get("selection_applied", false))
 	var selected: Dictionary[String, bool] = {}
-	var selected_value: Variant = plan.get("selected_ids", [])
-	if selected_value is Array:
-		for id_value: Variant in selected_value:
-			selected[str(id_value)] = true
+	if selection_applied:
+		var selected_value: Variant = plan.get("selected_ids", [])
+		if selected_value is Array:
+			for id_value: Variant in selected_value:
+				selected[str(id_value)] = true
 	for prepared_index: int in range(prepared_files.size()):
 		var prepared: Dictionary[String, Variant] = prepared_files[prepared_index]
+		var case_ids_value: Variant = prepared.get("case_ids", null)
+		var has_case_ids: bool = case_ids_value is Array
+		if not selection_applied and not has_case_ids:
+			continue
+		var allowed: Dictionary[String, bool] = {}
+		if has_case_ids:
+			for id_value: Variant in case_ids_value:
+				allowed[str(id_value)] = true
 		var filtered: Array[Variant] = []
 		for case_value: Variant in prepared.get("cases", []):
-			if case_value is Dictionary and selected.has(str(case_value.get("id", ""))):
+			if not case_value is Dictionary:
+				continue
+			var case_id: String = str(case_value.get("id", ""))
+			if (
+					(not has_case_ids or allowed.has(case_id))
+					and (not selection_applied or selected.has(case_id))
+			):
 				filtered.append(case_value)
 		prepared["cases"] = filtered
 		prepared_files[prepared_index] = prepared
+
+
+func _plan_has_focus(prepared_files: Array[Dictionary], plan: Dictionary[String, Variant]) -> bool:
+	var stamped_focus: Variant = plan.get("has_focus", null)
+	if stamped_focus is bool:
+		return stamped_focus
+	for prepared_value: Variant in prepared_files:
+		var prepared: Dictionary[String, Variant] = _dict(prepared_value)
+		for case_value: Variant in prepared.get("cases", []):
+			if case_value is Dictionary and bool(case_value.get("is_only", false)):
+				return true
+	return false
 
 
 func _run_prepared_file(

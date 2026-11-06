@@ -50,6 +50,7 @@ func copyProtocolFixtureProject(t *testing.T, repository string) string {
 		filepath.Join(repository, "fixtures", "protocol", "godot_fixture_runner.gd"),
 		filepath.Join(repository, "fixtures", "protocol", "godot_fixture_runner.gd.uid"),
 		filepath.Join(repository, "fixtures", "protocol", "run-events.jsonl"),
+		filepath.Join(repository, "fixtures", "protocol", "run-request.jsonl"),
 		filepath.Join(repository, "fixtures", "protocol", "benchmark-events.jsonl"),
 		filepath.Join(repository, "fixtures", "protocol", "worker-handshake.jsonl"),
 	)
