@@ -1,6 +1,6 @@
-extends RefCounted
-
 ## Runs untimed sample hooks around a timed benchmark method batch.
+class_name GDTestWorkerBenchmarkTask
+extends RefCounted
 
 ## Prefix shared with the Go process-output classifier.
 const MARKER_PREFIX: String = "@@GDTEST_CASE_CAPTURE "
@@ -42,9 +42,10 @@ func _execute(instance: GDTestBenchmark, info: GDTestBenchmarkInfo) -> void:
 	if instance.has_method("before_sample"):
 		await instance.callv(&"before_sample", [info])
 	for _iteration: int in range(info.iterations):
-		var started_usec: int = int(_clock.call())
+		var started_usec: int = _clock.call()
 		await instance.callv(info.method_name, [])
-		duration_usec += int(_clock.call()) - started_usec
+		var ended_usec: int = _clock.call()
+		duration_usec += ended_usec - started_usec
 	if instance.has_method("after_sample"):
 		await instance.callv(&"after_sample", [info])
 	finish_capture()

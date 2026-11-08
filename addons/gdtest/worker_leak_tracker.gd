@@ -1,8 +1,9 @@
 ## Tracks SceneTree and orphan `Node` baselines per scope and formats leak diagnostics.
+class_name GDTestWorkerLeakTracker
 extends RefCounted
 
 ## Internal protocol codec script.
-const Protocol: GDScript = preload("res://addons/gdtest/protocol.gd")
+const Protocol := preload("res://addons/gdtest/protocol.gd")
 ## Maximum number of subtree-root leak records serialized per scope report.
 const MAX_REPORTED_LEAKS: int = 20
 
@@ -114,7 +115,7 @@ static func create(
 		is_aborted: Callable,
 		call_hook: Callable,
 		drain_errors: Callable = Callable()
-) -> RefCounted:
+) -> GDTestWorkerLeakTracker:
 	var tracker := from_plan(plan)
 	tracker._tree = tree
 	tracker._emit_event = emit_event
@@ -125,7 +126,7 @@ static func create(
 
 
 ## Builds a configured leak tracker from the serialized worker `TestPlan`.
-static func from_plan(plan: Dictionary[String, Variant]) -> RefCounted:
+static func from_plan(plan: Dictionary[String, Variant]) -> GDTestWorkerLeakTracker:
 	var tracker := new()
 	var raw_configuration: Variant = plan.get("leak_check", {})
 	if raw_configuration is Dictionary:
@@ -202,8 +203,10 @@ func _execute_suite_cases(
 	var open_suites: Array[GDTestSuiteInfo] = []
 	var blocked_suite_depth: int = -1
 	for case_value: Variant in cases:
-		if _is_aborted.is_valid() and bool(_is_aborted.call()):
-			break
+		if _is_aborted.is_valid():
+			var aborted: bool = _is_aborted.call()
+			if aborted:
+				break
 		var case_plan: Dictionary[String, Variant] = Protocol.string_dictionary(case_value)
 		var desired_suites: Array[GDTestSuiteInfo] = _suite_infos(case_plan.get("suite_infos", []))
 		var common_count: int = _common_suite_count(open_suites, desired_suites)
@@ -230,7 +233,7 @@ func _execute_suite_cases(
 		var status: String = await run_case.call(instance, path, case_plan)
 		totals[status] = totals.get(status, 0) + 1
 		if _drain_errors.is_valid():
-			totals["error"] += int(_drain_errors.call(instance, path))
+			totals["error"] += _drain_errors.call(instance, path)
 	for index: int in range(open_suites.size() - 1, -1, -1):
 		await close_suite_scope(instance, open_suites[index], path, totals)
 
@@ -259,7 +262,7 @@ func close_suite_scope(
 		path: String,
 		totals: Dictionary[String, int]
 ) -> void:
-	var registry: RefCounted = instance._gdtest_autofree_registry()
+	var registry: GDTestAutofreeRegistry = instance._gdtest_autofree_registry()
 	registry.begin_closing()
 	await _call_hook.call(instance, &"after_suite", [suite_info], path, totals)
 	var subject: String = "`before_suite`/`after_suite` of suite `%s`" % suite_info.name
@@ -275,7 +278,7 @@ func close_file_scope(
 		line: int,
 		totals: Dictionary[String, int]
 ) -> void:
-	var registry: RefCounted = instance._gdtest_autofree_registry()
+	var registry: GDTestAutofreeRegistry = instance._gdtest_autofree_registry()
 	registry.begin_closing()
 	await _call_hook.call(instance, &"after_all", [], path, totals)
 	await _close_non_case_scope(instance, "`before_all`/`after_all`", path, line, totals)
@@ -289,12 +292,14 @@ func _close_non_case_scope(
 		line: int,
 		totals: Dictionary[String, int]
 ) -> void:
-	if _is_aborted.is_valid() and bool(_is_aborted.call()):
-		abort_scope(instance)
-		return
+	if _is_aborted.is_valid():
+		var aborted: bool = _is_aborted.call()
+		if aborted:
+			abort_scope(instance)
+			return
 	await instance._gdtest_autofree_registry().release_and_drain(_tree)
 	if _drain_errors.is_valid():
-		totals["error"] += int(_drain_errors.call(instance, path))
+		totals["error"] += _drain_errors.call(instance, path)
 	var report: Dictionary[String, Variant] = finish_scope(
 			_tree.root if _tree != null else null,
 			subject

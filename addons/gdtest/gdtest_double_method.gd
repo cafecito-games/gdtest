@@ -176,8 +176,9 @@ func _caller_location() -> Dictionary[String, Variant]:
 	for frame_value: Variant in get_stack():
 		if not frame_value is Dictionary:
 			continue
-		var source: String = str(frame_value.get("source", ""))
+		var frame: Dictionary[String, Variant] = GDTestProbeLedger.string_dictionary(frame_value)
+		var source: String = str(frame.get("source", ""))
 		if source.begins_with("res://addons/gdtest/") or source == _double_path:
 			continue
-		return { "file": source, "line": int(frame_value.get("line", -1)) }
+		return { "file": source, "line": frame.get("line", -1) }
 	return { "file": _double_path, "line": -1 }

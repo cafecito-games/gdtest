@@ -107,13 +107,14 @@ static func _gdtest_clone_value(
 ) -> Variant:
 	match typeof(value):
 		TYPE_ARRAY:
-			if depth >= MAX_DIAGNOSTIC_DEPTH or _gdtest_contains_same(ancestors, value):
-				var truncated_array: Variant = value.duplicate(false)
+			var array: Array[Variant] = value
+			if depth >= MAX_DIAGNOSTIC_DEPTH or _gdtest_contains_same(ancestors, array):
+				var truncated_array: Array[Variant] = array.duplicate(false)
 				truncated_array.clear()
 				return truncated_array
 			var next_ancestors: Array[Variant] = ancestors.duplicate()
-			next_ancestors.append(value)
-			var cloned_array: Variant = value.duplicate(false)
+			next_ancestors.append(array)
+			var cloned_array: Array[Variant] = array.duplicate(false)
 			for index: int in range(cloned_array.size()):
 				cloned_array[index] = _gdtest_clone_value(
 						cloned_array[index],
@@ -122,20 +123,21 @@ static func _gdtest_clone_value(
 				)
 			return cloned_array
 		TYPE_DICTIONARY:
-			if depth >= MAX_DIAGNOSTIC_DEPTH or _gdtest_contains_same(ancestors, value):
-				var truncated_dictionary: Variant = value.duplicate(false)
+			var dictionary: Dictionary[Variant, Variant] = value
+			if depth >= MAX_DIAGNOSTIC_DEPTH or _gdtest_contains_same(ancestors, dictionary):
+				var truncated_dictionary: Dictionary[Variant, Variant] = dictionary.duplicate(false)
 				truncated_dictionary.clear()
 				return truncated_dictionary
 			var next_ancestors: Array[Variant] = ancestors.duplicate()
-			next_ancestors.append(value)
-			var cloned_dictionary: Variant = value.duplicate(false)
+			next_ancestors.append(dictionary)
+			var cloned_dictionary: Dictionary[Variant, Variant] = dictionary.duplicate(false)
 			cloned_dictionary.clear()
-			for key: Variant in value:
+			for key: Variant in dictionary:
 				cloned_dictionary[_gdtest_clone_value(
 						key,
 						depth + 1,
 						next_ancestors
-				)] = _gdtest_clone_value(value[key], depth + 1, next_ancestors)
+				)] = _gdtest_clone_value(dictionary[key], depth + 1, next_ancestors)
 			return cloned_dictionary
 		TYPE_PACKED_BYTE_ARRAY, \
 		TYPE_PACKED_INT32_ARRAY, \
@@ -147,7 +149,7 @@ static func _gdtest_clone_value(
 		TYPE_PACKED_VECTOR3_ARRAY, \
 		TYPE_PACKED_COLOR_ARRAY, \
 		TYPE_PACKED_VECTOR4_ARRAY:
-			return value.duplicate()
+			return value
 		_:
 			return value
 

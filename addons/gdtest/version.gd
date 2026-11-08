@@ -1,3 +1,5 @@
+## Internal runtime version declaration (product and protocol versions).
+class_name GDTestVersion
 extends RefCounted
 
 ## Product version embedded in this development runtime.

@@ -1,6 +1,6 @@
-extends RefCounted
-
 ## Runs one case's hooks and body while the worker monitors its deadline.
+class_name GDTestWorkerCaseTask
+extends RefCounted
 
 ## Prefix shared with the Go process-output classifier.
 const MARKER_PREFIX: String = "@@GDTEST_CASE_CAPTURE "
@@ -46,7 +46,8 @@ func _execute(
 	if not instance._gdtest_has_error():
 		var callback: Variant = case_plan.get("callback")
 		if callback is Callable:
-			await callback.callv(parameters)
+			var callback_callable: Callable = callback
+			await callback_callable.callv(parameters)
 		elif not method_name.is_empty() and instance.has_method(method_name):
 			await instance.callv(method_name, parameters)
 		else:

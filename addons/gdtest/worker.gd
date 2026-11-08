@@ -1,16 +1,16 @@
 extends SceneTree
 ## Internal protocol codec script.
-const Protocol: GDScript = preload("res://addons/gdtest/protocol.gd")
+const Protocol := preload("res://addons/gdtest/protocol.gd")
 ## Internal runtime version declaration.
-const Version: GDScript = preload("res://addons/gdtest/version.gd")
+const Version := preload("res://addons/gdtest/version.gd")
 ## Internal asynchronous case task.
-const CaseTask: GDScript = preload("res://addons/gdtest/worker_case_task.gd")
+const CaseTask := preload("res://addons/gdtest/worker_case_task.gd")
 ## Internal benchmark command runner.
-const BenchmarkRunner: GDScript = preload("res://addons/gdtest/worker_benchmark_runner.gd")
+const BenchmarkRunner := preload("res://addons/gdtest/worker_benchmark_runner.gd")
 ## Internal scoped node leak tracker.
-const LeakTracker: GDScript = preload("res://addons/gdtest/worker_leak_tracker.gd")
+const LeakTracker := preload("res://addons/gdtest/worker_leak_tracker.gd")
 ## Internal shared probe ledger tracking bounded late callback diagnostics.
-const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
+const ProbeLedger := preload("res://addons/gdtest/probe_ledger.gd")
 ## Hard upper bound for one JSONL protocol message.
 const MAX_MESSAGE_BYTES: int = 16777216
 ## Default external deadline for one case including its hooks.
@@ -34,7 +34,7 @@ var _shutdown_requested: bool = false
 var _serialization_usec: int = 0
 var _case_timeout_usec: int = DEFAULT_CASE_TIMEOUT_USEC
 var _abort_run_requested: bool = false
-var _leak_tracker: RefCounted
+var _leak_tracker: GDTestWorkerLeakTracker
 var _initial_audio_bus_layout: AudioBusLayout = AudioServer.generate_bus_layout()
 
 
@@ -197,7 +197,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 	var payload: Dictionary[String, Variant] = _dict(command.get("payload", {}))
 	_run_id = str(payload.get("run_id", ""))
 	_request_id = str(command.get("request_id", ""))
-	var requested_generation: int = int(payload.get("generation", -1))
+	var requested_generation: int = payload.get("generation", -1)
 	if _run_id.is_empty():
 		_send_worker_error("protocol.invalid_run", "run_id is required")
 		_finish_run_state()
@@ -230,7 +230,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 			_call_hook,
 			_drain_framework_errors
 	)
-	var case_timeout_ns: int = int(plan.get("case_timeout_ns", 0))
+	var case_timeout_ns: int = plan.get("case_timeout_ns", 0)
 	if case_timeout_ns <= 0:
 		_case_timeout_usec = DEFAULT_CASE_TIMEOUT_USEC
 	else:
@@ -297,7 +297,7 @@ func _discover_command(command: Dictionary[String, Variant]) -> void:
 	_sequence = 0
 	_request_id = str(command.get("request_id", ""))
 	var payload: Dictionary[String, Variant] = _dict(command.get("payload", {}))
-	var requested_generation: int = int(payload.get("generation", -1))
+	var requested_generation: int = payload.get("generation", -1)
 	if requested_generation != _generation:
 		_send_worker_error(
 				"worker.stale_generation",
@@ -357,7 +357,7 @@ func _prepare_file(
 		path = "res://" + path.trim_prefix("/")
 	prepared["path"] = path
 	var resource: Resource = ResourceLoader.load(path, "Script", ResourceLoader.CACHE_MODE_REPLACE)
-	var script: Script = resource as Script
+	var script: GDScript = resource as GDScript
 	if script == null or not script.can_instantiate():
 		var load_error: Dictionary[String, Variant] = {
 			"code": "worker.script_load",
@@ -409,11 +409,12 @@ func _prepare_file(
 		instance._gdtest_dispose()
 	prepared["cases"] = cases
 	prepared["errors"] = discovery_errors
+	var root_line: int = file_plan.get("line", 1)
 	prepared["root_info"] = GDTestSuiteInfo.new(
 			path.trim_prefix("res://"),
 			suite_name,
 			path,
-			int(file_plan.get("line", 1)),
+			root_line,
 			false
 	)
 	prepared["discovery_error_count"] = discovery_errors.size()
@@ -425,7 +426,7 @@ func _apply_case_filters(
 		prepared_files: Array[Dictionary],
 		plan: Dictionary[String, Variant]
 ) -> void:
-	var selection_applied: bool = bool(plan.get("selection_applied", false))
+	var selection_applied: bool = plan.get("selection_applied", false)
 	var selected: Dictionary[String, bool] = {}
 	if selection_applied:
 		var selected_value: Variant = plan.get("selected_ids", [])
@@ -446,7 +447,7 @@ func _apply_case_filters(
 		for case_value: Variant in prepared.get("cases", []):
 			if not case_value is Dictionary:
 				continue
-			var case_id: String = str(case_value.get("id", ""))
+			var case_id: String = str(_dict(case_value).get("id", ""))
 			if (
 					(not has_case_ids or allowed.has(case_id))
 					and (not selection_applied or selected.has(case_id))
@@ -463,7 +464,7 @@ func _plan_has_focus(prepared_files: Array[Dictionary], plan: Dictionary[String,
 	for prepared_value: Variant in prepared_files:
 		var prepared: Dictionary[String, Variant] = _dict(prepared_value)
 		for case_value: Variant in prepared.get("cases", []):
-			if case_value is Dictionary and bool(case_value.get("is_only", false)):
+			if _dict(case_value).get("is_only", false) as bool:
 				return true
 	return false
 
@@ -475,7 +476,7 @@ func _run_prepared_file(
 	var totals: Dictionary[String, int] = Protocol.empty_totals()
 	var path: String = str(prepared.get("path", ""))
 	var instance_value: Variant = prepared.get("instance")
-	var discovery_error_count: int = int(prepared.get("discovery_error_count", 0))
+	var discovery_error_count: int = prepared.get("discovery_error_count", 0)
 	if discovery_error_count > 0:
 		totals["error"] += discovery_error_count
 	if not instance_value is GDTest:
@@ -490,10 +491,9 @@ func _run_prepared_file(
 	var cases: Array[Variant] = []
 	if discovery_error_count == 0:
 		for case_value: Variant in prepared.get("cases", []):
-			if (
-					case_value is Dictionary
-					and (not focus_only or bool(case_value.get("is_only", false)))
-			):
+			if not case_value is Dictionary:
+				continue
+			if not focus_only or _dict(case_value).get("is_only", false) as bool:
 				cases.append(case_value)
 	_send_event(
 			"suite_started",
@@ -525,7 +525,7 @@ func _release_skipped_prepared_files(
 ) -> void:
 	for index: int in range(start_index, prepared_files.size()):
 		var prepared: Dictionary[String, Variant] = _dict(prepared_files[index])
-		totals["error"] += int(prepared.get("discovery_error_count", 0))
+		totals["error"] += prepared.get("discovery_error_count", 0)
 		var instance_value: Variant = prepared.get("instance")
 		if instance_value is GDTest:
 			var instance: GDTest = instance_value
@@ -549,7 +549,8 @@ func _planned_cases(
 			if value is Dictionary:
 				_expand_method_case(planned, _dict(value), instance, discovery_errors)
 		return planned
-	var method_list: Array[Dictionary] = instance.get_script().get_script_method_list()
+	var instance_script: GDScript = instance.get_script() as GDScript
+	var method_list: Array[Dictionary] = instance_script.get_script_method_list()
 	for method_value: Variant in method_list:
 		var method: Dictionary[String, Variant] = _dict(method_value)
 		var method_name: String = str(method.get("name", ""))
@@ -726,7 +727,7 @@ func _suite_name(
 			discovery_errors.append({ "message": "get_suite_name must take no arguments" })
 			return path.trim_prefix("res://")
 		var value: Variant = instance.call(&"get_suite_name")
-		if not value is String or value.is_empty():
+		if not value is String or str(value).is_empty():
 			discovery_errors.append(
 					{ "message": "get_suite_name must synchronously return a non-empty String" }
 			)
@@ -740,24 +741,26 @@ func _suite_name(
 
 func _method_metadata(instance: Object, method_name: StringName) -> Dictionary[String, Variant]:
 	for method_value: Variant in instance.get_method_list():
-		if method_value is Dictionary and str(method_value.get("name", "")) == method_name:
+		if method_value is Dictionary and str(_dict(method_value).get("name", "")) == method_name:
 			return _dict(method_value)
 	return {}
 
 
 func _argument_count(method: Dictionary[String, Variant]) -> int:
 	var arguments: Variant = method.get("args", [])
-	return arguments.size() if arguments is Array else 0
+	return (arguments as Array[Variant]).size() if arguments is Array else 0
 
 
 func _required_argument_count(method: Dictionary[String, Variant]) -> int:
 	var defaults: Variant = method.get("default_args", [])
-	return _argument_count(method) - (defaults.size() if defaults is Array else 0)
+	return _argument_count(
+			method
+	) - ((defaults as Array[Variant]).size() if defaults is Array else 0)
 
 
 func _argument_matches(value: Variant, argument: Dictionary[String, Variant]) -> bool:
-	var expected_type: int = int(argument.get("type", TYPE_NIL))
-	var usage: int = int(argument.get("usage", 0))
+	var expected_type: int = argument.get("type", TYPE_NIL)
+	var usage: int = argument.get("usage", 0)
 	if expected_type == TYPE_NIL or usage & PROPERTY_USAGE_NIL_IS_VARIANT != 0:
 		return true
 	if value == null and expected_type == TYPE_OBJECT:
@@ -774,23 +777,26 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	var parameters: Array[Variant] = []
 	var parameter_value: Variant = case_plan.get("parameters", [])
 	if parameter_value is Array:
-		parameters.assign(parameter_value)
+		var parameter_array: Array[Variant] = parameter_value
+		parameters.assign(parameter_array)
+	var case_line: int = case_plan.get("line", -1)
+	var case_is_only: bool = case_plan.get("is_only", false)
 	var info := GDTestCaseInfo.new(
 			case_id,
 			case_name,
 			path,
-			int(case_plan.get("line", -1)),
+			case_line,
 			method_name,
 			parameters,
 			str(case_plan.get("parameter_name", "")),
-			bool(case_plan.get("is_only", false))
+			case_is_only
 	)
 	_active_case_id = case_id
 	_send_event("case_started", Protocol.case_started(case_id, case_name, path, info.line))
 	instance._gdtest_begin_case()
 	_leak_tracker.push_scope(root)
 	var started_usec: int = Time.get_ticks_usec()
-	var task: RefCounted = CaseTask.new()
+	var task: GDTestWorkerCaseTask = CaseTask.new()
 	task.start(instance, info, case_plan, method_name, parameters)
 	var deadline_usec: int = started_usec + _case_timeout_usec
 	while not task.finished and not _cancel_requested and Time.get_ticks_usec() < deadline_usec:
@@ -893,7 +899,7 @@ func _reload_command(command: Dictionary[String, Variant]) -> void:
 		_send_worker_error("worker.busy", "cannot reload during an active run")
 		return
 	var payload: Dictionary[String, Variant] = _dict(command.get("payload", {}))
-	var requested_generation: int = int(payload.get("generation", -1))
+	var requested_generation: int = payload.get("generation", -1)
 	if requested_generation < _generation:
 		_send_worker_error("worker.stale_generation", "reload generation moved backwards")
 		return

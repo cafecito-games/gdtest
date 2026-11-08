@@ -1,9 +1,9 @@
+## Executes one benchmark plan through its owning persistent worker.
+class_name GDTestWorkerBenchmarkRunner
 extends RefCounted
 
-## Executes one benchmark plan through its owning persistent worker.
-
 ## Internal asynchronous benchmark sample task.
-const BenchmarkTask: GDScript = preload("res://addons/gdtest/worker_benchmark_task.gd")
+const BenchmarkTask := preload("res://addons/gdtest/worker_benchmark_task.gd")
 ## Prefix shared with the Go process-output classifier.
 const MARKER_PREFIX: String = "@@GDTEST_CASE_CAPTURE "
 ## Default external deadline for one sample including its untimed hooks.
@@ -19,7 +19,7 @@ var _self_reference: RefCounted
 func start(worker: SceneTree, command: Dictionary[String, Variant]) -> void:
 	_self_reference = self
 	_worker = worker
-	_generation = int(_worker.get("_generation"))
+	_generation = _worker.get("_generation")
 	_execute(command)
 
 
@@ -31,7 +31,7 @@ func _execute(command: Dictionary[String, Variant]) -> void:
 	var payload: Dictionary[String, Variant] = _dict(command.get("payload", {}))
 	_worker.set("_run_id", str(payload.get("run_id", "")))
 	_worker.set("_request_id", str(command.get("request_id", "")))
-	var requested_generation: int = int(payload.get("generation", -1))
+	var requested_generation: int = payload.get("generation", -1)
 	if str(_worker.get("_run_id")).is_empty():
 		_error("protocol.invalid_benchmark", "run_id is required", "")
 		_finish()
@@ -53,9 +53,9 @@ func _execute(command: Dictionary[String, Variant]) -> void:
 		_finish()
 		return
 	var plan: Dictionary[String, Variant] = _dict(plan_value)
-	var warmup: int = int(plan.get("warmup", -1))
-	var samples: int = int(plan.get("samples", 0))
-	var iterations: int = int(plan.get("iterations", 0))
+	var warmup: int = plan.get("warmup", -1)
+	var samples: int = plan.get("samples", 0)
+	var iterations: int = plan.get("iterations", 0)
 	var files_value: Variant = plan.get("files", [])
 	if warmup < 0 or samples <= 0 or iterations <= 0 or not files_value is Array:
 		_error("protocol.invalid_plan", "benchmark plan options are invalid", "")
@@ -66,7 +66,8 @@ func _execute(command: Dictionary[String, Variant]) -> void:
 		if file_value is Dictionary:
 			var planned_value: Variant = _dict(file_value).get("benchmarks", [])
 			if planned_value is Array:
-				planned_benchmarks += planned_value.size()
+				var planned_array: Array[Variant] = planned_value
+				planned_benchmarks += planned_array.size()
 	_send(
 			"benchmark_run_started",
 			{
@@ -155,7 +156,7 @@ func _run_file(
 
 func _load_benchmark(path: String) -> GDTestBenchmark:
 	var resource: Resource = ResourceLoader.load(path, "Script", ResourceLoader.CACHE_MODE_REPLACE)
-	var script: Script = resource as Script
+	var script: GDScript = resource as GDScript
 	if script == null or not script.can_instantiate():
 		_error("worker.script_load", "unable to load benchmark script " + path, "")
 		return null
@@ -178,7 +179,7 @@ func _run_benchmark(
 	var benchmark_id: String = str(benchmark_plan.get("id", ""))
 	var benchmark_name: String = str(benchmark_plan.get("name", benchmark_id))
 	var method_name := StringName(str(benchmark_plan.get("method_name", "")))
-	var line: int = int(benchmark_plan.get("line", -1))
+	var line: int = benchmark_plan.get("line", -1)
 	if benchmark_id.is_empty() or method_name.is_empty() or not instance.has_method(method_name):
 		_error("worker.invalid_benchmark", "benchmark method is unavailable", benchmark_id)
 		return "error"
@@ -271,7 +272,7 @@ func _run_sample(
 	if not completed_capture.is_empty():
 		started_data["metadata"] = { "completed_capture": completed_capture }
 	_send("benchmark_sample_started", started_data)
-	var task: RefCounted = BenchmarkTask.new()
+	var task: GDTestWorkerBenchmarkTask = BenchmarkTask.new()
 	var capture_id: String = "%s#%s:%d" % [info.id, "warmup" if warmup else "sample", index]
 	task.start(instance, info, capture_id)
 	var deadline_usec: int = Time.get_ticks_usec() + DEFAULT_SAMPLE_TIMEOUT_USEC
@@ -322,7 +323,7 @@ func _error(code: String, text: String, benchmark_id: String) -> void:
 
 
 func _canceled() -> bool:
-	return bool(_worker.get("_cancel_requested"))
+	return _worker.get("_cancel_requested")
 
 
 func _call_hook(

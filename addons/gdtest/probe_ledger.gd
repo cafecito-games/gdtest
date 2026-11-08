@@ -1,4 +1,5 @@
 ## Shared case-scoped invocation ledger and asynchronous wait primitive for gdtest probes.
+class_name GDTestProbeLedger
 extends RefCounted
 
 ## Emitted when an invocation is recorded, a wait deadline expires, or the ledger closes.
@@ -65,7 +66,7 @@ class CaseContext:
 	func allocate_sequence() -> int:
 		if not _active or not _allocate_sequence.is_valid():
 			return 0
-		return int(_allocate_sequence.call())
+		return _allocate_sequence.call()
 
 
 	## Resolves the nearest non-runtime user stack frame.
@@ -192,8 +193,10 @@ func wait_until_count(
 		on_timeout = _on_deadline_expired.bind(deadline_state)
 		timer.timeout.connect(on_timeout, CONNECT_ONE_SHOT)
 	while _open and _records.size() < target_count and not deadline_state["expired"]:
-		if can_continue.is_valid() and not bool(can_continue.call()):
-			break
+		if can_continue.is_valid():
+			var should_continue: bool = can_continue.call()
+			if not should_continue:
+				break
 		if poll_each_frame_without_timeout and timeout_seconds == 0.0 and tree != null:
 			await tree.process_frame
 		else:
