@@ -2,11 +2,9 @@
 class_name GDTestCallbackProbe
 extends RefCounted
 
-## Internal shared case-scoped probe ledger.
-const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
 const _MAX_ARITY: int = 8
 
-var _ledger: RefCounted
+var _ledger: GDTestProbeLedger
 var _gate: _CallbackGate
 var _callback: Callable = Callable()
 
@@ -27,9 +25,9 @@ class _CallbackGate:
 		if _open and _record.is_valid():
 			_record.call(arguments)
 			return
-		if _late_calls < ProbeLedger.MAX_LATE_CALLS:
+		if _late_calls < GDTestProbeLedger.MAX_LATE_CALLS:
 			_late_calls += 1
-		ProbeLedger.record_late_call()
+		GDTestProbeLedger.record_late_call()
 
 
 	func close() -> void:
@@ -79,15 +77,15 @@ func is_closed() -> bool:
 	return not _ledger.is_open()
 
 
-static func _gdtest_detached(context: RefCounted) -> GDTestCallbackProbe:
+static func _gdtest_detached(context: GDTestProbeLedger.CaseContext) -> GDTestCallbackProbe:
 	var probe := GDTestCallbackProbe.new()
-	probe._ledger = ProbeLedger.new(context, "invocations", false)
+	probe._ledger = GDTestProbeLedger.new(context, "invocations", false)
 	return probe
 
 
 static func _gdtest_create(
 		argument_count: int,
-		context: RefCounted,
+		context: GDTestProbeLedger.CaseContext,
 		location: Dictionary[String, Variant]
 ) -> GDTestCallbackProbe:
 	if argument_count < 0 or argument_count > _MAX_ARITY:
@@ -101,7 +99,7 @@ static func _gdtest_create(
 		)
 		return invalid_probe
 	var probe := GDTestCallbackProbe.new()
-	probe._ledger = ProbeLedger.new(context, "invocations", true)
+	probe._ledger = GDTestProbeLedger.new(context, "invocations", true)
 	probe._gate = _CallbackGate.new(Callable(probe._ledger, &"record"))
 	probe._callback = _build_callback(argument_count, probe._gate)
 	return probe

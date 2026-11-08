@@ -5,13 +5,11 @@ extends RefCounted
 ## Emitted after an invocation is recorded and when the probe disconnects.
 signal state_changed
 
-## Internal shared case-scoped probe ledger.
-const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
 const _MAX_ARITY: int = 8
 
 var _owner: Object
 var _signal: Signal
-var _ledger: RefCounted
+var _ledger: GDTestProbeLedger
 var _recorder: Callable
 
 
@@ -56,16 +54,16 @@ func stop_recording() -> void:
 	_ledger.close()
 
 
-static func _gdtest_detached(context: RefCounted) -> GDTestSignalProbe:
+static func _gdtest_detached(context: GDTestProbeLedger.CaseContext) -> GDTestSignalProbe:
 	var probe := GDTestSignalProbe.new()
-	probe._ledger = ProbeLedger.new(context, "emissions", false)
+	probe._ledger = GDTestProbeLedger.new(context, "emissions", false)
 	probe._ledger.state_changed.connect(probe._on_ledger_state_changed)
 	return probe
 
 
 static func _gdtest_create(
 		what: Signal,
-		context: RefCounted,
+		context: GDTestProbeLedger.CaseContext,
 		location: Dictionary[String, Variant]
 ) -> GDTestSignalProbe:
 	var invalid_probe: GDTestSignalProbe = _gdtest_detached(context)
@@ -100,7 +98,7 @@ static func _gdtest_create(
 		)
 		return invalid_probe
 	var probe := GDTestSignalProbe.new()
-	probe._ledger = ProbeLedger.new(context, "emissions", true)
+	probe._ledger = GDTestProbeLedger.new(context, "emissions", true)
 	probe._ledger.state_changed.connect(probe._on_ledger_state_changed)
 	probe._owner = owner
 	probe._signal = what
@@ -228,5 +226,9 @@ static func _arity_of(owner: Object, signal_name: StringName) -> int:
 			continue
 		matches += 1
 		var arguments: Variant = metadata.get("args", [])
-		arity = arguments.size() if arguments is Array else 0
+		if arguments is Array:
+			var argument_list: Array[Variant] = arguments
+			arity = argument_list.size()
+		else:
+			arity = 0
 	return arity if matches == 1 else -1

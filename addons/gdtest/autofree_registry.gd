@@ -1,4 +1,5 @@
 ## Scope-stacked registry that frees registered `Node` instances in reverse order.
+class_name GDTestAutofreeRegistry
 extends RefCounted
 
 var _scopes: Array[_Scope] = []

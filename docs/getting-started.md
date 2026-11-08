@@ -2,6 +2,8 @@
 
 After installing with gpm, the runtime is `res://addons/gdtest/` and the host executable is selected by the project-local `addons/gdtest/gdtest` launcher. The executable and runtime reject version-mismatched handshakes, and workers reject engines outside the supported Godot 4.7 minor.
 
+The shipped runtime parses under any project warning profile, including the strictest one: `gdscript/warnings/exclude_addons=false` with `unsafe_method_access`, `unsafe_call_argument`, and `unsafe_property_access` all set to `2` (error). gdtest's own scripts are fully typed and narrow every `Variant`, so you can promote those warnings to errors for your own addon without exempting gdtest.
+
 Create `tests/math.test.gd`:
 
 ```gdscript

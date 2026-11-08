@@ -2,10 +2,6 @@
 class_name GDTest
 extends RefCounted
 
-## Internal scope-stacked autofree registry.
-const AutofreeRegistry: GDScript = preload("res://addons/gdtest/autofree_registry.gd")
-## Internal shared case-scoped probe ledger.
-const ProbeLedger: GDScript = preload("res://addons/gdtest/probe_ledger.gd")
 const _STATUS_RANK: Dictionary[String, int] = {
 	"void": 0,
 	"pass": 1,
@@ -49,10 +45,10 @@ var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
 var _gdtest_signal_probes: Array[GDTestSignalProbe] = []
 var _gdtest_callback_probes: Array[GDTestCallbackProbe] = []
-var _gdtest_probe_context: RefCounted = null
-var _gdtest_outside_probe_context: RefCounted = null
+var _gdtest_probe_context: GDTestProbeLedger.CaseContext = null
+var _gdtest_outside_probe_context: GDTestProbeLedger.CaseContext = null
 var _gdtest_double_context: GDTestDoubleContext = null
-var _gdtest_autofree: RefCounted = AutofreeRegistry.new()
+var _gdtest_autofree: GDTestAutofreeRegistry = GDTestAutofreeRegistry.new()
 var _gdtest_sequence: int = 0
 
 
@@ -74,13 +70,13 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 	var sibling_ordinal: int = _gdtest_suite_ordinals.get(sibling_key, 0)
 	_gdtest_suite_ordinals[sibling_key] = sibling_ordinal + 1
 	var delimiter: String = "/" if not parent_id.is_empty() else ""
-	var encoded_name: String = ProbeLedger.encode_component(name)
+	var encoded_name: String = GDTestProbeLedger.encode_component(name)
 	var suite_id: String = parent_id + delimiter + encoded_name + "@" + str(sibling_ordinal)
 	var info := GDTestSuiteInfo.new(
 			suite_id,
 			name,
 			str(location.get("file", _gdtest_file)),
-			int(location.get("line", -1)),
+			location.get("line", -1) as int,
 			is_only
 	)
 	_gdtest_dynamic_suites.append({ "info": info, "parent_id": parent_id })
@@ -95,7 +91,7 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 	else:
 		var children: Variant = _gdtest_active_definition["children"]
 		if children is Array:
-			children.append(definition)
+			(children as Array[Variant]).append(definition)
 	return info
 
 
@@ -150,7 +146,7 @@ func test_each(
 				continue
 			rows[parameter_name] = dictionary[key]
 			names.append(parameter_name)
-		names.sort_custom(ProbeLedger.utf8_less)
+		names.sort_custom(GDTestProbeLedger.utf8_less)
 		for parameter_name: String in names:
 			_register_dynamic_row(
 					description,
@@ -204,14 +200,14 @@ func expect_false(condition: bool, message: String = "") -> void:
 func expect_equal(actual: Variant, expected: Variant, message: String = "") -> void:
 	var equal: Variant = _directional_equal(actual, expected, "expect_equal", message)
 	if equal is bool:
-		_record_assertion(equal, "expect_equal", message, actual, expected, true)
+		_record_assertion(equal as bool, "expect_equal", message, actual, expected, true)
 
 
 ## Records inequality using the inverse of directional equality.
 func expect_not_equal(actual: Variant, expected: Variant, message: String = "") -> void:
 	var equal: Variant = _directional_equal(actual, expected, "expect_not_equal", message)
 	if equal is bool:
-		_record_assertion(not equal, "expect_not_equal", message, actual, expected, true)
+		_record_assertion(not (equal as bool), "expect_not_equal", message, actual, expected, true)
 
 
 ## Records an identity assertion using Godot `is_same` semantics.
@@ -390,7 +386,7 @@ func until(
 	var started: float = time()
 	while true:
 		var condition_result: Variant = await condition.call()
-		if bool(condition_result):
+		if condition_result as bool:
 			return OK
 		if timeout_seconds > 0.0 and time() - started >= timeout_seconds:
 			return ERR_TIMEOUT
@@ -491,7 +487,7 @@ func _gdtest_begin_registration() -> void:
 func _gdtest_finish_registration() -> void:
 	for definition_value: Variant in _gdtest_definition_roots:
 		if definition_value is Dictionary:
-			await _gdtest_run_definition(ProbeLedger.string_dictionary(definition_value))
+			await _gdtest_run_definition(GDTestProbeLedger.string_dictionary(definition_value))
 	_gdtest_definition_roots.clear()
 	_gdtest_suite_stack.clear()
 	_gdtest_active_definition.clear()
@@ -502,7 +498,7 @@ func _gdtest_finish_registration() -> void:
 func _gdtest_run_definition(definition: Dictionary[String, Variant]) -> void:
 	var previous: Dictionary[String, Variant] = _gdtest_active_definition
 	_gdtest_active_definition = definition
-	_gdtest_suite_stack.assign(definition.get("ancestors", []))
+	_gdtest_suite_stack.assign(definition.get("ancestors", []) as Array[GDTestSuiteInfo])
 	var info: GDTestSuiteInfo = definition["info"]
 	_gdtest_suite_stack.append(info)
 	var callback: Callable = definition["callback"]
@@ -511,7 +507,7 @@ func _gdtest_run_definition(definition: Dictionary[String, Variant]) -> void:
 	if children is Array:
 		for child_value: Variant in children:
 			if child_value is Dictionary:
-				await _gdtest_run_definition(ProbeLedger.string_dictionary(child_value))
+				await _gdtest_run_definition(GDTestProbeLedger.string_dictionary(child_value))
 	_gdtest_active_definition = previous
 
 
@@ -529,7 +525,7 @@ func _gdtest_drain_discovery_errors() -> Array[Variant]:
 	return drained
 
 
-func _gdtest_autofree_registry() -> RefCounted:
+func _gdtest_autofree_registry() -> GDTestAutofreeRegistry:
 	return _gdtest_autofree
 
 
@@ -603,7 +599,7 @@ func _gdtest_record_error(text: String) -> void:
 	_gdtest_record_error_at(
 			text,
 			str(location.get("file", _gdtest_file)),
-			int(location.get("line", -1))
+			location.get("line", -1) as int
 	)
 
 
@@ -630,7 +626,7 @@ func _register_dynamic_row(
 		_record_discovery_error("test_each row " + parameter_name + " must be an Array")
 		return
 	var parameters: Array[Variant] = []
-	parameters.assign(row)
+	parameters.assign(row as Array[Variant])
 	if callback.get_argument_count() != parameters.size():
 		_record_discovery_error(
 				"test_each row %s has %d arguments; callback takes %d" % [
@@ -662,12 +658,12 @@ func _register_dynamic_case(
 	for suite: GDTestSuiteInfo in _gdtest_suite_stack:
 		suite_path.append(suite.name)
 		inherited_only = inherited_only or suite.is_only
-	var line: int = int(location.get("line", -1))
+	var line: int = location.get("line", -1)
 	var ordinal: int = _gdtest_case_ordinals.get(line, 0)
 	_gdtest_case_ordinals[line] = ordinal + 1
 	var full_name: Array[String] = suite_path.duplicate()
 	full_name.append(description)
-	var encoded_name: String = "/".join(full_name.map(ProbeLedger.encode_component))
+	var encoded_name: String = "/".join(full_name.map(GDTestProbeLedger.encode_component))
 	var case_id: String = _gdtest_file.trim_prefix(
 			"res://"
 	) + "::dynamic@%d:%d[%s]" % [line, ordinal, encoded_name]
@@ -792,8 +788,8 @@ func _directional_equal(
 		assertion: String,
 		custom_message: String
 ) -> Variant:
-	if actual is Object and is_instance_valid(actual) and actual.has_method("equals"):
-		var equal: Variant = actual.call("equals", expected)
+	if actual is Object and is_instance_valid(actual) and (actual as Object).has_method("equals"):
+		var equal: Variant = (actual as Object).call("equals", expected)
 		if not equal is bool:
 			_record_failure(
 					assertion,
@@ -851,7 +847,7 @@ func _assert_emptiness(
 		custom_message: String
 ) -> void:
 	var result: Dictionary[String, Variant] = _is_empty_value(value)
-	if not bool(result["supported"]):
+	if not (result["supported"] as bool):
 		_record_failure(
 				assertion,
 				_framework_message(custom_message, str(result["error"])),
@@ -860,7 +856,7 @@ func _assert_emptiness(
 				false
 		)
 		return
-	var matched: bool = not bool(result["value"]) if negated else bool(result["value"])
+	var matched: bool = not (result["value"] as bool) if negated else (result["value"] as bool)
 	_record_assertion(matched, assertion, custom_message, value, null, false)
 
 
@@ -872,7 +868,7 @@ func _assert_containment(
 		custom_message: String
 ) -> void:
 	var result: Dictionary[String, Variant] = _contains_value(value, item)
-	if not bool(result["supported"]):
+	if not (result["supported"] as bool):
 		_record_failure(
 				assertion,
 				_framework_message(custom_message, str(result["error"])),
@@ -881,20 +877,23 @@ func _assert_containment(
 				true
 		)
 		return
-	var matched: bool = not bool(result["value"]) if negated else bool(result["value"])
+	var matched: bool = not (result["value"] as bool) if negated else (result["value"] as bool)
 	_record_assertion(matched, assertion, custom_message, value, item, true)
 
 
 func _is_empty_value(value: Variant) -> Dictionary[String, Variant]:
 	var value_type: int = typeof(value)
-	if value_type in [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH, TYPE_ARRAY, TYPE_DICTIONARY]:
-		return { "supported": true, "value": value.is_empty() }
-	if value_type in _PACKED_TYPES:
-		return { "supported": true, "value": value.is_empty() }
-	if value is Object and is_instance_valid(value) and value.has_method("is_empty"):
-		var result: Variant = value.call("is_empty")
+	if value_type == TYPE_NODE_PATH:
+		return { "supported": true, "value": (value as NodePath).is_empty() }
+	if (
+			value_type in [TYPE_STRING, TYPE_STRING_NAME, TYPE_ARRAY, TYPE_DICTIONARY]
+			or value_type in _PACKED_TYPES
+	):
+		return { "supported": true, "value": len(value) == 0 }
+	if value is Object and is_instance_valid(value) and (value as Object).has_method("is_empty"):
+		var result: Variant = (value as Object).call("is_empty")
 		if result is bool:
-			return { "supported": true, "value": result }
+			return { "supported": true, "value": result as bool }
 		return { "supported": false, "error": "custom is_empty() must return bool" }
 	return { "supported": false, "error": "value does not support emptiness" }
 
@@ -902,13 +901,13 @@ func _is_empty_value(value: Variant) -> Dictionary[String, Variant]:
 func _contains_value(value: Variant, item: Variant) -> Dictionary[String, Variant]:
 	var value_type: int = typeof(value)
 	if value_type in [TYPE_ARRAY, TYPE_DICTIONARY] or value_type in _PACKED_TYPES:
-		return { "supported": true, "value": value.has(item) }
+		return { "supported": true, "value": item in value }
 	if value_type in [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]:
-		return { "supported": true, "value": str(value).contains(str(item)) }
-	if value is Object and is_instance_valid(value) and value.has_method("has"):
-		var result: Variant = value.call("has", item)
+		return { "supported": true, "value": str(item) in str(value) }
+	if value is Object and is_instance_valid(value) and (value as Object).has_method("has"):
+		var result: Variant = (value as Object).call("has", item)
 		if result is bool:
-			return { "supported": true, "value": result }
+			return { "supported": true, "value": result as bool }
 		return { "supported": false, "error": "custom has() must return bool" }
 	return { "supported": false, "error": "value does not support containment" }
 
@@ -924,9 +923,9 @@ func _gdtest_allocate_sequence() -> int:
 	return _gdtest_sequence
 
 
-func _ensure_case_probe_context() -> RefCounted:
+func _ensure_case_probe_context() -> GDTestProbeLedger.CaseContext:
 	if _gdtest_probe_context == null:
-		_gdtest_probe_context = ProbeLedger.CaseContext.open(
+		_gdtest_probe_context = GDTestProbeLedger.CaseContext.open(
 				_gdtest_tree,
 				Callable(self, &"_gdtest_allocate_sequence"),
 				Callable(self, &"_report_probe_error"),
@@ -935,9 +934,9 @@ func _ensure_case_probe_context() -> RefCounted:
 	return _gdtest_probe_context
 
 
-func _ensure_outside_probe_context() -> RefCounted:
+func _ensure_outside_probe_context() -> GDTestProbeLedger.CaseContext:
 	if _gdtest_outside_probe_context == null:
-		_gdtest_outside_probe_context = ProbeLedger.CaseContext.inactive(
+		_gdtest_outside_probe_context = GDTestProbeLedger.CaseContext.inactive(
 				_gdtest_tree,
 				Callable(self, &"_report_probe_error"),
 				Callable(self, &"_user_location")
@@ -980,7 +979,7 @@ func _report_probe_error(text: String, location: Dictionary[String, Variant]) ->
 		_gdtest_record_error_at(
 				text,
 				str(location.get("file", _gdtest_file)),
-				int(location.get("line", -1))
+				location.get("line", -1) as int
 		)
 	else:
 		_gdtest_discovery_errors.append({ "message": text, "location": location })
@@ -989,8 +988,8 @@ func _report_probe_error(text: String, location: Dictionary[String, Variant]) ->
 func _user_location() -> Dictionary[String, Variant]:
 	var stack: Array[Variant] = get_stack()
 	for frame_value: Variant in stack:
-		var frame: Dictionary[String, Variant] = ProbeLedger.string_dictionary(frame_value)
+		var frame: Dictionary[String, Variant] = GDTestProbeLedger.string_dictionary(frame_value)
 		var source: String = str(frame.get("source", ""))
 		if not source.begins_with("res://addons/gdtest/"):
-			return { "file": source, "line": int(frame.get("line", -1)) }
+			return { "file": source, "line": frame.get("line", -1) }
 	return { "file": _gdtest_file, "line": -1 }

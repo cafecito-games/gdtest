@@ -1,7 +1,7 @@
+## Internal daemon-to-worker protocol codec shared by the worker and its helpers.
+class_name GDTestProtocol
 extends RefCounted
 
-## Internal runtime version declaration.
-const Version: GDScript = preload("res://addons/gdtest/version.gd")
 ## Maximum recursive wire-value depth.
 const MAX_NESTING: int = 32
 ## Maximum items serialized from one collection.
@@ -22,11 +22,11 @@ static func hello_envelope(
 		project_path: String
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": "hello",
 		"token": token,
 		"payload": {
-			"runtime_version": Version.PRODUCT_VERSION,
+			"runtime_version": GDTestVersion.PRODUCT_VERSION,
 			"worker_id": worker_id,
 			"session_id": session_id,
 			"generation": generation,
@@ -58,7 +58,7 @@ static func event_envelope(
 		data: Dictionary[String, Variant]
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": "event",
 		"request_id": request_id,
 		"payload": {
@@ -85,7 +85,7 @@ static func response_envelope(
 		payload: Dictionary[String, Variant]
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": message_type,
 		"request_id": request_id,
 		"payload": payload,
@@ -99,7 +99,7 @@ static func pong_envelope(
 		generation: int
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": "pong",
 		"request_id": request_id,
 		"payload": { "worker_id": worker_id, "generation": generation },
@@ -113,7 +113,7 @@ static func generation_ack(
 		generation: int
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": message_type,
 		"request_id": request_id,
 		"generation": generation,
@@ -330,9 +330,9 @@ static func discovery_manifest(
 		files.append({ "path": path, "name": name, "line": line, "cases": cases })
 		for error_value: Variant in prepared.get("errors", []):
 			if error_value is Dictionary:
-				errors.append(_serialized_discovery_error(error_value, path))
+				errors.append(_serialized_discovery_error(string_dictionary(error_value), path))
 	return {
-		"protocol_version": Version.WORKER_PROTOCOL_VERSION,
+		"protocol_version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"generation": generation,
 		"content_fingerprint": content_fingerprint,
 		"files": files,
@@ -423,18 +423,19 @@ static func _diagnostic_assertion_event(
 	}
 	if not case_id.is_empty():
 		payload["test_id"] = case_id
-	if (
-			diagnostic.has("actual")
-			or not omit_default_actual and not bool(diagnostic.get("omit_actual", false))
-	):
+	var omit_actual: bool = diagnostic.get("omit_actual", false)
+	var has_expected: bool = diagnostic.get("has_expected", false)
+	if diagnostic.has("actual") or not omit_default_actual and not omit_actual:
 		payload["actual"] = wire_value(diagnostic.get("actual"))
 	if not str(location.get("file", "")).is_empty():
 		payload["location"] = location
-	if bool(diagnostic.get("has_expected", false)):
+	if has_expected:
 		payload["expected"] = wire_value(diagnostic.get("expected"))
 	var metadata_value: Variant = diagnostic.get("metadata")
-	if metadata_value is Dictionary and not metadata_value.is_empty():
-		payload["metadata"] = string_dictionary(metadata_value)
+	if metadata_value is Dictionary:
+		var metadata: Dictionary[String, Variant] = string_dictionary(metadata_value)
+		if not metadata.is_empty():
+			payload["metadata"] = metadata
 	return payload
 
 
@@ -549,20 +550,22 @@ static func case_finished(
 		"name": case_name,
 		"location": { "file": path.trim_prefix("res://"), "line": line },
 		"status": status,
-		"assertions": int(result.get("assertions", 0)),
+		"assertions": result.get("assertions", 0),
 		"messages": result.get("messages", []),
 		"outcomes": wire_outcomes(result.get("outcomes", [])),
 		"duration_ns": duration_usec * 1000,
 	}
 	var failures: Variant = result.get("failures", [])
-	if status == "error" and failures is Array and not failures.is_empty():
-		var diagnostic: Dictionary[String, Variant] = string_dictionary(failures[0])
-		payload["message"] = str(diagnostic.get("message", "case error"))
-		var location: Dictionary[String, Variant] = string_dictionary(
-				diagnostic.get("location", {})
-		)
-		location["file"] = str(location.get("file", path)).trim_prefix("res://")
-		payload["location"] = location
+	if status == "error" and failures is Array:
+		var failure_list: Array[Variant] = failures
+		if not failure_list.is_empty():
+			var diagnostic: Dictionary[String, Variant] = string_dictionary(failure_list[0])
+			payload["message"] = str(diagnostic.get("message", "case error"))
+			var location: Dictionary[String, Variant] = string_dictionary(
+					diagnostic.get("location", {})
+			)
+			location["file"] = str(location.get("file", path)).trim_prefix("res://")
+			payload["location"] = location
 	return payload
 
 
@@ -617,15 +620,17 @@ static func _discovery_case(
 						"is_only": suite.is_only,
 					}
 			)
+	var case_line: int = case_plan.get("line", -1)
+	var case_is_only: bool = case_plan.get("is_only", false)
 	return {
 		"id": str(case_plan.get("id", "")),
 		"name": str(case_plan.get("name", "")),
 		"file": str(case_plan.get("file", default_file)).trim_prefix("res://"),
-		"line": int(case_plan.get("line", -1)),
+		"line": case_line,
 		"method_name": str(case_plan.get("method_name", case_plan.get("method", ""))),
 		"parameters": parameters,
 		"parameter_name": str(case_plan.get("parameter_name", "")),
-		"is_only": bool(case_plan.get("is_only", false)),
+		"is_only": case_is_only,
 		"suites": suites,
 	}
 
