@@ -218,11 +218,7 @@ func _run_command(command: Dictionary[String, Variant]) -> void:
 			_call_hook,
 			_drain_framework_errors
 	)
-	var case_timeout_ns: int = plan.get("case_timeout_ns", 0)
-	if case_timeout_ns <= 0:
-		_case_timeout_usec = DEFAULT_CASE_TIMEOUT_USEC
-	else:
-		_case_timeout_usec = maxi(1, case_timeout_ns / 1000)
+	_case_timeout_usec = GDTestWorkerTimeouts.plan_timeout_usec(plan, DEFAULT_CASE_TIMEOUT_USEC)
 	var files_value: Variant = plan.get("files", [])
 	if not files_value is Array:
 		_send_worker_error("protocol.invalid_plan", "plan.files must be an array")
@@ -302,6 +298,7 @@ func _discover_command(command: Dictionary[String, Variant]) -> void:
 		_finish_run_state()
 		return
 	var plan: Dictionary[String, Variant] = _dict(plan_value)
+	_case_timeout_usec = GDTestWorkerTimeouts.plan_timeout_usec(plan, DEFAULT_CASE_TIMEOUT_USEC)
 	var files_value: Variant = plan.get("files", [])
 	if not files_value is Array:
 		_send_worker_error("protocol.invalid_plan", "plan.files must be an array")
@@ -374,7 +371,13 @@ func _prepare_file(
 		return prepared
 	var instance: GDTest = instance_value
 	_active_test = instance
-	instance._gdtest_configure(self, path, _on_assertion_failed)
+	var file_timeout_seconds: float = GDTestWorkerTimeouts.configure_file(
+			instance,
+			self,
+			path,
+			_on_assertion_failed,
+			_case_timeout_usec
+	)
 	instance._gdtest_begin_registration()
 	if instance.has_method("suite"):
 		await instance.callv(&"suite", [])
@@ -403,7 +406,8 @@ func _prepare_file(
 			suite_name,
 			path,
 			root_line,
-			false
+			false,
+			file_timeout_seconds
 	)
 	prepared["discovery_error_count"] = discovery_errors.size()
 	_active_test = null
@@ -546,7 +550,7 @@ func _planned_cases(
 	for method_value: Variant in method_list:
 		var method: Dictionary[String, Variant] = _dict(method_value)
 		var method_name: String = str(method.get("name", ""))
-		if not method_name.begins_with("test_") or method_name.ends_with("__cases"):
+		if not GDTestWorkerTimeouts.is_test_method(method_name):
 			continue
 		var logical_name: String = method_name.trim_suffix("__only")
 		_expand_method_case(
@@ -573,6 +577,12 @@ func _expand_method_case(
 ) -> void:
 	var method_name: String = str(base_case.get("method_name", base_case.get("method", "")))
 	var logical_name: String = method_name.trim_suffix("__only")
+	base_case["timeout_seconds"] = GDTestWorkerTimeouts.method_timeout(
+			instance,
+			StringName(logical_name + "__timeout"),
+			instance._gdtest_file_timeout_seconds,
+			discovery_errors
+	)
 	var provider_name: StringName = StringName(logical_name + "__cases")
 	var method: Dictionary[String, Variant] = _method_metadata(instance, StringName(method_name))
 	if not instance.has_method(provider_name):
@@ -773,6 +783,11 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 		parameters.assign(parameter_array)
 	var case_line: int = case_plan.get("line", -1)
 	var case_is_only: bool = case_plan.get("is_only", false)
+	var timeout_seconds: float = GDTestWorkerTimeouts.case_timeout_seconds(
+			case_plan,
+			instance._gdtest_file_timeout_seconds
+	)
+	var timeout_usec: int = maxi(1, int(timeout_seconds * 1000000.0))
 	var info := GDTestCaseInfo.new(
 			case_id,
 			case_name,
@@ -781,16 +796,17 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 			method_name,
 			parameters,
 			str(case_plan.get("parameter_name", "")),
-			case_is_only
+			case_is_only,
+			timeout_seconds
 	)
 	_active_case_id = case_id
-	_send_event("case_started", GDTestProtocol.case_started(case_id, case_name, path, info.line))
+	_send_event("case_started", GDTestProtocol.case_started(info, timeout_usec * 1000))
 	instance._gdtest_begin_case()
 	_leak_tracker.push_scope(root)
 	var started_usec: int = Time.get_ticks_usec()
 	var task: GDTestWorkerCaseTask = GDTestWorkerCaseTask.new()
 	task.start(instance, info, case_plan, method_name, parameters)
-	var deadline_usec: int = started_usec + _case_timeout_usec
+	var deadline_usec: int = started_usec + timeout_usec
 	while not task.finished and not _cancel_requested and Time.get_ticks_usec() < deadline_usec:
 		_poll_messages()
 		await process_frame
@@ -798,7 +814,7 @@ func _run_case(instance: GDTest, path: String, case_plan: Dictionary[String, Var
 	var timed_out: bool = not task.finished and not case_canceled
 	if timed_out:
 		instance._gdtest_record_error_at(
-				"case timed out after %.3f seconds" % (float(_case_timeout_usec) / 1000000.0),
+				"case timed out after %.3f seconds" % timeout_seconds,
 				path,
 				info.line
 		)

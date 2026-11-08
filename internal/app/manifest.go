@@ -68,20 +68,23 @@ func completeManifestWithTimings(
 		ProtocolVersion:    model.ProtocolVersion,
 		RunID:              newID(),
 		Generation:         1,
+		CaseTimeout:        time.Duration(projectConfig.CaseTimeout),
 		ContentFingerprint: static.ContentFingerprint,
 		OnlyMode:           onlyMode,
 		LeakCheck:          leakCheck,
 		Files:              static.Files,
 	}
 	configuration, err := json.Marshal(struct {
-		Tests     []string         `json:"tests"`
-		Exclude   []string         `json:"exclude"`
-		OnlyMode  string           `json:"only_mode"`
-		LeakCheck model.LeakCheck  `json:"leak_check"`
-		Files     []model.FilePlan `json:"files"`
+		Tests       []string         `json:"tests"`
+		Exclude     []string         `json:"exclude"`
+		OnlyMode    string           `json:"only_mode"`
+		CaseTimeout config.Duration  `json:"case_timeout"`
+		LeakCheck   model.LeakCheck  `json:"leak_check"`
+		Files       []model.FilePlan `json:"files"`
 	}{
 		Tests: projectConfig.Tests, Exclude: projectConfig.Exclude,
-		OnlyMode: onlyMode, LeakCheck: leakCheck, Files: static.Files,
+		OnlyMode: onlyMode, CaseTimeout: projectConfig.CaseTimeout,
+		LeakCheck: leakCheck, Files: static.Files,
 	})
 	if err != nil {
 		return model.DiscoveryManifest{}, fmt.Errorf("encode dynamic discovery configuration: %w", err)

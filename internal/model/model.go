@@ -12,7 +12,7 @@ import (
 )
 
 // ProtocolVersion is the serialized plan and event schema version.
-const ProtocolVersion = 4
+const ProtocolVersion = 5
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -174,16 +174,18 @@ type DiscoveryCase struct {
 	Parameters    []WireValue      `json:"parameters,omitempty"`
 	ParameterName string           `json:"parameter_name,omitempty"`
 	IsOnly        bool             `json:"is_only,omitempty"`
+	Timeout       time.Duration    `json:"timeout_ns,omitempty"`
 	Suites        []DiscoverySuite `json:"suites,omitempty"`
 }
 
 // DiscoverySuite is immutable nested-suite metadata.
 type DiscoverySuite struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	File   string `json:"file"`
-	Line   int    `json:"line"`
-	IsOnly bool   `json:"is_only,omitempty"`
+	ID      string        `json:"id"`
+	Name    string        `json:"name"`
+	File    string        `json:"file"`
+	Line    int           `json:"line"`
+	IsOnly  bool          `json:"is_only,omitempty"`
+	Timeout time.Duration `json:"timeout_ns,omitempty"`
 }
 
 // DiscoveryError is a source-located non-executable manifest finding.

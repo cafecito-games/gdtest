@@ -19,6 +19,7 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Len(t, config.Tests, 1)
 	assert.Equal(t, []string{"**/*.bench.gd"}, config.Benchmarks)
 	assert.Equal(t, "file", config.Partition, "partition defaults to whole files")
+	assert.Equal(t, 30*time.Second, time.Duration(config.CaseTimeout))
 	assert.Equal(t, LeakCheck{Policy: "fail"}, config.LeakCheck)
 }
 
@@ -58,12 +59,23 @@ func TestLoadAppliesProjectValuesOverDefaults(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	data := []byte(`{"godot":"custom-godot","worker_idle_timeout":"3s","worker_max_runs":4}`)
+	data := []byte(`{"godot":"custom-godot","worker_idle_timeout":"3s","worker_max_runs":4,"case_timeout":"750ms"}`)
 	require.NoError(t, os.WriteFile(filepath.Join(root, Filename), data, 0o600))
 	config, err := Load(root)
 	require.NoError(t, err)
 	assert.Equal(t, "custom-godot", config.Godot)
 	assert.Equal(t, 3*time.Second, time.Duration(config.WorkerIdleTimeout))
+	assert.Equal(t, 750*time.Millisecond, time.Duration(config.CaseTimeout))
+}
+
+func TestLoadRejectsNonPositiveCaseTimeout(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, Filename), []byte(`{"case_timeout":"0s"}`), 0o600))
+	_, err := Load(root)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "case_timeout must be positive")
 }
 
 func TestLoadWithUserAppliesUserGodotUnlessProjectOverridesIt(t *testing.T) {

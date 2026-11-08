@@ -235,6 +235,46 @@ func TestParseValidatesProviders(t *testing.T) {
 	}
 }
 
+func TestParseRecognizesTimeoutProvidersWithoutDiscoveringThemAsTests(t *testing.T) {
+	t.Parallel()
+
+	file, err := Parse("timeout.test.gd", []byte(`func get_case_timeout() -> float:
+	return 2.0
+
+func test_slow() -> void:
+	pass
+
+func test_slow__timeout() -> float:
+	return 0.25
+`))
+	require.NoError(t, err)
+	require.Len(t, file.Cases, 1)
+	assert.Equal(t, "test_slow", file.Cases[0].MethodName)
+}
+
+func TestParseValidatesTimeoutProviders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{"arguments", "func test_x__timeout(value: int) -> float:\n\treturn 1.0\n", "must take no arguments"},
+		{"return type", "func test_x__timeout() -> int:\n\treturn 1\n", "must return float"},
+		{"missing return type", "func get_case_timeout():\n\treturn 1.0\n", "must return float"},
+		{"await", "func test_x__timeout() -> float:\n\treturn await timeout_value()\n", "must be synchronous"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse("timeout.test.gd", []byte(testCase.source))
+			require.Error(t, err)
+			assert.ErrorContains(t, err, testCase.want)
+		})
+	}
+}
+
 func TestParseValidatesTestAndHookContracts(t *testing.T) {
 	t.Parallel()
 

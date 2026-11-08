@@ -592,6 +592,7 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 	var caseDeadline time.Time
 	var activeCase model.Event
 	var activeCaseStarted time.Time
+	activeCaseTimeout := time.Duration(0)
 	defer func() {
 		if cancelWait != nil {
 			cancelWait()
@@ -609,7 +610,7 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 				if outputErr := p.emitCapturedOutputFor(sink, activeCase.TestID); outputErr != nil {
 					return outputErr
 				}
-				message := fmt.Sprintf("case timed out after %s", caseTimeout)
+				message := fmt.Sprintf("case timed out after %s", activeCaseTimeout)
 				if emitErr := sink.Emit(model.Event{
 					ProtocolVersion: model.ProtocolVersion, Type: model.EventCaseFinished,
 					RunID: plan.RunID, TestID: activeCase.TestID, Name: activeCase.Name,
@@ -662,7 +663,15 @@ func (p *Process) Run(ctx context.Context, plan model.TestPlan, sink executor.Ev
 			p.beginCaseCapture(event.TestID)
 			activeCase = event
 			activeCaseStarted = time.Now()
-			caseDeadline = activeCaseStarted.Add(caseTimeout + caseWatchdogGrace)
+			activeCaseTimeout = caseTimeout
+			if rawTimeout, exists := event.Metadata["timeout_ns"]; exists {
+				timeoutNS, ok := rawTimeout.(float64)
+				if !ok || timeoutNS <= 0 || timeoutNS > float64(int64(^uint64(0)>>1)) {
+					return fmt.Errorf("worker case_started contains invalid timeout_ns %v", rawTimeout)
+				}
+				activeCaseTimeout = time.Duration(timeoutNS)
+			}
+			caseDeadline = activeCaseStarted.Add(activeCaseTimeout + caseWatchdogGrace)
 		}
 		if event.Type == model.EventCaseFinished {
 			caseDeadline = time.Time{}

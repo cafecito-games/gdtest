@@ -54,6 +54,7 @@ type Project struct {
 	WarmWorkers       int          `json:"warm_workers"`
 	WorkerIdleTimeout Duration     `json:"worker_idle_timeout"`
 	WorkerMaxRuns     int          `json:"worker_max_runs"`
+	CaseTimeout       Duration     `json:"case_timeout"`
 	OnlyMode          string       `json:"only_mode"`
 	Partition         string       `json:"partition"`
 	LeakCheck         LeakCheck    `json:"leak_check"`
@@ -150,6 +151,7 @@ func Defaults() Project {
 		WarmWorkers:       1,
 		WorkerIdleTimeout: Duration(2 * time.Minute),
 		WorkerMaxRuns:     100,
+		CaseTimeout:       Duration(30 * time.Second),
 		OnlyMode:          "auto",
 		Partition:         "file",
 		LeakCheck:         LeakCheck{Policy: "fail"},
@@ -215,6 +217,9 @@ func (c Project) Validate() error {
 	}
 	if time.Duration(c.WorkerIdleTimeout) <= 0 {
 		return errors.New("worker_idle_timeout must be positive")
+	}
+	if time.Duration(c.CaseTimeout) <= 0 {
+		return errors.New("case_timeout must be positive")
 	}
 	switch c.OnlyMode {
 	case "auto", "ignore", "require", "forbid":

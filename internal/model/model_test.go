@@ -63,7 +63,7 @@ func TestPlanSerializesWithoutShardFieldsExactlyAsUnsharded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(
 		t,
-		`{"protocol_version":4,"run_id":"run-1","generation":1,"selection_applied":true,`+
+		`{"protocol_version":5,"run_id":"run-1","generation":1,"selection_applied":true,`+
 			`"selected_ids":["tests/a.test.gd::test_one"],`+
 			`"files":[{"path":"tests/a.test.gd","cases":[{"id":"tests/a.test.gd::test_one","name":"One","method_name":"test_one","line":3}]}]}`,
 		string(encoded),
@@ -134,7 +134,7 @@ func boolPointer(value bool) *bool {
 func TestPlanLeakCheckRoundTripsBackendNeutralValues(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, 4, ProtocolVersion)
+	assert.Equal(t, 5, ProtocolVersion)
 	plan := TestPlan{
 		ProtocolVersion: ProtocolVersion,
 		RunID:           "run-1",

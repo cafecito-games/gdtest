@@ -474,6 +474,85 @@ func TestGodotCaseTimeoutIsAnErrorAndTaintsTheWorker(t *testing.T) {
 	assert.Equal(t, "case_timeout", tainted.Metadata["reason"])
 }
 
+func TestGodotHierarchicalCaseTimeoutsAreDiscoveredAndHardEnforced(t *testing.T) {
+	if _, err := exec.LookPath("godot"); err != nil {
+		t.Skip("Godot hierarchical-timeout test skipped: godot is not on PATH")
+	}
+	root := copyGodotProject(t, repositoryRoot(t))
+	source := `extends GDTest
+
+func get_case_timeout() -> float:
+	return 0.75
+
+func suite() -> void:
+	define("bounded", func() -> void:
+		test("inherits suite timeout", func() -> void:
+			pass
+		)
+		test("case override", func() -> void:
+			pass
+		, false, 0.05)
+	, false, 0.25)
+
+func test_file_default() -> void:
+	pass
+
+func test_method_override() -> void:
+	while true:
+		pass
+
+func test_method_override__timeout() -> float:
+	return 0.05
+`
+	path := filepath.Join(root, "tests", "hierarchical_timeout.test.gd")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
+	file, err := discovery.Parse("tests/hierarchical_timeout.test.gd", []byte(source))
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	process, err := worker.Start(ctx, worker.ProcessOptions{
+		Godot: "godot", Project: root, SessionID: "hierarchical-timeout", Generation: 1,
+	})
+	require.NoError(t, err)
+	defer shutdown(t, process)
+
+	plan := model.TestPlan{
+		ProtocolVersion: model.ProtocolVersion, RunID: "discover-hierarchical-timeout", Generation: 1,
+		CaseTimeout: 2 * time.Second, Files: []model.FilePlan{file},
+	}
+	manifest, err := process.Discover(ctx, plan)
+	require.NoError(t, err)
+	require.Empty(t, manifest.Errors)
+	require.Len(t, manifest.Files, 1)
+	timeouts := make(map[string]time.Duration)
+	for _, testCase := range manifest.Files[0].Cases {
+		timeouts[testCase.Name] = testCase.Timeout
+	}
+	assert.Equal(t, 750*time.Millisecond, timeouts["File default"])
+	assert.Equal(t, 50*time.Millisecond, timeouts["Method override"])
+	assert.Equal(t, 250*time.Millisecond, timeouts["inherits suite timeout"])
+	assert.Equal(t, 50*time.Millisecond, timeouts["case override"])
+
+	timeoutID := file.Path + "::test_method_override"
+	plan.RunID = "run-hierarchical-timeout"
+	plan.SelectionApplied = true
+	plan.SelectedIDs = []string{timeoutID}
+	var finished model.Event
+	startedAt := time.Now()
+	err = process.Run(ctx, plan, executor.EventSinkFunc(func(event model.Event) error {
+		if event.Type == model.EventCaseFinished {
+			finished = event
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	assert.Less(t, time.Since(startedAt), time.Second)
+	assert.Equal(t, timeoutID, finished.TestID)
+	assert.Equal(t, "error", finished.Status)
+	assert.Contains(t, finished.Message, "50ms")
+}
+
 func TestGodotBusyLoopTimeoutKillsOnlyItsWorkerAndReturnsCaseError(t *testing.T) {
 	if _, err := exec.LookPath("godot"); err != nil {
 		t.Skip("Godot busy-loop timeout test skipped: godot is not on PATH")

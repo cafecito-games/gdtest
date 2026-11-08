@@ -352,7 +352,7 @@ func TestJSONLStreamsCaseWarningAndLeakFailureMetadata(t *testing.T) {
 	}))
 
 	assert.JSONEq(t, `{
-		"protocol_version": 4,
+		"protocol_version": 5,
 		"type": "case_warning",
 		"run_id": "run-1",
 		"test_id": "tests/hud.test.gd::test_toast",
