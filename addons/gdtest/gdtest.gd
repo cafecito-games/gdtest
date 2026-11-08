@@ -2,10 +2,6 @@
 class_name GDTest
 extends RefCounted
 
-## Internal scope-stacked autofree registry.
-const AutofreeRegistry := preload("res://addons/gdtest/autofree_registry.gd")
-## Internal shared case-scoped probe ledger.
-const ProbeLedger := preload("res://addons/gdtest/probe_ledger.gd")
 const _STATUS_RANK: Dictionary[String, int] = {
 	"void": 0,
 	"pass": 1,
@@ -52,7 +48,7 @@ var _gdtest_callback_probes: Array[GDTestCallbackProbe] = []
 var _gdtest_probe_context: GDTestProbeLedger.CaseContext = null
 var _gdtest_outside_probe_context: GDTestProbeLedger.CaseContext = null
 var _gdtest_double_context: GDTestDoubleContext = null
-var _gdtest_autofree: GDTestAutofreeRegistry = AutofreeRegistry.new()
+var _gdtest_autofree: GDTestAutofreeRegistry = GDTestAutofreeRegistry.new()
 var _gdtest_sequence: int = 0
 
 
@@ -74,7 +70,7 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 	var sibling_ordinal: int = _gdtest_suite_ordinals.get(sibling_key, 0)
 	_gdtest_suite_ordinals[sibling_key] = sibling_ordinal + 1
 	var delimiter: String = "/" if not parent_id.is_empty() else ""
-	var encoded_name: String = ProbeLedger.encode_component(name)
+	var encoded_name: String = GDTestProbeLedger.encode_component(name)
 	var suite_id: String = parent_id + delimiter + encoded_name + "@" + str(sibling_ordinal)
 	var info := GDTestSuiteInfo.new(
 			suite_id,
@@ -150,7 +146,7 @@ func test_each(
 				continue
 			rows[parameter_name] = dictionary[key]
 			names.append(parameter_name)
-		names.sort_custom(ProbeLedger.utf8_less)
+		names.sort_custom(GDTestProbeLedger.utf8_less)
 		for parameter_name: String in names:
 			_register_dynamic_row(
 					description,
@@ -491,7 +487,7 @@ func _gdtest_begin_registration() -> void:
 func _gdtest_finish_registration() -> void:
 	for definition_value: Variant in _gdtest_definition_roots:
 		if definition_value is Dictionary:
-			await _gdtest_run_definition(ProbeLedger.string_dictionary(definition_value))
+			await _gdtest_run_definition(GDTestProbeLedger.string_dictionary(definition_value))
 	_gdtest_definition_roots.clear()
 	_gdtest_suite_stack.clear()
 	_gdtest_active_definition.clear()
@@ -511,7 +507,7 @@ func _gdtest_run_definition(definition: Dictionary[String, Variant]) -> void:
 	if children is Array:
 		for child_value: Variant in children:
 			if child_value is Dictionary:
-				await _gdtest_run_definition(ProbeLedger.string_dictionary(child_value))
+				await _gdtest_run_definition(GDTestProbeLedger.string_dictionary(child_value))
 	_gdtest_active_definition = previous
 
 
@@ -667,7 +663,7 @@ func _register_dynamic_case(
 	_gdtest_case_ordinals[line] = ordinal + 1
 	var full_name: Array[String] = suite_path.duplicate()
 	full_name.append(description)
-	var encoded_name: String = "/".join(full_name.map(ProbeLedger.encode_component))
+	var encoded_name: String = "/".join(full_name.map(GDTestProbeLedger.encode_component))
 	var case_id: String = _gdtest_file.trim_prefix(
 			"res://"
 	) + "::dynamic@%d:%d[%s]" % [line, ordinal, encoded_name]
@@ -929,7 +925,7 @@ func _gdtest_allocate_sequence() -> int:
 
 func _ensure_case_probe_context() -> GDTestProbeLedger.CaseContext:
 	if _gdtest_probe_context == null:
-		_gdtest_probe_context = ProbeLedger.CaseContext.open(
+		_gdtest_probe_context = GDTestProbeLedger.CaseContext.open(
 				_gdtest_tree,
 				Callable(self, &"_gdtest_allocate_sequence"),
 				Callable(self, &"_report_probe_error"),
@@ -940,7 +936,7 @@ func _ensure_case_probe_context() -> GDTestProbeLedger.CaseContext:
 
 func _ensure_outside_probe_context() -> GDTestProbeLedger.CaseContext:
 	if _gdtest_outside_probe_context == null:
-		_gdtest_outside_probe_context = ProbeLedger.CaseContext.inactive(
+		_gdtest_outside_probe_context = GDTestProbeLedger.CaseContext.inactive(
 				_gdtest_tree,
 				Callable(self, &"_report_probe_error"),
 				Callable(self, &"_user_location")
@@ -992,7 +988,7 @@ func _report_probe_error(text: String, location: Dictionary[String, Variant]) ->
 func _user_location() -> Dictionary[String, Variant]:
 	var stack: Array[Variant] = get_stack()
 	for frame_value: Variant in stack:
-		var frame: Dictionary[String, Variant] = ProbeLedger.string_dictionary(frame_value)
+		var frame: Dictionary[String, Variant] = GDTestProbeLedger.string_dictionary(frame_value)
 		var source: String = str(frame.get("source", ""))
 		if not source.begins_with("res://addons/gdtest/"):
 			return { "file": source, "line": frame.get("line", -1) }

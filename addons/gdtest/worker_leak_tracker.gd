@@ -2,8 +2,6 @@
 class_name GDTestWorkerLeakTracker
 extends RefCounted
 
-## Internal protocol codec script.
-const Protocol := preload("res://addons/gdtest/protocol.gd")
 ## Maximum number of subtree-root leak records serialized per scope report.
 const MAX_REPORTED_LEAKS: int = 20
 
@@ -130,7 +128,7 @@ static func from_plan(plan: Dictionary[String, Variant]) -> GDTestWorkerLeakTrac
 	var tracker := new()
 	var raw_configuration: Variant = plan.get("leak_check", {})
 	if raw_configuration is Dictionary:
-		var configuration: Dictionary[String, Variant] = Protocol.string_dictionary(
+		var configuration: Dictionary[String, Variant] = GDTestProtocol.string_dictionary(
 				raw_configuration
 		)
 		var configured_policy: String = str(configuration.get("policy", ""))
@@ -207,7 +205,7 @@ func _execute_suite_cases(
 			var aborted: bool = _is_aborted.call()
 			if aborted:
 				break
-		var case_plan: Dictionary[String, Variant] = Protocol.string_dictionary(case_value)
+		var case_plan: Dictionary[String, Variant] = GDTestProtocol.string_dictionary(case_value)
 		var desired_suites: Array[GDTestSuiteInfo] = _suite_infos(case_plan.get("suite_infos", []))
 		var common_count: int = _common_suite_count(open_suites, desired_suites)
 		for index: int in range(open_suites.size() - 1, common_count - 1, -1):
@@ -315,9 +313,9 @@ func _close_non_case_scope(
 	}
 	if _policy == "fail":
 		totals["fail"] = totals.get("fail", 0) + 1
-		_emit_event.call("assertion_failed", Protocol.assertion_failed("", diagnostic))
+		_emit_event.call("assertion_failed", GDTestProtocol.assertion_failed("", diagnostic))
 	elif _policy == "warn":
-		_emit_event.call("case_warning", Protocol.case_warning("", diagnostic))
+		_emit_event.call("case_warning", GDTestProtocol.case_warning("", diagnostic))
 
 
 ## Evaluates the completed case scope and records or emits its configured leak diagnostic.
@@ -329,7 +327,9 @@ func check_case_scope(instance: GDTest, case_id: String, path: String, line: int
 	if report.is_empty():
 		return
 	if _policy == "fail":
-		var metadata: Dictionary[String, Variant] = Protocol.string_dictionary(report["metadata"])
+		var metadata: Dictionary[String, Variant] = GDTestProtocol.string_dictionary(
+				report["metadata"]
+		)
 		instance._gdtest_record_leak_failure(str(report["message"]), path, line, metadata)
 	elif _policy == "warn":
 		var diagnostic: Dictionary[String, Variant] = {
@@ -339,7 +339,7 @@ func check_case_scope(instance: GDTest, case_id: String, path: String, line: int
 			"location": { "file": path, "line": line },
 			"metadata": report["metadata"],
 		}
-		_emit_event.call("case_warning", Protocol.case_warning(case_id, diagnostic))
+		_emit_event.call("case_warning", GDTestProtocol.case_warning(case_id, diagnostic))
 
 
 ## Pops the current scope baseline, absorbs survivors into ancestors, and builds a leak report.
@@ -571,11 +571,11 @@ func _leak_less(left: _LeakRoot, right: _LeakRoot) -> bool:
 	if left_is_stray != right_is_stray:
 		return left_is_stray
 	if left_is_stray and left.tree_path() != right.tree_path():
-		return Protocol.utf8_less(left.tree_path(), right.tree_path())
+		return GDTestProtocol.utf8_less(left.tree_path(), right.tree_path())
 	if not left_is_stray and left.class_name_text() != right.class_name_text():
-		return Protocol.utf8_less(left.class_name_text(), right.class_name_text())
+		return GDTestProtocol.utf8_less(left.class_name_text(), right.class_name_text())
 	if not left_is_stray and left.node_name() != right.node_name():
-		return Protocol.utf8_less(left.node_name(), right.node_name())
+		return GDTestProtocol.utf8_less(left.node_name(), right.node_name())
 	return left.instance_id() < right.instance_id()
 
 

@@ -5,8 +5,6 @@ extends RefCounted
 ## Emitted after an invocation is recorded and when the probe disconnects.
 signal state_changed
 
-## Internal shared case-scoped probe ledger.
-const ProbeLedger := preload("res://addons/gdtest/probe_ledger.gd")
 const _MAX_ARITY: int = 8
 
 var _owner: Object
@@ -58,7 +56,7 @@ func stop_recording() -> void:
 
 static func _gdtest_detached(context: GDTestProbeLedger.CaseContext) -> GDTestSignalProbe:
 	var probe := GDTestSignalProbe.new()
-	probe._ledger = ProbeLedger.new(context, "emissions", false)
+	probe._ledger = GDTestProbeLedger.new(context, "emissions", false)
 	probe._ledger.state_changed.connect(probe._on_ledger_state_changed)
 	return probe
 
@@ -100,7 +98,7 @@ static func _gdtest_create(
 		)
 		return invalid_probe
 	var probe := GDTestSignalProbe.new()
-	probe._ledger = ProbeLedger.new(context, "emissions", true)
+	probe._ledger = GDTestProbeLedger.new(context, "emissions", true)
 	probe._ledger.state_changed.connect(probe._on_ledger_state_changed)
 	probe._owner = owner
 	probe._signal = what

@@ -2,8 +2,6 @@
 class_name GDTestProtocol
 extends RefCounted
 
-## Internal runtime version declaration.
-const Version := preload("res://addons/gdtest/version.gd")
 ## Maximum recursive wire-value depth.
 const MAX_NESTING: int = 32
 ## Maximum items serialized from one collection.
@@ -24,11 +22,11 @@ static func hello_envelope(
 		project_path: String
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": "hello",
 		"token": token,
 		"payload": {
-			"runtime_version": Version.PRODUCT_VERSION,
+			"runtime_version": GDTestVersion.PRODUCT_VERSION,
 			"worker_id": worker_id,
 			"session_id": session_id,
 			"generation": generation,
@@ -60,7 +58,7 @@ static func event_envelope(
 		data: Dictionary[String, Variant]
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": "event",
 		"request_id": request_id,
 		"payload": {
@@ -87,7 +85,7 @@ static func response_envelope(
 		payload: Dictionary[String, Variant]
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": message_type,
 		"request_id": request_id,
 		"payload": payload,
@@ -101,7 +99,7 @@ static func pong_envelope(
 		generation: int
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": "pong",
 		"request_id": request_id,
 		"payload": { "worker_id": worker_id, "generation": generation },
@@ -115,7 +113,7 @@ static func generation_ack(
 		generation: int
 ) -> Dictionary[String, Variant]:
 	return {
-		"version": Version.WORKER_PROTOCOL_VERSION,
+		"version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"type": message_type,
 		"request_id": request_id,
 		"generation": generation,
@@ -334,7 +332,7 @@ static func discovery_manifest(
 			if error_value is Dictionary:
 				errors.append(_serialized_discovery_error(string_dictionary(error_value), path))
 	return {
-		"protocol_version": Version.WORKER_PROTOCOL_VERSION,
+		"protocol_version": GDTestVersion.WORKER_PROTOCOL_VERSION,
 		"generation": generation,
 		"content_fingerprint": content_fingerprint,
 		"files": files,

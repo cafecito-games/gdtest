@@ -2,8 +2,6 @@
 class_name GDTestWorkerBenchmarkRunner
 extends RefCounted
 
-## Internal asynchronous benchmark sample task.
-const BenchmarkTask := preload("res://addons/gdtest/worker_benchmark_task.gd")
 ## Prefix shared with the Go process-output classifier.
 const MARKER_PREFIX: String = "@@GDTEST_CASE_CAPTURE "
 ## Default external deadline for one sample including its untimed hooks.
@@ -272,7 +270,7 @@ func _run_sample(
 	if not completed_capture.is_empty():
 		started_data["metadata"] = { "completed_capture": completed_capture }
 	_send("benchmark_sample_started", started_data)
-	var task: GDTestWorkerBenchmarkTask = BenchmarkTask.new()
+	var task: GDTestWorkerBenchmarkTask = GDTestWorkerBenchmarkTask.new()
 	var capture_id: String = "%s#%s:%d" % [info.id, "warmup" if warmup else "sample", index]
 	task.start(instance, info, capture_id)
 	var deadline_usec: int = Time.get_ticks_usec() + DEFAULT_SAMPLE_TIMEOUT_USEC
