@@ -312,6 +312,7 @@ The initial schema should cover:
   "warm_workers": 1,
   "worker_idle_timeout": "2m",
   "worker_max_runs": 100,
+  "case_timeout": "30s",
   "only_mode": "auto",
   "partition": "file",
   "leak_check": {
@@ -597,7 +598,7 @@ The daemon opens a loopback listener on an ephemeral port. Each worker gets a
 cryptographically random one-time authentication token. The first worker
 message must authenticate and complete a versioned handshake containing:
 
-- Worker protocol version (version 4, synchronized across `model.ProtocolVersion`,
+- Worker protocol version (version 5, synchronized across `model.ProtocolVersion`,
   `protocol.Version`, `daemon.ProtocolVersion`, and `addons/gdtest/version.gd`).
 - gdtest runtime version.
 - Godot version and build information.

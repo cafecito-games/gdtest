@@ -42,6 +42,11 @@ var is_only: bool:
 	get:
 		return _is_only
 
+## Effective deadline for this case, including its case hooks.
+var timeout_seconds: float:
+	get:
+		return _timeout_seconds
+
 var _id: String
 var _name: String
 var _file: String
@@ -50,6 +55,7 @@ var _method_name: StringName
 var _parameters: Array[Variant]
 var _parameter_name: String
 var _is_only: bool
+var _timeout_seconds: float
 
 
 func _init(
@@ -60,7 +66,8 @@ func _init(
 		p_method_name: StringName,
 		p_parameters: Array[Variant],
 		p_parameter_name: String,
-		p_is_only: bool
+		p_is_only: bool,
+		p_timeout_seconds: float = 0.0
 ) -> void:
 	_id = p_id
 	_name = p_name
@@ -70,3 +77,4 @@ func _init(
 	_parameters = p_parameters.duplicate(true)
 	_parameter_name = p_parameter_name
 	_is_only = p_is_only
+	_timeout_seconds = p_timeout_seconds

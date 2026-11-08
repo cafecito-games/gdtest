@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the daemon-to-worker protocol version.
-const Version = 4
+const Version = 5
 
 // DefaultMaxMessageSize bounds untrusted local messages while accommodating
 // large real-world project manifests (for example, hundreds of test files).

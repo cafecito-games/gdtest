@@ -471,7 +471,15 @@ func TestGDTestStartupHelper(t *testing.T) {
 	}
 	switch mode {
 	case "startup-failure":
-		_, _ = fmt.Fprint(os.Stderr, "DISCARDED-PREFIX", strings.Repeat("x", startupOutputLimit+1024), "ACTIONABLE-STARTUP-MARKER\n")
+		_, _ = fmt.Fprint(os.Stderr, "DISCARDED-PREFIX")
+		// Keep writes below the platform pipe atomic-write bound. One oversized
+		// write can legally be short on a loaded CI runner and omit the marker
+		// that this fixture is intended to place at the retained tail.
+		chunk := strings.Repeat("x", 1024)
+		for range startupOutputLimit/len(chunk) + 1 {
+			_, _ = fmt.Fprint(os.Stderr, chunk)
+		}
+		_, _ = fmt.Fprintln(os.Stderr, "ACTIONABLE-STARTUP-MARKER")
 		os.Exit(24)
 	case "bootstrap-success":
 		os.Exit(0)

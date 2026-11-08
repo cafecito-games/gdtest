@@ -29,7 +29,7 @@ func _validate_handshake() -> String:
 	if messages.size() != 1:
 		return "worker handshake fixture must contain exactly one message"
 	var message: Dictionary[String, Variant] = messages[0]
-	if int(message.get("version", -1)) != 4 or str(message.get("type", "")) != "hello":
+	if int(message.get("version", -1)) != 5 or str(message.get("type", "")) != "hello":
 		return "worker handshake fixture has an invalid envelope"
 	if str(message.get("token", "")).is_empty():
 		return "worker handshake fixture has no authentication token"
@@ -68,7 +68,7 @@ func _validate_events() -> String:
 		return "run event fixture has the wrong message count"
 	for index: int in range(messages.size()):
 		var message: Dictionary[String, Variant] = messages[index]
-		if int(message.get("version", -1)) != 4 or str(message.get("type", "")) != "event":
+		if int(message.get("version", -1)) != 5 or str(message.get("type", "")) != "event":
 			return "run event fixture has an invalid envelope at row %d" % [index + 1]
 		if str(message.get("request_id", "")) != "run-1":
 			return "run event fixture request identity changed at row %d" % [index + 1]
@@ -104,7 +104,7 @@ func _validate_benchmark_events() -> String:
 		return "benchmark event fixture has the wrong message count"
 	for index: int in range(messages.size()):
 		var message: Dictionary[String, Variant] = messages[index]
-		if int(message.get("version", -1)) != 4 or str(message.get("type", "")) != "event":
+		if int(message.get("version", -1)) != 5 or str(message.get("type", "")) != "event":
 			return "benchmark event fixture has an invalid envelope"
 		var payload: Dictionary[String, Variant] = _string_dictionary(message.get("payload", {}))
 		if str(payload.get("kind", "")) != expected_kinds[index]:
@@ -122,7 +122,7 @@ func _validate_run_request() -> String:
 	if messages.size() != 1:
 		return "run request fixture must contain exactly one message"
 	var message: Dictionary[String, Variant] = messages[0]
-	if int(message.get("version", -1)) != 4 or str(message.get("type", "")) != "run":
+	if int(message.get("version", -1)) != 5 or str(message.get("type", "")) != "run":
 		return "run request fixture has an invalid envelope"
 	if str(message.get("request_id", "")).is_empty():
 		return "run request fixture has no request identity"
@@ -133,7 +133,7 @@ func _validate_run_request() -> String:
 	if not plan_value is Dictionary:
 		return "run request fixture plan must be an object"
 	var plan: Dictionary[String, Variant] = _string_dictionary(plan_value)
-	if int(plan.get("protocol_version", -1)) != 4:
+	if int(plan.get("protocol_version", -1)) != 5:
 		return "run request fixture plan has an invalid protocol version"
 	if not plan.get("has_focus", null) is bool:
 		return "run request fixture plan must stamp has_focus"

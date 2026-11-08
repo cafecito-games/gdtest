@@ -43,6 +43,7 @@ var _gdtest_suite_ordinals: Dictionary[String, int] = {}
 var _gdtest_case_ordinals: Dictionary[int, int] = {}
 var _gdtest_discovery_errors: Array[Variant] = []
 var _gdtest_file: String = ""
+var _gdtest_file_timeout_seconds: float = 30.0
 var _gdtest_signal_probes: Array[GDTestSignalProbe] = []
 var _gdtest_callback_probes: Array[GDTestCallbackProbe] = []
 var _gdtest_probe_context: GDTestProbeLedger.CaseContext = null
@@ -53,14 +54,29 @@ var _gdtest_sequence: int = 0
 
 
 ## Registers a nested dynamic suite and immediately invokes its callback.
-func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSuiteInfo:
+func define(
+		name: String,
+		callback: Callable,
+		is_only: bool = false,
+		timeout_seconds: float = 0.0
+) -> GDTestSuiteInfo:
+	var inherited_timeout: float = GDTestRegistration.inherited_timeout(
+			_gdtest_suite_stack,
+			_gdtest_file_timeout_seconds
+	)
 	if not _require_registration("define"):
-		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only)
+		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only, inherited_timeout)
 	if name.is_empty():
 		_record_discovery_error("define requires a non-empty name")
-		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only)
+		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only, inherited_timeout)
 	if not _valid_registration_callback(callback, "define", 0):
-		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only)
+		return GDTestSuiteInfo.new("", name, _gdtest_file, -1, is_only, inherited_timeout)
+	var effective_timeout: float = GDTestRegistration.resolve_timeout(
+			timeout_seconds,
+			inherited_timeout,
+			"define",
+			_record_discovery_error
+	)
 	var location: Dictionary[String, Variant] = _user_location()
 	var parent_id: String = (
 			_gdtest_suite_stack.back().id if not _gdtest_suite_stack.is_empty()
@@ -77,7 +93,8 @@ func define(name: String, callback: Callable, is_only: bool = false) -> GDTestSu
 			name,
 			str(location.get("file", _gdtest_file)),
 			location.get("line", -1) as int,
-			is_only
+			is_only,
+			effective_timeout
 	)
 	_gdtest_dynamic_suites.append({ "info": info, "parent_id": parent_id })
 	var definition: Dictionary[String, Variant] = {
@@ -101,7 +118,12 @@ func define_only(name: String, callback: Callable) -> GDTestSuiteInfo:
 
 
 ## Registers a dynamic test case for later execution.
-func test(description: String, callback: Callable, is_only: bool = false) -> void:
+func test(
+		description: String,
+		callback: Callable,
+		is_only: bool = false,
+		timeout_seconds: float = 0.0
+) -> void:
 	if not _require_registration("test"):
 		return
 	if description.is_empty():
@@ -109,7 +131,7 @@ func test(description: String, callback: Callable, is_only: bool = false) -> voi
 		return
 	if not _valid_registration_callback(callback, "test", 0):
 		return
-	_register_dynamic_case(description, callback, [], "", is_only)
+	_register_dynamic_case(description, callback, [], "", is_only, "", timeout_seconds)
 
 
 ## Registers a focused dynamic test case.
@@ -122,7 +144,8 @@ func test_each(
 		description: String,
 		cases: Variant,
 		callback: Callable,
-		is_only: bool = false
+		is_only: bool = false,
+		timeout_seconds: float = 0.0
 ) -> void:
 	if not _require_registration("test_each"):
 		return
@@ -148,24 +171,31 @@ func test_each(
 			names.append(parameter_name)
 		names.sort_custom(GDTestProbeLedger.utf8_less)
 		for parameter_name: String in names:
-			_register_dynamic_row(
+			GDTestRegistration.register_row(
 					description,
 					callback,
 					rows[parameter_name],
 					parameter_name,
-					is_only
+					is_only,
+					timeout_seconds,
+					0,
+					_register_dynamic_case,
+					_record_discovery_error
 			)
 		return
 	if cases is Array:
 		var array: Array[Variant] = cases
 		for index: int in range(array.size()):
-			_register_dynamic_row(
+			GDTestRegistration.register_row(
 					description,
 					callback,
 					array[index],
 					str(index),
 					is_only,
-					index + 1
+					timeout_seconds,
+					index + 1,
+					_register_dynamic_case,
+					_record_discovery_error
 			)
 		return
 	_record_discovery_error("test_each cases must be a Dictionary or Array")
@@ -465,10 +495,16 @@ func autofree(node: Node) -> Node:
 	return node
 
 
-func _gdtest_configure(tree: SceneTree, file: String, failure_sink: Callable) -> void:
+func _gdtest_configure(
+		tree: SceneTree,
+		file: String,
+		failure_sink: Callable,
+		file_timeout_seconds: float = 30.0
+) -> void:
 	_gdtest_tree = tree
 	_gdtest_file = file
 	_gdtest_failure_sink = failure_sink
+	_gdtest_file_timeout_seconds = file_timeout_seconds
 
 
 func _gdtest_begin_registration() -> void:
@@ -614,72 +650,38 @@ func _gdtest_record_error_at(text: String, file: String, line: int) -> void:
 	_emit_failure(diagnostic)
 
 
-func _register_dynamic_row(
-		description: String,
-		callback: Callable,
-		row: Variant,
-		parameter_name: String,
-		is_only: bool,
-		ordinal: int = 0
-) -> void:
-	if not row is Array:
-		_record_discovery_error("test_each row " + parameter_name + " must be an Array")
-		return
-	var parameters: Array[Variant] = []
-	parameters.assign(row as Array[Variant])
-	if callback.get_argument_count() != parameters.size():
-		_record_discovery_error(
-				"test_each row %s has %d arguments; callback takes %d" % [
-					parameter_name,
-					parameters.size(),
-					callback.get_argument_count(),
-				]
-		)
-		return
-	var display_name: String = "%s %d: %s" % [
-		description,
-		ordinal,
-		str(parameters),
-	] if ordinal > 0 else "%s [%s]" % [description, parameter_name]
-	_register_dynamic_case(description, callback, parameters, parameter_name, is_only, display_name)
-
-
 func _register_dynamic_case(
 		description: String,
 		callback: Callable,
 		parameters: Array[Variant],
 		parameter_name: String,
 		is_only: bool,
-		display_name: String = ""
+		display_name: String = "",
+		timeout_seconds: float = 0.0
 ) -> void:
 	var location: Dictionary[String, Variant] = _user_location()
-	var suite_path: Array[String] = []
-	var inherited_only: bool = false
-	for suite: GDTestSuiteInfo in _gdtest_suite_stack:
-		suite_path.append(suite.name)
-		inherited_only = inherited_only or suite.is_only
-	var line: int = location.get("line", -1)
-	var ordinal: int = _gdtest_case_ordinals.get(line, 0)
-	_gdtest_case_ordinals[line] = ordinal + 1
-	var full_name: Array[String] = suite_path.duplicate()
-	full_name.append(description)
-	var encoded_name: String = "/".join(full_name.map(GDTestProbeLedger.encode_component))
-	var case_id: String = _gdtest_file.trim_prefix(
-			"res://"
-	) + "::dynamic@%d:%d[%s]" % [line, ordinal, encoded_name]
-	_gdtest_dynamic_cases.append(
-			{
-				"id": case_id,
-				"name": description if display_name.is_empty() else display_name,
-				"file": str(location.get("file", _gdtest_file)),
-				"line": line,
-				"callback": callback,
-				"parameters": parameters.duplicate(true),
-				"parameter_name": parameter_name,
-				"is_only": is_only or inherited_only,
-				"suite_path": suite_path,
-				"suite_infos": _gdtest_suite_stack.duplicate(),
-			}
+	var inherited: float = GDTestRegistration.inherited_timeout(
+			_gdtest_suite_stack,
+			_gdtest_file_timeout_seconds
+	)
+	GDTestRegistration.register_case(
+			_gdtest_dynamic_cases,
+			_gdtest_case_ordinals,
+			_gdtest_file,
+			_gdtest_suite_stack,
+			location,
+			description,
+			callback,
+			parameters,
+			parameter_name,
+			is_only,
+			display_name,
+			GDTestRegistration.resolve_timeout(
+					timeout_seconds,
+					inherited,
+					"test",
+					_record_discovery_error
+			)
 	)
 
 

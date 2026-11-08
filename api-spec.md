@@ -129,7 +129,7 @@ The following are not test methods:
 
 - `test` without the underscore.
 - Private methods beginning with `_`.
-- Reserved provider methods ending in `__cases`.
+- Reserved provider methods ending in `__cases` or `__timeout`.
 - Methods inherited from another script. A concrete base file that is itself
   discovered runs its methods in its own suite; descendants do not repeat
   them.
@@ -160,6 +160,35 @@ underscores converted to spaces and humanized for display. For example,
 `test_empty_inventory` displays as `Empty inventory`.
 
 The method name, not the display name, is part of the stable ID.
+
+### 5.4 Hierarchical case timeouts
+
+Every case has an external deadline that includes `before_case`/`before_each`,
+the case body, and `after_case`/`after_each`. The project default is the
+positive `gdtest.json` duration `case_timeout`, which defaults to `"30s"`.
+
+A file may override that default for all of its cases:
+
+```gdscript
+func get_case_timeout() -> float:
+	return 10.0
+```
+
+One method test may override the inherited value with a reserved synchronous
+provider named after its logical (non-`__only`) method:
+
+```gdscript
+func test_slow_import() -> void:
+	expect(await import_fixture())
+
+func test_slow_import__timeout() -> float:
+	return 60.0
+```
+
+Timeout providers take no arguments, return `float` seconds, and may not
+suspend. Values must be finite and non-negative. Zero means inherit; a positive
+value replaces the inherited deadline. An invalid provider is a discovery
+error. These providers are not test cases.
 
 ## 6. Parameterized method tests
 
@@ -251,6 +280,7 @@ func define(
 	name: String,
 	callback: Callable,
 	is_only: bool = false,
+	timeout_seconds: float = 0.0,
 ) -> GDTestSuiteInfo
 ```
 
@@ -258,13 +288,19 @@ func define(
 callback. Nested calls to `define` and `test` attach to the current suite.
 The callback may be asynchronous and is awaited by discovery.
 
-The name must be non-empty. Calling `define` outside `suite()` or another
+The name must be non-empty. `timeout_seconds` becomes the per-case default for
+all descendants and zero inherits the enclosing suite or file value. It is not
+one cumulative wall-clock budget for the whole suite, so partitioning does not
+change timeout semantics. Calling `define` outside `suite()` or another
 registration callback is a framework error.
 
 Convenience form:
 
 ```gdscript
-func define_only(name: String, callback: Callable) -> GDTestSuiteInfo
+func define_only(
+	name: String,
+	callback: Callable,
+) -> GDTestSuiteInfo
 ```
 
 ### 7.2 `test`
@@ -274,6 +310,7 @@ func test(
 	description: String,
 	callback: Callable,
 	is_only: bool = false,
+	timeout_seconds: float = 0.0,
 ) -> void
 ```
 
@@ -281,13 +318,17 @@ func test(
 discovery. The callback takes no arguments unless registered through
 `test_each`. It may be asynchronous.
 
-The description must be non-empty. Dynamic cases execute in registration
-order.
+The description must be non-empty. A positive `timeout_seconds` overrides the
+enclosing suite or file value; zero inherits it. Dynamic cases execute in
+registration order.
 
 Convenience form:
 
 ```gdscript
-func test_only(description: String, callback: Callable) -> void
+func test_only(
+	description: String,
+	callback: Callable,
+) -> void
 ```
 
 ### 7.3 `test_each`
@@ -312,6 +353,7 @@ func test_each(
 	cases: Variant,
 	callback: Callable,
 	is_only: bool = false,
+	timeout_seconds: float = 0.0,
 ) -> void
 ```
 
@@ -487,6 +529,7 @@ name: String
 file: String
 line: int
 is_only: bool
+timeout_seconds: float
 ```
 
 `file` is a project-relative `res://` path. `line` is one-based or `-1` when
@@ -505,6 +548,7 @@ method_name: StringName
 parameters: Array[Variant]
 parameter_name: String
 is_only: bool
+timeout_seconds: float
 ```
 
 `method_name` is empty for a purely dynamic callback. `parameters` is empty for
@@ -929,6 +973,9 @@ An uncaught GDScript runtime error, failed built-in `assert`, or case timeout is
 an error outcome distinct from an assertion failure when the worker can
 attribute it to the active case. If attribution is impossible or the worker
 dies, the daemon reports an infrastructure error naming the last active case.
+The worker and host watchdog use the same effective hierarchical deadline. A
+timeout taints and retires that worker; later cases are not executed in a
+process that may still contain suspended or non-yielding user code.
 
 ### 14.6 Signal probes
 
@@ -1592,7 +1639,7 @@ Vest runtime internals.
 | Vest default-argument parameter provider | `<test>__cases` provider | Syntax-aware rewrite |
 | `assert_that` | Direct assertions or custom matcher (`expect_that`) | Rewrite simple chains; report others with a pointer to [docs/vest-migration.md](./docs/vest-migration.md) |
 | Lifecycle signals | Hooks | Report or rewrite only when unambiguous |
-| `Vest.timeout` | No v1 equivalent | Report |
+| `Vest.timeout` | Explicit wait timeout or hierarchical case deadline (section 5.4) | Report for manual conversion; do not translate mutable budget objects mechanically |
 | Runtime mocks (`mock`, `when`, `get_calls_of`) | Configured generated double (section 14.7) for the typed subset; otherwise hand-written | Report with a pointer to [docs/vest-migration.md](./docs/vest-migration.md); not converted mechanically |
 | Benchmarks | `GDTestBenchmark` plus `benchmark_*` methods | Report with the manual recipe in [docs/vest-migration.md](./docs/vest-migration.md); do not translate the builder DSL mechanically |
 | `capture_signal(member_signal, literal_count)` in a `test_` function, with reads only as `get_signal_emissions(...).size()`, an index into the result, or an emptiness check | `var probe := watch_signal(member_signal)` with reads rewritten to `probe.emission_count()`, `probe.arguments_at(...)`, or `probe.emissions()` | Syntax-aware rewrite when unambiguous |

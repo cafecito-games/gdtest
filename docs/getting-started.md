@@ -27,7 +27,7 @@ Run everything or select one stable provider row:
 ./addons/gdtest/gdtest run 'tests/math.test.gd::test_adds[small]'
 ```
 
-The default configuration discovers `**/*.test.gd` and `**/*.bench.gd`. Optional strict `gdtest.json` keys are `tests`, `benchmarks`, `exclude`, `godot`, `jobs`, `warm_workers`, `worker_idle_timeout`, `worker_max_runs`, and `only_mode`. Unknown keys fail. Focus policies are `auto`, `ignore`, `require`, and `forbid`, configurable in the file or per invocation with `--only`.
+The default configuration discovers `**/*.test.gd` and `**/*.bench.gd`. Optional strict `gdtest.json` keys are `tests`, `benchmarks`, `exclude`, `godot`, `jobs`, `warm_workers`, `worker_idle_timeout`, `worker_max_runs`, `case_timeout`, and `only_mode`. `case_timeout` is a positive Go duration such as `"30s"` or `"750ms"`; files, dynamic suites, and individual cases may override it as documented in `api-spec.md`. Unknown keys fail. Focus policies are `auto`, `ignore`, `require`, and `forbid`, configurable in the file or per invocation with `--only`.
 
 Create a separate `bench/math.bench.gd` for informational performance measurements:
 

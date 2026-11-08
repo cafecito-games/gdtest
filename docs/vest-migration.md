@@ -268,7 +268,14 @@ func benchmark_add_item() -> void:
 
 ### Vest.timeout
 
-Remove `Vest.timeout` and pass explicit `timeout_seconds` to `until` or `wait_until_count`. Otherwise rely on the runner's case timeout, which bounds every case including a wait with no explicit deadline.
+`Vest.timeout` budget objects are not converted mechanically. Replace a timeout
+used only by `until` or `wait_until_count` with those methods' explicit
+`timeout_seconds` argument. For an execution deadline, configure the project
+default with `gdtest.json.case_timeout`, override a file with
+`get_case_timeout()`, override a method test with
+`test_name__timeout()`, or pass the final `timeout_seconds` argument to
+`define`, `test`, or `test_each`. Dynamic-suite values are inherited by each
+descendant case; they are not a cumulative budget shared by the whole suite.
 
 ### Node cleanup and `autofree`
 

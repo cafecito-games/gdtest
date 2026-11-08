@@ -63,7 +63,7 @@ func TestRunRequestDecodesShardFieldsStrictly(t *testing.T) {
 		"project": "/project",
 		"godot": "godot",
 		"plan": {
-			"protocol_version": 4,
+			"protocol_version": 5,
 			"run_id": "shard-run",
 			"generation": 1,
 			"selection_applied": true,
@@ -85,7 +85,7 @@ func TestRunRequestDecodesShardFieldsStrictly(t *testing.T) {
 	assert.False(t, *request.Plan.HasFocus)
 
 	var strictRejects RunRequest
-	err := decodeStrict([]byte(`{"session_id":"s","project":"/p","godot":"g","plan":{"protocol_version":4,"run_id":"r","generation":1,"files":[]},"unknown_shard_field":true}`), &strictRejects)
+	err := decodeStrict([]byte(`{"session_id":"s","project":"/p","godot":"g","plan":{"protocol_version":5,"run_id":"r","generation":1,"files":[]},"unknown_shard_field":true}`), &strictRejects)
 	require.Error(t, err)
 }
 

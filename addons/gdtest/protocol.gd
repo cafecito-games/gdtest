@@ -511,16 +511,12 @@ static func run_finished(
 
 
 ## Serializes one case_started event payload.
-static func case_started(
-		case_id: String,
-		case_name: String,
-		path: String,
-		line: int
-) -> Dictionary[String, Variant]:
+static func case_started(info: GDTestCaseInfo, timeout_ns: int) -> Dictionary[String, Variant]:
 	return {
-		"test_id": case_id,
-		"name": case_name,
-		"location": { "file": path.trim_prefix("res://"), "line": line },
+		"test_id": info.id,
+		"name": info.name,
+		"location": { "file": info.file.trim_prefix("res://"), "line": info.line },
+		"metadata": { "timeout_ns": timeout_ns },
 	}
 
 
@@ -618,6 +614,7 @@ static func _discovery_case(
 						"file": suite.file.trim_prefix("res://"),
 						"line": suite.line,
 						"is_only": suite.is_only,
+						"timeout_ns": int(suite.timeout_seconds * 1000000000.0),
 					}
 			)
 	var case_line: int = case_plan.get("line", -1)
@@ -631,6 +628,7 @@ static func _discovery_case(
 		"parameters": parameters,
 		"parameter_name": str(case_plan.get("parameter_name", "")),
 		"is_only": case_is_only,
+		"timeout_ns": int(float(case_plan.get("timeout_seconds", 0.0)) * 1000000000.0),
 		"suites": suites,
 	}
 

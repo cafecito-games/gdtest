@@ -128,6 +128,11 @@ func inspectScript(relative string, source []byte, tree *ast.File, enforceContra
 				)
 			}
 		}
+		if function.Name == "get_case_timeout" {
+			if err := validateTimeoutProvider(cleanPath, function); enforceContracts && err != nil {
+				return parsedScript{}, err
+			}
+		}
 		if hookNames[function.Name] {
 			if err := validateHook(cleanPath, function); enforceContracts && err != nil {
 				return parsedScript{}, err
@@ -143,6 +148,12 @@ func inspectScript(relative string, source []byte, tree *ast.File, enforceContra
 			script.metadata.Providers = append(script.metadata.Providers, Provider{
 				Name: function.Name, TestMethod: logical, ReturnType: function.ReturnType, Location: location,
 			})
+			continue
+		}
+		if strings.HasSuffix(function.Name, "__timeout") {
+			if err := validateTimeoutProvider(cleanPath, function); enforceContracts && err != nil {
+				return parsedScript{}, err
+			}
 			continue
 		}
 		if !strings.HasPrefix(function.Name, "test_") {
@@ -282,6 +293,30 @@ func validateProvider(filename string, function *ast.FunctionDeclaration) error 
 	}
 	if async {
 		return fmt.Errorf("discover %s:%d:%d: provider %s must be synchronous", filename, location.Line, location.Column, function.Name)
+	}
+	return nil
+}
+
+func validateTimeoutProvider(filename string, function *ast.FunctionDeclaration) error {
+	location := function.NameSpan.Start
+	if len(function.Parameters) != 0 {
+		return fmt.Errorf("discover %s:%d:%d: timeout provider %s must take no arguments", filename, location.Line, location.Column, function.Name)
+	}
+	if function.ReturnType != "float" {
+		return fmt.Errorf("discover %s:%d:%d: timeout provider %s must return float, got %s", filename, location.Line, location.Column, function.Name, function.ReturnType)
+	}
+	async := false
+	for _, statement := range function.Body {
+		ast.Inspect(statement, func(node ast.Node) bool {
+			unary, ok := node.(*ast.UnaryExpression)
+			if ok && unary.Operator == "await" {
+				async = true
+			}
+			return true
+		})
+	}
+	if async {
+		return fmt.Errorf("discover %s:%d:%d: timeout provider %s must be synchronous", filename, location.Line, location.Column, function.Name)
 	}
 	return nil
 }

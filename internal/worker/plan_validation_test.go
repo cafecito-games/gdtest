@@ -46,7 +46,7 @@ func TestValidateWorkerPlanRejectsPreviousProtocolVersion(t *testing.T) {
 	plan.ProtocolVersion = model.ProtocolVersion - 1
 	err := validateWorkerPlan(plan)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "test plan protocol 3 does not match 4")
+	assert.Contains(t, err.Error(), "test plan protocol 4 does not match 5")
 }
 
 func TestValidateWorkerPlanRejectsInvalidPerFileCaseSubsets(t *testing.T) {

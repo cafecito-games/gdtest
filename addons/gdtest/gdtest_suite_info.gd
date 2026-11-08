@@ -27,16 +27,30 @@ var is_only: bool:
 	get:
 		return _is_only
 
+## Effective per-case timeout inherited by cases in this suite.
+var timeout_seconds: float:
+	get:
+		return _timeout_seconds
+
 var _id: String
 var _name: String
 var _file: String
 var _line: int
 var _is_only: bool
+var _timeout_seconds: float
 
 
-func _init(p_id: String, p_name: String, p_file: String, p_line: int, p_is_only: bool) -> void:
+func _init(
+		p_id: String,
+		p_name: String,
+		p_file: String,
+		p_line: int,
+		p_is_only: bool,
+		p_timeout_seconds: float = 0.0
+) -> void:
 	_id = p_id
 	_name = p_name
 	_file = p_file
 	_line = p_line
 	_is_only = p_is_only
+	_timeout_seconds = p_timeout_seconds
