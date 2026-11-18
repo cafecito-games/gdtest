@@ -1947,3 +1947,162 @@ func TestSessionServiceTaintedFileWorkerStillExecutesQueuedFiles(t *testing.T) {
 		"every queued file executes even when an earlier file taints its worker",
 	)
 }
+
+// Eviction needs TryLock on a candidate session, and runFiles holds entry.mu
+// for the whole run, so a session that is itself mid-run is never evictable.
+// An auxiliary lane is only ever an optimization, so asking for one must never
+// wait on a slot that only such a session could release.
+func TestSessionServiceAuxiliaryLaneNeverWaitsForABusySessionsSlot(t *testing.T) {
+	t.Parallel()
+
+	service := newSessionServiceWithCapacity(
+		func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+			return &fakeWorker{pid: 2, generation: options.Generation}, nil
+		}, 1)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	busy := &session{
+		id: "busy", project: "/busy", godot: "godot",
+		worker: &fakeWorker{pid: 1, generation: 1}, lastUsed: time.Now().UTC(),
+	}
+	service.sessions[busy.id] = busy
+	service.liveWorkers = 1
+	busy.mu.Lock() // what runFiles holds for the whole of a run
+	defer busy.mu.Unlock()
+
+	current := &session{id: "current", project: "/current", godot: "godot"}
+	service.sessions[current.id] = current
+
+	// Generous: the assertion is that this returns at all, not how fast.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	process, err := service.ensureFileWorker(ctx, current, &fileWorkerLane{}, 1, 0)
+
+	require.ErrorIs(t, err, errNoWorkerSlot, "err=%v process=%v", err, process)
+	assert.Nil(t, process)
+}
+
+// A run whose auxiliary lanes cannot be provisioned still has its primary, so
+// it must finish on that one lane rather than strand the files its unprovisioned
+// lanes were holding.
+func TestSessionServiceMultiFileRunFinishesOnItsPrimaryWhenNoSlotIsFree(t *testing.T) {
+	t.Parallel()
+
+	var created atomic.Int64
+	service := newSessionServiceWithCapacity(
+		func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+			return &fakeWorker{
+				pid: int(100 + created.Add(1)), generation: options.Generation,
+			}, nil
+		}, 2)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	// One slot of the budget of two belongs to a session that stays mid-run, so
+	// it can never be evicted. The run under test can take the other slot for
+	// its primary and nothing more.
+	busy := &session{
+		id: "busy", project: "/busy", godot: "godot",
+		worker: &fakeWorker{pid: 1, generation: 1}, lastUsed: time.Now().UTC(),
+	}
+	service.sessions[busy.id] = busy
+	service.liveWorkers = 1
+	busy.mu.Lock()
+	defer busy.mu.Unlock()
+
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "starved", Project: "/starved", Godot: "godot", Jobs: 4,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "starved", Generation: 1,
+			Files: []model.FilePlan{
+				{Path: "a.test.gd"}, {Path: "b.test.gd"},
+				{Path: "c.test.gd"}, {Path: "d.test.gd"},
+				{Path: "e.test.gd"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	executed := make(chan int, 1)
+	go func() {
+		files := 0
+		_, handleErr := service.Handle(context.Background(), daemon.Request{
+			ID: "starved-request", Method: "session.run", Payload: payload,
+		}, func(event any) error {
+			if modelEvent, ok := event.(model.Event); ok {
+				if modelEvent.Type == model.EventSuiteStarted {
+					files++
+				}
+			}
+			return nil
+		})
+		if handleErr != nil {
+			executed <- -1
+			return
+		}
+		executed <- files
+	}()
+
+	select {
+	case files := <-executed:
+		assert.GreaterOrEqual(t, files, 0)
+	case <-time.After(30 * time.Second):
+		require.FailNow(
+			t,
+			"the run never finished",
+			"a lane that cannot be provisioned must go back to the pool, not "+
+				"strand the file it was holding",
+		)
+	}
+	assert.LessOrEqual(
+		t, service.WorkerCount(), 2,
+		"the global worker budget is still the hard bound",
+	)
+}
+
+// The wait for a slot has no timer, so the signal that capacity may have
+// appeared must reach every waiter. A buffered channel with a non-blocking
+// send, which is what this replaced, wakes exactly one of them and leaves the
+// rest asleep.
+func TestSessionServiceWorkerAvailabilityWakesEveryWaiter(t *testing.T) {
+	t.Parallel()
+
+	service := newSessionServiceWithCapacity(
+		func(context.Context, worker.ProcessOptions) (managedWorker, error) {
+			return &fakeWorker{pid: 2, generation: 1}, nil
+		}, 1)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	busy := &session{
+		id: "busy", project: "/busy", godot: "godot",
+		worker: &fakeWorker{pid: 1, generation: 1}, lastUsed: time.Now().UTC(),
+	}
+	service.sessions[busy.id] = busy
+	service.liveWorkers = 1
+	busy.mu.Lock() // unevictable, so every attempt below parks
+	defer busy.mu.Unlock()
+
+	notifications := make([]<-chan struct{}, 0, 3)
+	for index := range 3 {
+		waiter := &session{
+			id: "waiter" + string(rune('a'+index)), project: "/waiter", godot: "godot",
+		}
+		service.sessions[waiter.id] = waiter
+		taken, notification := service.tryTakeWorkerSlot(waiter)
+		require.False(t, taken, "the budget is fully committed to an unevictable session")
+		require.NotNil(t, notification)
+		notifications = append(notifications, notification)
+	}
+
+	service.announceWorkerAvailability()
+
+	for index, notification := range notifications {
+		select {
+		case <-notification:
+		default:
+			require.FailNow(t, "a waiter was left asleep", "waiter %d", index)
+		}
+	}
+}

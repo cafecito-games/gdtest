@@ -711,6 +711,16 @@ bound, and LRU session eviction, age, memory, taint, reset failure, generation,
 isolation, and `worker_max_runs` policies retire pooled lanes exactly as they
 retire the primary. See ADR 0012.
 
+An auxiliary lane is an optimization, never a requirement, so a run must never
+wait for one. Only the primary worker may wait for a global slot: a run cannot
+proceed without it, and that wait is bounded because every other session
+becomes evictable when its own run ends. A lane beyond the primary takes a slot
+only if one is free or reclaimable at that moment, and otherwise leaves
+circulation, so the run proceeds with fewer lanes. Waiting for an auxiliary
+slot deadlocks the run that waits: eviction cannot reclaim from a session that
+is itself mid-run, and the waiting lane is holding a file that will therefore
+never execute.
+
 Do not claim perfect in-process isolation. Tests needing guaranteed clean
 process state must be schedulable with `fresh` or `exclusive` policy.
 
