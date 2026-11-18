@@ -149,7 +149,7 @@ type SessionService struct {
 	totalWorkerBytes uint64
 	memoryUsage      func(int) (uint64, error)
 	liveWorkers      int
-	workerFreed      chan struct{}
+	workerAvailable  chan struct{}
 	reapers          sync.WaitGroup
 	scheduler        *scheduler.Scheduler
 	sourceFactory    func(string) *sourcewatch.Reconciler
@@ -198,9 +198,9 @@ func newSessionServiceWithCapacity(factory workerFactory, capacity int) *Session
 	}
 	return &SessionService{
 		sessions: make(map[string]*session), factory: factory, maxWorkers: capacity,
-		maxWorkerAge: 30 * time.Minute,
-		memoryUsage:  worker.ResidentMemoryBytes,
-		workerFreed:  make(chan struct{}, 1), scheduler: globalScheduler,
+		maxWorkerAge:    30 * time.Minute,
+		memoryUsage:     worker.ResidentMemoryBytes,
+		workerAvailable: make(chan struct{}), scheduler: globalScheduler,
 		sourceFactory: sourcewatch.New,
 	}
 }
@@ -361,6 +361,10 @@ func (s *SessionService) runFiles(
 	emit daemon.EmitFunc,
 	submitted time.Time,
 ) (any, error) {
+	// Registered before the lock so it runs after the unlock: a session that
+	// has finished its run frees no slot, because it retains its worker, but it
+	// does become evictable — and nothing else would tell a waiter so.
+	defer s.announceWorkerAvailability()
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	latest, err := s.reconcileSource(ctx, entry, sourcewatch.Initial)
@@ -468,36 +472,50 @@ func (s *SessionService) runFiles(
 	for index, file := range request.Plan.Files {
 		index, file := index, file
 		go func() {
-			var lane *fileWorkerLane
-			select {
-			case lane = <-available:
-			case <-runCtx.Done():
-				results <- fileResult{index: index, err: runCtx.Err()}
-				return
-			}
 			fileRequest := request
 			fileRequest.Plan.Files = []model.FilePlan{file}
-			fileSubmitted := time.Now()
-			value, err := s.schedule(
-				runCtx, entry, request.Plan.Generation,
-				scheduler.Interactive, isolation,
-				func(fileCtx context.Context) (any, error) {
-					return s.runFileOnWorker(
-						fileCtx, entry, lane, fileRequest, safeEmit, promoteStatus, time.Since(fileSubmitted),
-					)
-				},
-			)
-			result := fileResult{index: index, err: err}
-			if values, ok := value.(map[string]any); ok {
-				result.pid, _ = values["worker_pid"].(int)
-				result.timings, _ = values["timings_ns"].(map[string]int64)
+			for {
+				var lane *fileWorkerLane
+				select {
+				case lane = <-available:
+				case <-runCtx.Done():
+					results <- fileResult{index: index, err: runCtx.Err()}
+					return
+				}
+				fileSubmitted := time.Now()
+				value, err := s.schedule(
+					runCtx, entry, request.Plan.Generation,
+					scheduler.Interactive, isolation,
+					func(fileCtx context.Context) (any, error) {
+						return s.runFileOnWorker(
+							fileCtx, entry, lane, fileRequest, safeEmit, promoteStatus, time.Since(fileSubmitted),
+						)
+					},
+				)
+				if errors.Is(err, errNoWorkerSlot) {
+					// This lane cannot be provisioned, so it leaves circulation
+					// for the rest of the run and this file draws another.
+					// Returning it to the pool would let the next draw pick it
+					// straight back up and spin. The primary always owns a
+					// worker and always returns to the pool, so at least one
+					// lane keeps circulating and every file is still served --
+					// the run just proceeds with less concurrency. The lane
+					// itself is still retired by the deferred cleanup below.
+					continue
+				}
+				result := fileResult{index: index, err: err}
+				if values, ok := value.(map[string]any); ok {
+					result.pid, _ = values["worker_pid"].(int)
+					result.timings, _ = values["timings_ns"].(map[string]int64)
+				}
+				if err != nil {
+					cancel()
+				} else {
+					available <- lane
+				}
+				results <- result
+				return
 			}
-			if err != nil {
-				cancel()
-			} else {
-				available <- lane
-			}
-			results <- result
 		}()
 	}
 	pids := make([]int, len(request.Plan.Files))
@@ -698,7 +716,11 @@ func (s *SessionService) ensureFileWorker(
 		}
 		return process, err
 	}
-	if err := s.reserveWorkerSlot(ctx, entry); err != nil {
+	// Never wait here. A lane beyond the primary only adds concurrency, and the
+	// slot it would wait for may be held by a session that is itself mid-run
+	// and therefore unevictable — in which case the wait never ends and the
+	// file this lane was holding never runs.
+	if err := s.tryReserveWorkerSlot(entry); err != nil {
 		return nil, err
 	}
 	factory := s.factory
@@ -909,6 +931,10 @@ func (s *SessionService) run(
 ) (any, error) {
 	started := time.Now()
 	timings := map[string]int64{"queue_wait": queueWait.Nanoseconds()}
+	// Registered before the lock so it runs after the unlock: a session that
+	// has finished its run frees no slot, because it retains its worker, but it
+	// does become evictable — and nothing else would tell a waiter so.
+	defer s.announceWorkerAvailability()
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	reconcileStarted := time.Now()
@@ -1298,19 +1324,60 @@ func (s *SessionService) reconcileSource(
 	return result, nil
 }
 
+// errNoWorkerSlot reports that the global worker budget is fully committed and
+// nothing can be reclaimed right now. Only an auxiliary lane sees it: a lane
+// beyond the primary is an optimization, and waiting for one is what used to
+// hang a run outright.
+var errNoWorkerSlot = errors.New("no global worker slot is available")
+
+// reserveWorkerSlot takes a global worker slot, waiting until one can be had.
+// Only the primary worker of a run may wait: a run cannot proceed without it,
+// and the wait is bounded by other sessions' runs ending, after which their
+// retained workers become evictable.
 func (s *SessionService) reserveWorkerSlot(ctx context.Context, current *session) error {
+	for {
+		taken, notification := s.tryTakeWorkerSlot(current)
+		if taken {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-notification:
+		}
+	}
+}
+
+// tryReserveWorkerSlot takes a global worker slot if one is free or reclaimable
+// right now, and otherwise reports errNoWorkerSlot without waiting.
+func (s *SessionService) tryReserveWorkerSlot(current *session) error {
+	if taken, _ := s.tryTakeWorkerSlot(current); taken {
+		return nil
+	}
+	return errNoWorkerSlot
+}
+
+// tryTakeWorkerSlot makes one attempt to claim a slot, evicting the least
+// recently used reclaimable session while the budget is full. It returns
+// whether a slot was claimed, plus the availability channel to wait on when it
+// was not.
+//
+// A session that is mid-run holds its entry.mu for the whole run, so TryLock
+// deliberately skips it: its workers are in use and must not be reclaimed.
+// That is why waiting here is only ever safe for the primary.
+func (s *SessionService) tryTakeWorkerSlot(current *session) (bool, <-chan struct{}) {
 	for {
 		s.mu.Lock()
 		if s.maxWorkers <= 0 {
 			s.maxWorkers = 4
 		}
-		if s.workerFreed == nil {
-			s.workerFreed = make(chan struct{}, 1)
+		if s.workerAvailable == nil {
+			s.workerAvailable = make(chan struct{})
 		}
 		if s.liveWorkers < s.maxWorkers {
 			s.liveWorkers++
 			s.mu.Unlock()
-			return nil
+			return true, nil
 		}
 		candidates := make([]*session, 0, len(s.sessions))
 		for _, candidate := range s.sessions {
@@ -1318,7 +1385,7 @@ func (s *SessionService) reserveWorkerSlot(ctx context.Context, current *session
 				candidates = append(candidates, candidate)
 			}
 		}
-		notification := s.workerFreed
+		notification := s.workerAvailable
 		s.mu.Unlock()
 		var oldest *session
 		for _, candidate := range candidates {
@@ -1338,17 +1405,11 @@ func (s *SessionService) reserveWorkerSlot(ctx context.Context, current *session
 				candidate.mu.Unlock()
 			}
 		}
-		if oldest != nil {
-			s.discardWorker(oldest)
-			oldest.mu.Unlock()
-			continue
+		if oldest == nil {
+			return false, notification
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-notification:
-		case <-time.After(10 * time.Millisecond):
-		}
+		s.discardWorker(oldest)
+		oldest.mu.Unlock()
 	}
 }
 
@@ -1480,15 +1541,28 @@ func (s *SessionService) releaseWorkerSlot() {
 	if s.liveWorkers > 0 {
 		s.liveWorkers--
 	}
-	if s.workerFreed == nil {
-		s.workerFreed = make(chan struct{}, 1)
-	}
-	notification := s.workerFreed
+	s.announceWorkerAvailabilityLocked()
 	s.mu.Unlock()
-	select {
-	case notification <- struct{}{}:
-	default:
+}
+
+// announceWorkerAvailabilityLocked wakes every waiter. Closing and replacing
+// the channel is what makes it a broadcast; a buffered channel wakes one waiter
+// and leaves the rest asleep until something else happens to signal, which is
+// why this used to need a polling timer. The caller must hold s.mu.
+func (s *SessionService) announceWorkerAvailabilityLocked() {
+	if s.workerAvailable != nil {
+		close(s.workerAvailable)
 	}
+	s.workerAvailable = make(chan struct{})
+}
+
+// announceWorkerAvailability reports that reclaimable capacity may have
+// appeared without any slot being released: a session that finishes its run
+// makes its retained workers evictable, and nothing else would wake a waiter.
+func (s *SessionService) announceWorkerAvailability() {
+	s.mu.Lock()
+	s.announceWorkerAvailabilityLocked()
+	s.mu.Unlock()
 }
 
 // WorkerCount returns the current global process count for diagnostics and tests.
