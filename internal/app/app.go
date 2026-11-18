@@ -650,17 +650,18 @@ func runTests(ctx context.Context, options runOptions, streams IO) int {
 		SelectionApplied: true, SelectedIDs: append([]string(nil), selected.ids...),
 		Files: discoveryManifest.Files,
 	}
-	var partitioned *partitionedPlan
-	if projectConfig.Partition != shard.ModeFile {
-		resolved := resolvePartition(
-			discoveryManifest.Files, selected.manifest.Files, plan.SelectedIDs,
-			projectConfig.OnlyMode, projectConfig.Partition, projectConfig.Jobs,
-		)
-		plan.Files = resolved.files
-		plan.SelectedIDs = resolved.selectedIDs
-		plan.HasFocus = resolved.hasFocus
-		partitioned = &resolved
-	}
+	// Focus and the only-mode policy are properties of the whole plan, and the
+	// plan is dispatched one file at a time. A worker given one file can only
+	// see the focus in that file, so both are resolved here, once, for every
+	// partition mode — file partitioning simply leaves the file entries alone.
+	resolved := resolvePartition(
+		discoveryManifest.Files, selected.manifest.Files, plan.SelectedIDs,
+		projectConfig.OnlyMode, projectConfig.Partition, projectConfig.Jobs,
+	)
+	plan.Files = resolved.files
+	plan.SelectedIDs = resolved.selectedIDs
+	plan.HasFocus = resolved.hasFocus
+	partitioned := &resolved
 	collector := results.NewCollectorWithOrder(plan.SelectedIDs)
 	session := reporting.newSession(streams.Out)
 	var sink executor.EventSink = executor.EventSinkFunc(func(event model.Event) error {
@@ -1126,25 +1127,19 @@ func executePlan(
 ) (map[string]time.Duration, error) {
 	started := time.Now()
 	if noDaemon {
-		timings := make(map[string]time.Duration)
-		workerStarted := time.Now()
-		process, err := worker.Start(ctx, worker.ProcessOptions{
-			Godot: godot, Project: root, SessionID: "foreground-" + newID(),
-			Generation: plan.Generation,
-		})
-		timings["worker_acquisition_startup"] = time.Since(workerStarted)
-		if err != nil {
-			return nil, err
-		}
-		mergeNanosecondTimings(timings, process.TakeStartupTimings())
-		executionStarted := time.Now()
-		runErr := process.Run(ctx, plan, sink)
-		timings["foreground_worker_execution"] = time.Since(executionStarted)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		shutdownErr := process.Shutdown(shutdownCtx)
-		cancel()
+		sessionName := "foreground-" + newID()
+		timings, err := runPlanInForeground(
+			ctx,
+			func(startCtx context.Context) (foregroundWorker, error) {
+				return worker.Start(startCtx, worker.ProcessOptions{
+					Godot: godot, Project: root, SessionID: sessionName,
+					Generation: plan.Generation,
+				})
+			},
+			plan, sink,
+		)
 		timings["foreground_total"] = time.Since(started)
-		return timings, errors.Join(runErr, shutdownErr)
+		return timings, err
 	}
 	daemonClient, err := compatibleClient(true)
 	if err != nil {

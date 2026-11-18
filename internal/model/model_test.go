@@ -212,3 +212,29 @@ func TestEventCaseWarningRoundTripsLeakMetadata(t *testing.T) {
 	assert.Equal(t, EventCaseWarning, decoded.Type)
 	assert.Equal(t, "leak", decoded.Assertion)
 }
+
+func TestPromoteRunStatusKeepsTheMostSevereOutcome(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		current   string
+		candidate string
+		expected  string
+	}{
+		{"pass", "pass", "pass"},
+		{"pass", "skip", "pass"},
+		{"pass", "canceled", "canceled"},
+		{"canceled", "fail", "fail"},
+		{"fail", "error", "error"},
+		{"error", "fail", "error"},
+		{"error", "pass", "error"},
+		{"pass", "", "pass"},
+		{"", "fail", "fail"},
+	} {
+		assert.Equal(
+			t, testCase.expected,
+			PromoteRunStatus(testCase.current, testCase.candidate),
+			"%q promoted by %q", testCase.current, testCase.candidate,
+		)
+	}
+}

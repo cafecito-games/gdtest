@@ -395,3 +395,86 @@ func TestCollectorFoldsUnattributedOutputWithoutCreatingEmptyCase(t *testing.T) 
 	require.Len(t, summary.Output, 1)
 	assert.Equal(t, "gdtest-output-marker", summary.Output[0].Message)
 }
+
+// A worker retired mid-file leaves its remaining cases without any terminal
+// event. The collector already knows the whole selection, so it is the one
+// place that can tell the difference between a case that passed and a case
+// that never ran.
+func TestCollectorReportsSelectedCasesThatNeverReachedATerminalStatus(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollectorWithOrder([]string{
+		"b::test_one", "b::test_two", "b::test_three", "a::test_only",
+	})
+	events := []model.Event{
+		{Type: model.EventRunStarted},
+		{Type: model.EventCaseStarted, TestID: "a::test_only"},
+		{Type: model.EventCaseFinished, TestID: "a::test_only", Status: "pass"},
+		{Type: model.EventCaseStarted, TestID: "b::test_one"},
+		{
+			Type: model.EventCaseFinished, TestID: "b::test_one", Status: "error",
+			Message: "case timed out after 30s",
+		},
+		{Type: model.EventWorkerTainted, TestID: "b::test_one"},
+		{Type: model.EventRunFinished, Status: "error"},
+	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+
+	summary := collector.Summary()
+
+	assert.Equal(t, []string{"b::test_two", "b::test_three"}, summary.NotExecuted)
+	assert.Equal(t, 4, summary.Selected)
+	assert.Equal(t, 2, summary.Executed)
+	assert.True(t, summary.HasFailures(), "an incomplete run can never be reported as a pass")
+}
+
+func TestCollectorReportsNoMissingCasesWhenTheWholeSelectionExecuted(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollectorWithOrder([]string{"a::test_one", "a::test_two"})
+	events := []model.Event{
+		{Type: model.EventRunStarted},
+		{Type: model.EventCaseStarted, TestID: "a::test_one"},
+		{Type: model.EventCaseFinished, TestID: "a::test_one", Status: "pass"},
+		{Type: model.EventCaseStarted, TestID: "a::test_two"},
+		{Type: model.EventCaseFinished, TestID: "a::test_two", Status: "skip"},
+		{Type: model.EventRunFinished, Status: "pass"},
+	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+
+	summary := collector.Summary()
+
+	assert.Empty(t, summary.NotExecuted)
+	assert.Equal(t, 2, summary.Selected)
+	assert.Equal(t, 2, summary.Executed)
+	assert.False(t, summary.HasFailures())
+}
+
+// A run that executed nothing at all already fails for its own reason — an
+// only-policy violation, a discovery error, a worker that never started.
+// Listing every selected case as missing on top of that would bury it.
+func TestCollectorDoesNotReportMissingCasesWhenNothingExecuted(t *testing.T) {
+	t.Parallel()
+
+	collector := NewCollectorWithOrder([]string{"a::test_one", "a::test_two"})
+	events := []model.Event{
+		{Type: model.EventRunStarted},
+		{
+			Type: model.EventWorkerError, Name: "worker.framework",
+			Message: "only mode forbids focused cases",
+		},
+		{Type: model.EventRunFinished, Status: "error"},
+	}
+	for _, event := range events {
+		require.NoError(t, collector.Emit(event))
+	}
+
+	summary := collector.Summary()
+
+	assert.Empty(t, summary.NotExecuted)
+	assert.Equal(t, 0, summary.Executed)
+}

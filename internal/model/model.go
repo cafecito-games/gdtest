@@ -265,3 +265,20 @@ type Event struct {
 	Generation      uint64         `json:"generation,omitempty"`
 	Stale           bool           `json:"stale,omitempty"`
 }
+
+// runStatusRank orders aggregate run statuses from least to most severe. A
+// skipped, todo, or void outcome never outranks a pass: strict-outcome policy
+// is the reporter's decision, not the executor's.
+var runStatusRank = map[string]int{
+	"pass": 0, "void": 0, "skip": 0, "todo": 0,
+	"canceled": 1, "fail": 2, "error": 3,
+}
+
+// PromoteRunStatus returns whichever of two aggregate statuses is more severe,
+// so a run folded from many files reports the worst outcome any of them saw.
+func PromoteRunStatus(current, candidate string) string {
+	if runStatusRank[candidate] > runStatusRank[current] {
+		return candidate
+	}
+	return current
+}

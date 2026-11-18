@@ -150,6 +150,9 @@ func (r *Terminal) Summary(summary results.Summary) error {
 	); err != nil {
 		return err
 	}
+	if err := r.writeMissingCases(summary); err != nil {
+		return err
+	}
 	if len(summary.PolicyFailures) == 0 {
 		return nil
 	}
@@ -159,6 +162,40 @@ func (r *Terminal) Summary(summary results.Summary) error {
 	}
 	_, err := fmt.Fprintf(r.writer, "strict policy failed: %s\n", strings.Join(violations, ", "))
 	return err
+}
+
+// missingCaseListLimit bounds how many unexecuted case IDs are named inline.
+// The count is always exact; the list is a pointer into the run, and a
+// thousand IDs would push the counts off the reader's screen.
+const missingCaseListLimit = 10
+
+// writeMissingCases states the executed count against the selected count
+// whenever a run did not execute everything it selected, and names the cases
+// it skipped. The counts alone cannot carry this: a truncated run and a small
+// suite print the same totals.
+func (r *Terminal) writeMissingCases(summary results.Summary) error {
+	if len(summary.NotExecuted) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintf(
+		r.writer,
+		"INCOMPLETE: executed %d of %d selected cases; %d cases did not run\n",
+		summary.Executed, summary.Selected, len(summary.NotExecuted),
+	); err != nil {
+		return err
+	}
+	for index, id := range summary.NotExecuted {
+		if index == missingCaseListLimit {
+			_, err := fmt.Fprintf(
+				r.writer, "  ... and %d more\n", len(summary.NotExecuted)-index,
+			)
+			return err
+		}
+		if _, err := fmt.Fprintf(r.writer, "  NOT RUN %s\n", id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Terminal) writeOutput(event model.Event) error {

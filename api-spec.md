@@ -974,8 +974,12 @@ an error outcome distinct from an assertion failure when the worker can
 attribute it to the active case. If attribution is impossible or the worker
 dies, the daemon reports an infrastructure error naming the last active case.
 The worker and host watchdog use the same effective hierarchical deadline. A
-timeout taints and retires that worker; later cases are not executed in a
-process that may still contain suspended or non-yielding user code.
+timeout taints and retires that worker; the remaining cases in that worker's
+current file are not executed, because the process may still contain suspended
+or non-yielding user code. The run itself continues: the files still queued
+behind the timeout execute on a replacement worker, and every selected case
+that no worker executed is reported as not executed, counted against the
+selection, and fails the run. A timeout can never silently shorten a run.
 
 ### 14.6 Signal probes
 

@@ -638,6 +638,14 @@ func (s *SessionService) runFileOnWorker(
 		return nil, err
 	}
 	timings["worker_execution_serialization"] = time.Since(executionStarted).Nanoseconds()
+	// A taint retires the worker, so there is nothing left to reset. The host
+	// watchdog kills a timed-out worker before reporting it, which makes every
+	// later command on that process fail; treating that failure as the file's
+	// error would cancel the run and strand the files still queued behind it.
+	if tainted {
+		s.retireFileWorker(entry, lane)
+		return map[string]any{"worker_pid": process.PID(), "timings_ns": timings}, nil
+	}
 	resetStarted := time.Now()
 	if err := process.Reset(ctx); err != nil {
 		s.retireFileWorker(entry, lane)
@@ -649,8 +657,7 @@ func (s *SessionService) runFileOnWorker(
 		entry.workerRuns++
 	}
 	memoryExceeded, memoryErr := s.recordFileWorkerMemory(entry, lane)
-	if tainted ||
-		(request.WorkerMaxRuns > 0 && lane.workerRuns >= uint64(request.WorkerMaxRuns)) ||
+	if (request.WorkerMaxRuns > 0 && lane.workerRuns >= uint64(request.WorkerMaxRuns)) ||
 		(s.memoryBudgetMB > 0 && (memoryErr != nil || memoryExceeded)) {
 		s.retireFileWorker(entry, lane)
 	}
