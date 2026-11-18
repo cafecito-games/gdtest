@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,10 +39,14 @@ type fakeWorker struct {
 	discoverHook   func(context.Context, model.TestPlan) (model.DiscoveryManifest, error)
 	resetErr       error
 	startupTime    map[string]int64
+	ranFiles       []string
 }
 
 func (f *fakeWorker) Run(ctx context.Context, plan model.TestPlan, sink executor.EventSink) error {
 	f.runs++
+	for _, file := range plan.Files {
+		f.ranFiles = append(f.ranFiles, file.Path)
+	}
 	if f.runContextHook != nil {
 		return f.runContextHook(ctx, plan, sink)
 	}
@@ -1863,4 +1868,82 @@ func TestSessionServiceMultiFileRunPromotesWorkerFrameworkErrorToRunFinishedStat
 	require.Len(t, workerErrors, 1)
 	assert.Equal(t, "worker.framework", workerErrors[0].Name)
 	assert.Equal(t, "error", runFinished.Status)
+}
+
+// A case timeout kills the worker and taints it, so the worker's own Reset can
+// only fail afterwards. Treating that failure as the file's error used to
+// cancel the run context, which dropped every file still queued behind it
+// without executing or reporting it.
+func TestSessionServiceTaintedFileWorkerStillExecutesQueuedFiles(t *testing.T) {
+	t.Parallel()
+
+	var processes []*fakeWorker
+	service := newSessionServiceWithCapacity(func(_ context.Context, options worker.ProcessOptions) (managedWorker, error) {
+		process := &fakeWorker{pid: 700 + len(processes), generation: options.Generation}
+		process.runHook = func(plan model.TestPlan, sink executor.EventSink) error {
+			if plan.Files[0].Path != "b.test.gd" {
+				return sink.Emit(model.Event{
+					ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished,
+					RunID: plan.RunID, Status: "pass",
+				})
+			}
+			if err := sink.Emit(model.Event{
+				ProtocolVersion: model.ProtocolVersion, Type: model.EventWorkerTainted,
+				RunID: plan.RunID, Message: "case timeout",
+				Metadata: map[string]any{"reason": "case_timeout"},
+			}); err != nil {
+				return err
+			}
+			// The host watchdog has already killed this process, so every later
+			// command on it fails.
+			process.resetErr = errors.New("worker is closed")
+			return sink.Emit(model.Event{
+				ProtocolVersion: model.ProtocolVersion, Type: model.EventRunFinished,
+				RunID: plan.RunID, Status: "error",
+			})
+		}
+		processes = append(processes, process)
+		return process, nil
+	}, 1)
+	service.sourceFactory = nil
+	t.Cleanup(func() { require.NoError(t, service.Close(context.Background())) })
+
+	executed := make(chan string, 8)
+	payload, err := json.Marshal(RunRequest{
+		SessionID: "tainted-queue", Project: "/project", Godot: "godot", Jobs: 1,
+		Plan: model.TestPlan{
+			ProtocolVersion: model.ProtocolVersion, RunID: "tainted-queue", Generation: 1,
+			Files: []model.FilePlan{
+				{Path: "a.test.gd"}, {Path: "b.test.gd"},
+				{Path: "c.test.gd"}, {Path: "d.test.gd"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	_, err = service.Handle(context.Background(), daemon.Request{
+		ID: "tainted-queue-request", Method: "session.run", Payload: payload,
+	}, func(event any) error {
+		if modelEvent, ok := event.(model.Event); ok && modelEvent.Type == model.EventWorkerTainted {
+			executed <- "tainted"
+		}
+		return nil
+	})
+	require.NoError(t, err, "a tainted worker is a worker-replacement policy, not a run failure")
+
+	runFiles := make([]string, 0, 4)
+	for _, process := range processes {
+		runFiles = append(runFiles, process.ranFiles...)
+		if slices.Contains(process.ranFiles, "b.test.gd") {
+			assert.Equal(
+				t, "b.test.gd", process.ranFiles[len(process.ranFiles)-1],
+				"a tainted worker is retired, so it never runs another file",
+			)
+		}
+	}
+	assert.ElementsMatch(
+		t,
+		[]string{"a.test.gd", "b.test.gd", "c.test.gd", "d.test.gd"},
+		runFiles,
+		"every queued file executes even when an earlier file taints its worker",
+	)
 }

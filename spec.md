@@ -225,7 +225,11 @@ file in a conventional Godot project.
 
 `gdtest run --no-daemon` must be available for hermetic integration tests,
 debugging, and constrained CI. It may still launch a Godot worker; it simply
-keeps orchestration in the foreground process.
+keeps orchestration in the foreground process. Foreground orchestration is
+serial rather than concurrent, but it applies the same per-file worker
+lifecycle policy as the daemon: a worker retired mid-run is replaced, and the
+files still queued behind it execute. A foreground run must never report a
+narrower result than a daemon run of the same plan would.
 
 ### 7.1 Daemon namespaces
 

@@ -377,3 +377,31 @@ func TestJUnitSanitizesDisallowedXMLControlBytesAndInvalidUTF8(t *testing.T) {
 	assert.Contains(t, decoded.Suites[0].TestCases[0].SystemOut, `xml<&>"'`)
 	assert.Contains(t, decoded.Suites[0].TestCases[0].SystemOut, "\uFFFD")
 }
+
+// The JUnit report is what a CI test reporter publishes. A run that lost a
+// worker mid-file must not publish its executed subset as a complete, clean
+// suite.
+func TestJUnitReportsSelectedCasesThatNeverRanAsErrors(t *testing.T) {
+	t.Parallel()
+
+	document, err := MarshalJUnit(results.Summary{
+		Cases: []results.CaseResult{
+			{ID: "tests/b.test.gd::test_one", Name: "One", Status: "pass", File: "tests/b.test.gd"},
+		},
+		Passed:   1,
+		Selected: 3,
+		Executed: 1,
+		NotExecuted: []string{
+			"tests/b.test.gd::test_two", "tests/c.test.gd::test_three",
+		},
+	})
+	require.NoError(t, err)
+
+	report := string(document)
+	assert.Contains(t, report, `errors="2"`)
+	assert.Contains(t, report, `tests="3"`)
+	assert.Contains(t, report, `type="not_executed"`)
+	assert.Contains(t, report, "test_two")
+	assert.Contains(t, report, "test_three")
+	assert.Contains(t, report, "tests/c.test.gd")
+}

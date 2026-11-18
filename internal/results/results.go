@@ -42,6 +42,9 @@ type Summary struct {
 	Void           int             `json:"void"`
 	Errored        int             `json:"errored"`
 	Canceled       int             `json:"canceled"`
+	Selected       int             `json:"selected"`
+	Executed       int             `json:"executed"`
+	NotExecuted    []string        `json:"not_executed,omitempty"`
 	Stale          bool            `json:"stale,omitempty"`
 	PolicyFailures []PolicyFailure `json:"policy_failures,omitempty"`
 }
@@ -224,6 +227,7 @@ func (c *Collector) Summary() Summary {
 		Stale:          c.stale,
 		Infrastructure: append([]model.Event(nil), c.infrastructure...),
 		Errored:        len(c.infrastructure) + len(c.errors),
+		Selected:       len(c.preferred),
 	}
 	for _, id := range ids {
 		result := *c.cases[id]
@@ -233,6 +237,9 @@ func (c *Collector) Summary() Summary {
 		result.Messages = append([]string(nil), result.Messages...)
 		result.Outcomes = append([]model.Outcome(nil), result.Outcomes...)
 		summary.Cases = append(summary.Cases, result)
+		if result.Status != "" {
+			summary.Executed++
+		}
 		switch result.Status {
 		case "pass":
 			summary.Passed++
@@ -259,7 +266,33 @@ func (c *Collector) Summary() Summary {
 	if c.runStatus == "canceled" && summary.Canceled == 0 {
 		summary.Canceled = 1
 	}
+	summary.NotExecuted = c.notExecuted(summary.Executed)
 	return summary
+}
+
+// notExecuted lists the selected cases that never reached a terminal status,
+// in selection order. A worker retired mid-file — after a case timeout, a
+// crash, or a reset failure — leaves exactly this residue, and without it a
+// truncated run reports the subset it managed to execute as if that were the
+// whole suite.
+//
+// A run that executed nothing is excluded: it already fails for its own
+// reason, which listing the entire selection would only bury.
+func (c *Collector) notExecuted(executed int) []string {
+	if len(c.preferred) == 0 || !c.ended || executed == 0 {
+		return nil
+	}
+	var missing []string
+	for id := range c.preferred {
+		if result, exists := c.cases[id]; exists && result.Status != "" {
+			continue
+		}
+		missing = append(missing, id)
+	}
+	sort.SliceStable(missing, func(i, j int) bool {
+		return c.preferred[missing[i]] < c.preferred[missing[j]]
+	})
+	return missing
 }
 
 // ApplyOutcomePolicy records enabled strict outcomes without changing their
@@ -277,10 +310,16 @@ func (s *Summary) ApplyOutcomePolicy(policy OutcomePolicy) {
 	}
 }
 
-// HasFailures reports whether the run has a failing case or enabled
-// strict-policy status. Infrastructure failures are reported separately.
+// HasFailures reports whether the run has a failing case, an enabled
+// strict-policy status, or a selected case that never executed. The last of
+// these is deliberately a failure rather than an infrastructure error: a run
+// that executed part of its selection must not be retried into a green
+// result, which is what an infrastructure status invites. Infrastructure
+// failures are reported separately.
 func (s Summary) HasFailures() bool {
-	return s.Failed+s.Errored > 0 || len(s.PolicyFailures) > 0
+	return s.Failed+s.Errored > 0 ||
+		len(s.PolicyFailures) > 0 ||
+		len(s.NotExecuted) > 0
 }
 
 // HasInfrastructureFailure reports whether discovery, protocol, or worker

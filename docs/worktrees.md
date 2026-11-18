@@ -15,6 +15,8 @@ wait
 
 The user daemon applies one global fair worker bound across every project and agent. Interactive work is not indefinitely starved by warmup/background requests. Idle or deleted-worktree sessions are reclaimed without terminating workers owned by another worktree.
 
+That bound is global on purpose, and it is the thing to raise before reaching for a workaround. Several worktrees each running a *full* suite contend for the same `max_workers` workers, so each run takes proportionally longer while they overlap — correct scheduling, but easy to mistake for a stall. Raise `max_workers` in the user configuration (see [getting started](getting-started.md)) to trade memory for concurrency, and run `gdtest daemon sessions` to see which worktrees currently own workers.
+
 Static analysis caches are shared only by path-neutral content identity. Dynamic manifests include tool, runtime, Godot, configuration, and content identities; absolute worktree paths never enter stable test IDs or reusable keys. A source change advances the session generation. Results that complete against an obsolete generation are marked stale and should not be treated as current.
 
 Use `gdtest daemon sessions` to inspect worker ownership and generations. `gdtest daemon stop` stops only the compatible build namespace. Different development builds intentionally use different daemon namespaces.

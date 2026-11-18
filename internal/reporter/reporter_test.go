@@ -93,6 +93,8 @@ func TestJSONLSummaryIncludesStrictOutcomePolicyFailures(t *testing.T) {
 			"void": 2,
 			"errored": 0,
 			"canceled": 0,
+			"selected": 0,
+			"executed": 0,
 			"policy_failures": [{"status": "void", "count": 2}]
 		}
 	}`, output.String())
@@ -166,7 +168,9 @@ func TestJSONLSummaryIncludesFrameworkErrors(t *testing.T) {
 			"todo": 0,
 			"void": 0,
 			"errored": 1,
-			"canceled": 0
+			"canceled": 0,
+			"selected": 0,
+			"executed": 0
 		}
 	}`, output.String())
 }
@@ -371,4 +375,42 @@ func TestJSONLStreamsCaseWarningAndLeakFailureMetadata(t *testing.T) {
 			"omitted": 1
 		}
 	}`, output.String())
+}
+
+// A run that lost a worker mid-file must say so in the place a reader actually
+// looks. Counts alone cannot: "4 passed, 1 errors" reads identically whether
+// the suite had five cases or five hundred.
+func TestTerminalSummaryNamesTheSelectedCasesThatNeverRan(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewTerminal(&output)
+
+	require.NoError(t, reporter.Summary(results.Summary{
+		Passed: 4, Errored: 1, Selected: 8, Executed: 5,
+		NotExecuted: []string{
+			"b.test.gd::test_three", "b.test.gd::test_four", "b.test.gd::test_five",
+		},
+	}))
+
+	text := output.String()
+	assert.Contains(t, text, "4 passed, 0 failed, 1 errors")
+	assert.Contains(t, text, "executed 5 of 8 selected cases")
+	assert.Contains(t, text, "3 cases did not run")
+	assert.Contains(t, text, "b.test.gd::test_three")
+	assert.Contains(t, text, "b.test.gd::test_five")
+}
+
+func TestTerminalSummaryOmitsTheCaseAccountingWhenTheRunWasComplete(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	reporter := NewTerminal(&output)
+
+	require.NoError(t, reporter.Summary(results.Summary{Passed: 8, Selected: 8, Executed: 8}))
+
+	assert.Equal(
+		t, "8 passed, 0 failed, 0 errors, 0 skipped, 0 todo, 0 void, 0 canceled\n",
+		output.String(),
+	)
 }

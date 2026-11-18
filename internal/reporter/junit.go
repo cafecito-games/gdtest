@@ -178,6 +178,20 @@ func buildJUnitDocument(summary results.Summary) junitTestSuites {
 		accumulator.cases = append(accumulator.cases, testCase)
 	}
 
+	// A selected case with no terminal event is published as an error under
+	// its own file, so a reporter reading this document sees the whole
+	// selection rather than the subset the run managed to execute.
+	for _, id := range summary.NotExecuted {
+		placeholder := results.CaseResult{ID: id}
+		suiteFile := resolveCaseSuiteFile(placeholder)
+		accumulator := ensureSuite(suiteFile)
+		accumulator.cases = append(
+			accumulator.cases,
+			buildNotExecutedCase(placeholder, accumulator.name, suiteFile),
+		)
+		totalErrors++
+	}
+
 	for _, event := range sortedEvents(summary.Failures) {
 		suiteFile := cleanRelativeFile(locationFile(event.Location))
 		accumulator := ensureSuite(suiteFile)
@@ -485,6 +499,27 @@ func buildCaseSkipped(caseResult results.CaseResult) *junitSkipped {
 	return &junitSkipped{
 		Type:    sanitizeXMLString(caseResult.Status),
 		Message: sanitizeXMLString(message),
+	}
+}
+
+func buildNotExecutedCase(
+	placeholder results.CaseResult,
+	suiteName string,
+	suiteFile string,
+) junitTestCase {
+	message := sanitizeXMLString(
+		"case was selected but never executed; its worker was retired mid-run",
+	)
+	return junitTestCase{
+		Name:      sanitizeXMLString(resolveCaseDisplayName(placeholder)),
+		Classname: suiteName,
+		File:      suiteFile,
+		Time:      formatSeconds(0),
+		Error: &junitError{
+			Type:    "not_executed",
+			Message: message,
+			Body:    message,
+		},
 	}
 }
 
